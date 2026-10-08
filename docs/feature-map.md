@@ -8,8 +8,8 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 |---|---|
 | Discord library | `serenity` + `poise` (poise handles slash commands, serenity handles raw events) |
 | AI provider | OpenAI first, behind a provider trait. Claude next, through the plain Messages API (not the Agent SDK), then maybe Gemini |
-| Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, named after it (`reminders`, `reminder_images`, `wheel_*`, `chat_turns`), and its own migrations, recorded in a shared `schema_migrations` table. Core tables shared by all features: `user_settings`, `legacy_imports` |
-| Config | `.env` for secrets and settings, including the admin user IDs that Go hardcodes |
+| Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` behind `tokio-rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, named after it (`reminders`, `reminder_images`, `wheel_*`, `chat_turns`), and its own migrations, recorded in a shared `schema_migrations` table. Core tables shared by all features: `user_settings`, `legacy_imports` |
+| Config | `.env` for secrets, `config.toml` for everything else (admin IDs, per-feature settings and guild/channel gating that Go hardcodes) |
 | Async runtime | `tokio` (serenity already uses it) |
 
 ## Scope
@@ -23,49 +23,127 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 | Image and video generation (`/draw`, `/video`, Wavespeed) | `apis/wavespeed/` | Dropped |
 | Long-term memory (notes, profiles, vector search, digest, admin commands) | `memory/`, `memory_*` commands | Dropped (see "Future memory" below) |
 
-## How features plug in
+## Architecture
 
-The Go bot has one big `HandleMessage` function that does hashing, memory capture, reminders and chat in sequence. VoltBot splits that up: each feature is a separate module that says which events it wants, with a guard that decides whether it should run.
+The Go bot has one big `HandleMessage` function that does hashing, memory capture, reminders and chat in sequence, and chat has to know about reminders to stay out of their way. VoltBot is built so that adding a feature means adding one folder and one line, without editing any other feature.
 
-The idea in plain terms:
+### Rules
+
+1. **Features never import each other.** A feature may use `core`, `ai` and `util`, nothing else. Features talk to each other in two ways only: chat tools (a feature offers a tool, chat calls it) and bot events (a feature publishes an event, others may listen).
+2. **A feature declares everything it adds in one place**: commands, mention prefixes, component handlers, chat tools, migrations, background tasks and its `old.db` import. The dispatcher reads those declarations; nothing is registered by hand elsewhere.
+3. **Logic, storage and Discord are separate files.** Pure logic (the wheel ledger, the reminder parser, the message splitter) takes plain values and returns plain values, so it is tested without Discord or a database. SQL lives in `store.rs` and is tested against an in-memory SQLite. Discord code only translates events into calls to those two.
+
+### The `Feature` trait
 
 ```rust
-// Every feature implements this. Default methods do nothing,
-// so a feature only overrides the events it cares about.
 #[async_trait]
-trait Feature: Send + Sync {
+pub trait Feature: Send + Sync {
+    /// Also the config section, the custom ID prefix and the log label.
     fn name(&self) -> &'static str;
 
+    // Declarations, read once at startup.
+    fn commands(&self) -> Vec<poise::Command<Data, Error>> { vec![] }
+    fn migrations(&self) -> Vec<Migration> { vec![] }
+    fn mention_prefixes(&self) -> &'static [&'static str] { &[] }
+    fn tools(&self) -> Vec<ToolDef> { vec![] }
+
+    // Lifecycle.
+    async fn start(&self, ctx: &BotCtx) -> Result<()> { Ok(()) }   // background tasks
+    async fn import_legacy(&self, ctx: &BotCtx, old: &OldDb) -> Result<usize> { Ok(0) }
+
+    // Events. Every method has an empty default, so a feature only writes the ones it uses.
+    async fn on_mention(&self, ctx: &BotCtx, msg: &Message, rest: &str) -> Result<()> { Ok(()) }
     async fn on_message(&self, ctx: &BotCtx, msg: &Message) -> Result<()> { Ok(()) }
     async fn on_reaction_add(&self, ctx: &BotCtx, r: &Reaction) -> Result<()> { Ok(()) }
-    async fn on_component(&self, ctx: &BotCtx, i: &ComponentInteraction) -> Result<()> { Ok(()) }
-    async fn on_modal(&self, ctx: &BotCtx, i: &ModalInteraction) -> Result<()> { Ok(()) }
-    async fn on_ready(&self, ctx: &BotCtx) -> Result<()> { Ok(()) }
-
-    // Tools this feature offers to the chat model (see "Chat tools").
-    fn tools(&self) -> Vec<ToolDef> { Vec::new() }
+    async fn on_component(&self, ctx: &BotCtx, i: &ComponentInteraction, id: &str) -> Result<()> { Ok(()) }
+    async fn on_modal(&self, ctx: &BotCtx, i: &ModalInteraction, id: &str) -> Result<()> { Ok(()) }
+    async fn on_bot_event(&self, ctx: &BotCtx, event: &BotEvent) -> Result<()> { Ok(()) }
     async fn call_tool(&self, ctx: &ToolCtx, name: &str, args: serde_json::Value) -> Result<String> {
         Err(anyhow!("unknown tool {name}"))
     }
 }
 ```
 
-Guards are small reusable functions (`is_from_bot`, `mentions_bot`, `is_reply_to_bot`, `reaction_on_bot_message`, `is_admin`) that a feature calls at the top of its handler. A central dispatcher receives each serenity event and hands it to every registered feature, so adding a feature means writing one module and adding one line to the feature list. Slash commands stay in poise, which already does registration and argument parsing for us.
+The whole bot is the list in `features/mod.rs`:
 
-Component and modal custom IDs keep the Go convention: `<feature_key>-<state>-<state>`, and the dispatcher routes on the part before the first `-`.
+```rust
+pub fn all() -> Vec<Arc<dyn Feature>> {
+    vec![
+        Arc::new(reminders::Reminders::default()),
+        Arc::new(wheel::Wheel::default()),
+        Arc::new(chat::Chat::default()),  // last: answers mentions nobody else claimed
+    ]
+}
+```
 
-The exact shape of this gets settled in stage 1, with the smallest feature that proves it works.
+### How the dispatcher routes events
 
-## Events used
-
-| Event | Who listens |
+| Event | Routing |
 |---|---|
-| Message created | Chat (mentions the bot), Reminders (mentions the bot and starts with "remind") |
-| Reaction added | Chat (❌ stops and 🔁 regenerates a reply; guard = reaction is on a bot reply and from the person who asked) |
-| Slash command | Reminders (`/reminders`, `/timezone`), Movie wheel (4 commands) |
-| Button / select menu | Reminders (delete menu, snooze buttons), Movie wheel (5 components) |
-| Modal submit | Movie wheel (bet amount) |
-| Ready | Core: run migrations and the `old.db` import. Reminders: start the scheduler. All: log counts |
+| Message that @-mentions the bot | The mention is stripped. The first feature whose `mention_prefixes` match the start of the text gets `on_mention` (Reminders claims `remind me`, `reminder`, `remind`). If none match, Chat gets it. Chat never needs to know reminders exist. |
+| Any other message | `on_message` for every enabled feature. For observers like a future image hasher. |
+| Reaction added | `on_reaction_add` for every enabled feature; each checks its own guard (Chat: reaction on its own reply, from the person who asked). |
+| Button, select menu, modal | Custom IDs are `<feature name>:<action>:<args>`. The dispatcher strips the feature name and calls only that feature. Each feature parses the rest into its own action enum, so a typo is a compile error, not a silent no-op. |
+| Slash command | poise, from the commands each feature declared. |
+| `BotEvent` | Published by features through `ctx.events` (a `tokio::sync::broadcast` channel), delivered to every feature's `on_bot_event`. Starts small, for example `ReminderFired` and `WheelRoundResolved`. |
+
+Every handler runs in its own tokio task, so a slow or failing feature never blocks the others, and a panic is logged instead of crashing the bot (the Go bot has no panic recovery). Errors are logged with the feature name; an error type that marks a message as safe to show is sent back to the user, anything else becomes a generic "something went wrong".
+
+**Gating is config, not code.** Go hardcodes `MainServer` and a channel blacklist inside the handlers. VoltBot gives every feature an `enabled` flag and optional guild and channel allow/deny lists in its config section, and the dispatcher checks them before calling the feature:
+
+```toml
+[features.chat]
+enabled = true
+
+[features.wheel]
+guilds = [122962330165313536]            # only on the main server
+
+[features.image_hashing]                 # later
+guilds = [122962330165313536]
+deny_channels = [850179179281776670]
+```
+
+Secrets stay in `.env`; everything else goes in `config.toml`, and each feature reads its own `[features.<name>]` section into its own `serde` struct.
+
+### Shared services on `BotCtx`
+
+Features get everything shared through one context value: the serenity HTTP client and cache, `db`, `config`, `settings` (per-user values like the timezone), `ai`, `events`, and a shutdown `CancellationToken` that background tasks watch.
+
+- **`db`** wraps `tokio-rusqlite`: plain `rusqlite` SQL, run on a dedicated thread through `db.call(|conn| ...)`, so the async code never blocks and a connection is never held across an `.await`.
+- **`ai`** holds the provider registry. The provider trait lives in `ai`, not inside the chat feature, so any feature can make a one-off model call (a summary, a classification) through the same OpenAI or Claude setup.
+
+### Folder layout
+
+```
+src/
+  main.rs                 # load config, open db, build features, start serenity + poise
+  core/                   # ctx, dispatcher, guards, config, db, events, custom_id, errors
+  ai/                     # provider trait, Turn types, openai.rs, claude.rs
+  util/                   # message splitting, media download and conversion, text extraction
+  features/
+    mod.rs                # the feature list
+    reminders/
+      mod.rs              # impl Feature: wiring only
+      parse.rs            # winnow grammar (pure)
+      store.rs            # SQL
+      commands.rs         # /reminders, /timezone
+      ui.rs               # embeds, buttons, menus
+      tools.rs            # create/list/cancel_reminder
+      import.rs           # from old.db
+    wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, tools.rs, import.rs
+    chat/                 # mod.rs, history.rs, stream.rs, tools.rs
+```
+
+Plain modules in one crate. A Cargo workspace with a crate per feature would let the compiler enforce rule 1, but it adds build setup that isn't worth it yet.
+
+### Adding a feature
+
+1. Create `src/features/<name>/` with a struct that implements `Feature`.
+2. Fill in only the methods it needs: commands, mention prefixes, events, tools, migrations.
+3. Add one line to `features::all()`.
+4. Add a `[features.<name>]` section to `config.toml` if it needs settings.
+
+Nothing else changes. A future skill-based memory, for example, is a feature that declares its tables and offers chat tools such as `remember` and `recall`.
 
 ## Feature details
 
@@ -84,7 +162,7 @@ Progress feedback: Go adds a ⏳ reaction while the model works and swaps it for
 
 When an answer spans several messages, only the last one carries the line. This also saves two reaction API calls per message part.
 
-Events and guards: message created, guard = not from a bot, mentions the bot, not a reminder trigger.
+Events and guards: `on_mention` as the fallback for mentions no other feature claimed (bot authors are filtered out by the dispatcher); `on_reaction_add` for ❌/🔁.
 
 Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, and returning generated files. Those go behind a trait (see "AI providers" below). Discord streaming, message splitting, media extraction, the tool loop and the bot's own tools stay outside it so every provider reuses them.
 
@@ -187,7 +265,7 @@ Every user message the bot answers and every bot reply gets a row. `content_json
 
 What it does: `@Vivy remind me in 2h30m do the thing` or `@Vivy remind me at 16:30 CET do the thing` stores a reminder (with any attached images) and pings the user in the same channel when it is due. `/reminders` lists your pending reminders with a select menu to delete one.
 
-Events and guards: message created (guard = mentions the bot and text starts with `remind me`, `reminder` or `remind`), slash commands `/reminders` and `/timezone`, select menu `reminder`, snooze buttons, ready (start the scheduler).
+Events and guards: `on_mention` through the mention prefixes `remind me`, `reminder` and `remind`; slash commands `/reminders` and `/timezone`; the delete menu and snooze buttons (`reminders:` custom IDs); `start` runs the scheduler; publishes `BotEvent::ReminderFired`.
 
 Parsing: a real grammar written with the `winnow` parser-combinator crate, replacing the Go regex and prefix checks. Small parsers (`number`, `unit`, `duration`, `clock_time`, `date`, `weekday`, `timezone`) combine into one `when` parser, each with its own unit tests. When parsing fails, the error says which word it got stuck on. Supported forms:
 
@@ -214,7 +292,7 @@ Likely crates: `winnow`, `chrono`, `chrono-tz`.
 What it does: a betting game for movie night. Admins add options to the wheel, players claim 100 per round, bet on which option wins, and admins set the winner. Players who bet under 10% of their money get taxed. A status embed shows the round with buttons for claim, bet and winner.
 
 Commands: `/wheel_status`, `/wheel_add` (admin), `/insert_bet` (admin), `/reset_wheel` (admin).
-Components: `button_currentround`, `button_claim`, `button_bet`, `button_winner`, `menu_bet` (place, remove, winner). Modal: `modal_bet` (amount).
+Components: `button_currentround`, `button_claim`, `button_bet`, `button_winner`, `menu_bet` (place, remove, winner). Modal: `modal_bet` (amount). In VoltBot these become actions of one `wheel:` custom ID enum (`wheel:claim:<round>`, `wheel:bet:<round>`, and so on).
 
 Events and guards: slash commands, buttons, select menus, modal submit; admin guard on the admin actions.
 
@@ -257,7 +335,7 @@ Ideas for later, not part of the port: a `/wheel_spin` command that picks the wi
 
 | Stage | Work | Why this order |
 |---|---|---|
-| 1 | Skeleton: config from `.env`, SQLite and migrations, the `old.db` importer, poise setup, the feature dispatcher and guards, plus Reminders (parser, scheduler, timezone, snooze, import) | Reminders touch every event type (message, slash command, buttons, select menu, ready, timers), so they prove the skeleton |
+| 1 | Core: config (`.env` + `config.toml`), `BotCtx`, SQLite and migrations, the `old.db` importer, poise setup, the dispatcher (mention routing, custom ID routing, gating, error reporting), bot events, plus Reminders (parser, scheduler, timezone, snooze, import) | Reminders touch every event type (message, slash command, buttons, select menu, ready, timers), so they prove the skeleton |
 | 2 | Shared helpers: message splitting, sending and editing, media extraction, downloads | Chat needs them and they are easy to test on their own |
 | 3 | AI chat behind the provider trait, OpenAI implementation, tool loop and chat tools, reaction controls | The main feature; builds on stages 1 and 2, and reminder tools reuse the stage 1 parser |
 | 4 | Movie wheel (ledger, tables, import), plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
