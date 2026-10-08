@@ -46,6 +46,7 @@ pub trait Feature: Send + Sync {
     fn migrations(&self) -> Vec<Migration> { vec![] }
     fn mention_prefixes(&self) -> &'static [&'static str] { &[] }
     fn tools(&self) -> Vec<ToolDef> { vec![] }
+    async fn stats(&self, ctx: &BotCtx) -> Vec<Stat> { vec![] }  // shown on the control panel
 
     // Lifecycle.
     async fn start(&self, ctx: &BotCtx) -> Result<()> { Ok(()) }   // background tasks
@@ -71,6 +72,7 @@ pub fn all() -> Vec<Arc<dyn Feature>> {
     vec![
         Arc::new(reminders::Reminders::default()),
         Arc::new(wheel::Wheel::default()),
+        Arc::new(control_panel::ControlPanel::default()),
         Arc::new(chat::Chat::default()),  // last: answers mentions nobody else claimed
     ]
 }
@@ -109,9 +111,9 @@ Secrets stay in `.env`; everything else goes in `config.toml`, and each feature 
 
 - **`tracing` everywhere.** The dispatcher opens a span for every event with the feature name, guild, channel, user and interaction or message ID, so every log line inside a handler carries that context without passing it around. `tracing-subscriber` writes readable lines in development and JSON in production, with the level set by `RUST_LOG` (for example `RUST_LOG=info,voltbot::features::chat=debug`).
 - **Errors keep their cause.** Handlers return `anyhow::Result`, and errors get `.context("what we were doing")` where they happen. The dispatcher logs the whole chain once, at `error` level, with the span's context. A panic hook logs panics the same way.
-- **Error alerts in Discord.** A small `tracing` layer forwards `error` events to an admin channel (set in `config.toml`), rate limited and grouped so one broken feature doesn't flood it. The message includes the feature, the error chain and a link to the triggering message.
+- **Logs in Discord.** A small `tracing` layer forwards log events to the control panel's log channel (see "Control panel" below), rate limited and grouped so one broken feature doesn't flood it. An error message includes the feature, the error chain and a link to the triggering message.
 - **Optional: Sentry.** The `sentry` crate with its `tracing` integration groups errors, counts them, and keeps the breadcrumbs that led up to each one. It turns on when `SENTRY_DSN` is set; GlitchTip is a self-hostable server that speaks the same protocol.
-- **Running it.** The bot logs to stdout and doesn't care what starts it. A systemd unit (`Restart=on-failure`, logs in `journalctl -u voltbot`) or a Docker container with a log driver both work, and so does the current pmon3 setup.
+- **Running it.** A systemd service (`deploy/voltbot.service`): it restarts the bot on a crash and keeps the full logs in the journal (`journalctl -u voltbot -f`). Setup steps are in the README.
 
 ### Shared services on `BotCtx`
 
@@ -339,11 +341,44 @@ Changes in the port:
 
 Ideas for later, not part of the port: a `/wheel_spin` command that picks the winner randomly with an animated embed, and a per-player balance history.
 
+### 4. Control panel
+
+What it does: gives admins two channels to watch the bot without logging in to the server.
+
+**Log channel.** The `tracing` layer posts log events here:
+
+- `warn` and `error` always, with the feature, the error chain, and a link to the message that triggered it
+- lifecycle lines at `info`: 🟢 started (version, git commit, features loaded, `old.db` import results), 🔴 shutting down, 🔌 gateway reconnected
+- the minimum level is configurable, and a burst of the same error is grouped into one message with a count ("×12 in the last minute") instead of one post each
+
+**Status channel.** One message that the bot keeps editing every 60 seconds (well inside Discord's rate limits). Its ID is saved in the database, so after a restart the bot edits the same message instead of posting a new one. It shows:
+
+- 🟢 Online, uptime, version and git commit, gateway latency, server count
+- memory use, database size, errors in the last hour and the last 24 hours, and when the last error happened
+- one block per feature from its `stats()`: for example, pending reminders and the next one due; chat requests today, tokens used and prompt cache hit rate; the current wheel round and its bet count
+- "Updated <t:…:R>" at the bottom. Discord renders that as "12 seconds ago" and keeps counting on its own, so a crashed bot is obvious even though it can't edit the message any more. On a clean shutdown the bot changes the header to 🔴 Offline before it exits.
+
+Config:
+
+```toml
+[features.control_panel]
+log_channel = 123456789012345678
+status_channel = 123456789012345678
+log_level = "warn"            # lifecycle lines are always posted
+status_interval_secs = 60
+```
+
+Events: `start` runs the refresh loop; `on_bot_event` listens for lifecycle events from the core. The log layer is part of the core logging setup and only needs the channel ID, so errors from startup, before any feature runs, still reach Discord.
+
+Storage: `control_panel_state` (key, value) for the status message ID. Chat records each request's token usage, including cached input tokens, in `chat_usage`, which is where the cache hit rate comes from.
+
+Likely crates: `sysinfo` (memory use), `vergen` or a small `build.rs` (git commit in the binary).
+
 ## Port order
 
 | Stage | Work | Why this order |
 |---|---|---|
-| 1 | Core: config (`.env` + `config.toml`), `BotCtx`, SQLite and migrations, the `old.db` importer, poise setup, the dispatcher (mention routing, custom ID routing, gating, error reporting), bot events, plus Reminders (parser, scheduler, timezone, snooze, import) | Reminders touch every event type (message, slash command, buttons, select menu, ready, timers), so they prove the skeleton |
+| 1 | Core: config (`.env` + `config.toml`), `BotCtx`, SQLite and migrations, the `old.db` importer, poise setup, the dispatcher (mention routing, custom ID routing, gating, error reporting), bot events, plus the control panel (log and status channels) and Reminders (parser, scheduler, timezone, snooze, import) | Reminders touch every event type (message, slash command, buttons, select menu, ready, timers), so they prove the skeleton |
 | 2 | Shared helpers: message splitting, sending and editing, media extraction, downloads | Chat needs them and they are easy to test on their own |
 | 3 | AI chat behind the provider trait, OpenAI implementation, tool loop and chat tools, reaction controls | The main feature; builds on stages 1 and 2, and reminder tools reuse the stage 1 parser |
 | 4 | Movie wheel (ledger, tables, import), plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |

@@ -1,0 +1,26 @@
+[Unit]
+Description=VoltBot Discord bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=voltbot
+Group=voltbot
+WorkingDirectory=/opt/voltbot
+ExecStart=/opt/voltbot/voltbot
+Environment=RUST_LOG=info
+Restart=on-failure
+RestartSec=5
+# Give the bot time to mark the status message offline on shutdown.
+TimeoutStopSec=20
+
+# Hardening: the bot only needs to write inside its own folder.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/voltbot
+
+[Install]
+WantedBy=multi-user.target
