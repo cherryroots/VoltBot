@@ -16,7 +16,9 @@ VoltBot is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://g
 
 ## Status
 
-Planning. See `docs/feature-map.md` for the features being ported and the order. The setup steps below describe how the bot will run once stage 1 lands.
+Stage 1 of 4: the core (config, database, event dispatcher, logging), the control panel and reminders. Chat and the movie wheel come next. See `docs/feature-map.md` for the plan and the order.
+
+Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorrow at 9am`, `next friday`, `on 2026-12-24 at noon`, and the time at the end (`… in 2h`). `/reminders` lists and deletes them, `/timezone` sets your zone, and delivered reminders have snooze buttons.
 
 ## Setup
 
@@ -51,9 +53,9 @@ sudo chown -R voltbot:voltbot /opt/voltbot
 sudo chmod 600 /opt/voltbot/.env
 ```
 
-Fill in `/opt/voltbot/.env` (secrets: `DISCORD_TOKEN`, `OPENAI_TOKEN`, optional `SENTRY_DSN`) and `/opt/voltbot/config.toml` (admin user IDs, the control panel channel IDs, and per-feature settings).
+Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`; `OPENAI_TOKEN` arrives with chat) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
 
-**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports reminders and the movie wheel game, then renames the file to `old.db.imported`.
+**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders right away and the movie wheel game once that feature is ported, each only once, then renames the file to `old.db.imported`. If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
 
 ### 4. Run with systemd
 

@@ -112,7 +112,7 @@ Secrets stay in `.env`; everything else goes in `config.toml`, and each feature 
 - **`tracing` everywhere.** The dispatcher opens a span for every event with the feature name, guild, channel, user and interaction or message ID, so every log line inside a handler carries that context without passing it around. `tracing-subscriber` writes readable lines in development and JSON in production, with the level set by `RUST_LOG` (for example `RUST_LOG=info,voltbot::features::chat=debug`).
 - **Errors keep their cause.** Handlers return `anyhow::Result`, and errors get `.context("what we were doing")` where they happen. The dispatcher logs the whole chain once, at `error` level, with the span's context. A panic hook logs panics the same way.
 - **Logs in Discord.** A small `tracing` layer forwards log events to the control panel's log channel (see "Control panel" below), rate limited and grouped so one broken feature doesn't flood it. An error message includes the feature, the error chain and a link to the triggering message.
-- **Optional: Sentry.** The `sentry` crate with its `tracing` integration groups errors, counts them, and keeps the breadcrumbs that led up to each one. It turns on when `SENTRY_DSN` is set; GlitchTip is a self-hostable server that speaks the same protocol.
+- **Optional, later: Sentry.** The `sentry` crate with its `tracing` integration groups errors, counts them, and keeps the breadcrumbs that led up to each one. It turns on when `SENTRY_DSN` is set; GlitchTip is a self-hostable server that speaks the same protocol.
 - **Running it.** A systemd service (`deploy/voltbot.service`): it restarts the bot on a crash and keeps the full logs in the journal (`journalctl -u voltbot -f`). Setup steps are in the README.
 
 ### Shared services on `BotCtx`
@@ -225,7 +225,7 @@ Go helpers and what replaces them. Most come from serenity, poise or a well-know
 | `strings.go` | the standard library |
 | YouTube and PDF URL handling | dropped, as the Go OpenAI path already ignores them. Claude reads PDFs, so this can return with the Claude provider |
 
-Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging, see "Logging and error reporting"), `anyhow` (errors), `rusqlite_migration` (per-feature migrations), `tokio-util`'s `CancellationToken` (❌ stops an answer), `reqwest-eventsource` (Claude's SSE stream).
+Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging, see "Logging and error reporting"), `anyhow` (errors), `tokio-util`'s `CancellationToken` (❌ stops an answer), `reqwest-eventsource` (Claude's SSE stream).
 
 Storage: `chat_turns` (see "AI providers" below).
 
@@ -273,7 +273,7 @@ Every user message the bot answers and every bot reply gets a row. `content_json
 
 ### 2. Reminders
 
-What it does: `@Vivy remind me in 2h30m do the thing` or `@Vivy remind me at 16:30 CET do the thing` stores a reminder (with any attached images) and pings the user in the same channel when it is due. `/reminders` lists your pending reminders with a select menu to delete one.
+What it does: `@Vivy remind me in 2h30m do the thing` or `@Vivy remind me at 16:30 CET do the thing` stores a reminder (with any attached images) and pings the user in the same channel when it is due, with a link back to the message that set it. Images are kept up to the bot's upload limit in that server, which follows its boost level (10 MB, 50 MB at level 2, 100 MB at level 3); anything bigger is named in the confirmation and counted as missing in the fired reminder. `/reminders` lists your pending reminders with a select menu to delete one.
 
 Events and guards: `on_mention` through the mention prefixes `remind me`, `reminder` and `remind`; slash commands `/reminders` and `/timezone`; the delete menu and snooze buttons (`reminders:` custom IDs); `start` runs the scheduler; publishes `BotEvent::ReminderFired`.
 
@@ -291,9 +291,9 @@ Timezone: `/timezone <IANA name>` stores a per-user zone (new `user_settings` ta
 
 Scheduler: one background task instead of a timer per reminder. It loads the next due reminder from SQLite, sleeps until then with `tokio::select!`, and is woken early through a `tokio::sync::Notify` whenever a reminder is added or deleted.
 
-Delivery: a reminder is only deleted after it was sent. If sending fails, it stays and is retried with a growing delay. The fired message has snooze buttons (10m, 1h, tomorrow) that create a new reminder with the same text and images.
+Delivery: a reminder is only marked sent after Discord accepted it. If sending with images fails, it is sent again without them, with an `[image missing]` hint (the link to the original message still has them). If that fails too, it stays and is retried with a growing delay (1 minute, doubling up to 6 hours); after 10 failed sends it is dropped with an error in the log channel that includes its text. The fired message has snooze buttons (10m, 1h, tomorrow) that create a new reminder with the same text and images; sent reminders are kept for a week so those buttons keep working, then purged.
 
-Storage: `reminders` (id, user, channel, guild, message, fire time, created time, attempts), `reminder_images` (reminder id, filename, data as a BLOB instead of Go's base64 JSON), and the shared `user_settings` (user, timezone).
+Storage: `reminders` (id, user, channel, guild, message, fire time, created time, source message, missing image count, next try time, attempts, sent time), `reminder_images` (reminder id, filename, data as a BLOB instead of Go's base64 JSON), and the shared `user_settings` (user, timezone).
 
 Likely crates: `winnow`, `chrono`, `chrono-tz`.
 
@@ -361,18 +361,20 @@ What it does: gives admins two channels to watch the bot without logging in to t
 Config:
 
 ```toml
+[logging]
+discord_channel = 123456789012345678
+discord_level = "warn"        # lifecycle lines are always posted
+
 [features.control_panel]
-log_channel = 123456789012345678
 status_channel = 123456789012345678
-log_level = "warn"            # lifecycle lines are always posted
 status_interval_secs = 60
 ```
 
-Events: `start` runs the refresh loop; `on_bot_event` listens for lifecycle events from the core. The log layer is part of the core logging setup and only needs the channel ID, so errors from startup, before any feature runs, still reach Discord.
+Events: `start` runs the refresh loop, which marks the message 🔴 Offline when the shutdown token is cancelled. The log channel is part of the core logging setup (hence its own `[logging]` section), so it works even with the control panel turned off, and errors from startup, before any feature runs, still reach Discord.
 
 Storage: `control_panel_state` (key, value) for the status message ID. Chat records each request's token usage, including cached input tokens, in `chat_usage`, which is where the cache hit rate comes from.
 
-Likely crates: `sysinfo` (memory use), `vergen` or a small `build.rs` (git commit in the binary).
+Crates: `sysinfo` (memory use) and a small `build.rs` (git commit in the binary).
 
 ## Port order
 
