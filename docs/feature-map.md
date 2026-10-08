@@ -116,13 +116,28 @@ Each feature can contribute tools, the same way it subscribes to events, so remi
 
 The tool loop: when the model asks for a tool, the bot runs it, sends the result back, and keeps streaming. The status line under the reply shows which tool is running.
 
-Go helpers this needs (port as Rust functions):
-- `utility/messages.go`: `SplitMessageSlices`, `SplitParagraph`, `HasVisibleContent` (2000-char splitting), `GetMessagesBefore`, `GetReferencedMessage`, `ReplyChainUsers`, `MessageMentionsUser`, `IsReplyToUser`
-- `utility/discord.go`: `CleanMessage`, `ResolveMentions`, `GetMessageMediaURL`, `AttachmentText`, `EmbedText`, `IsAdmin`
-- `utility/url.go`: `DownloadBytes`, `URLToExt`, `IsImageURL`, `IsVideoURL`, `MediaType`
-- `utility/image.go`: base64 image download, GIF to frames, PNG grid
-- `utility/video.go`: video frames through ffmpeg (call the `ffmpeg` binary directly with `tokio::process::Command`)
-- `discord/discord.go`: send/edit helpers, link-embed suppression, error message helper
+Go helpers and what replaces them. Most come from serenity, poise or a well-known crate; only a few small functions are written by hand:
+
+| Go helper | In VoltBot |
+|---|---|
+| `ResolveMentions`, `CleanMessage` | `serenity::utils::content_safe` (turns `<@id>` into names) |
+| `MessageMentionsUser`, `IsBotDirectedMessage` | `Message::mentions_user_id` |
+| `GetReferencedMessage`, `IsReplyToUser` | `Message::referenced_message`, which Discord already sends with a reply; older turns come from `chat_turns` |
+| `GetMessagesBefore`, `GetChannelMessages` | `ChannelId::messages` with `GetMessages::new().before(id).limit(n)` |
+| `discord/discord.go` (send, edit, defer, followup, ephemeral) | poise: `ctx.defer_ephemeral()`, `ctx.send(CreateReply::default().ephemeral(true))`, and `.edit()` on the returned handle |
+| `suppressLinkEmbeds` | the `SUPPRESS_EMBEDS` message flag on bot replies |
+| `IsAdmin` | a poise `check` function on admin commands, reading admin IDs from config |
+| Modal plumbing in `handler/modals.go` | poise's `Modal` derive and `execute_modal` (the wheel's bet amount) |
+| `SplitParagraph`, `SplitMessageSlices` | the `text-splitter` crate's `MarkdownSplitter` (char-safe, prefers paragraph and line breaks, keeps code blocks whole when they fit) plus a small hand-written wrapper that closes and reopens a code fence it had to cut |
+| `URLToExt`, `MediaType`, `IsImageURL`, `IsVideoURL` | the attachment's own `content_type` from Discord first, then `url` + `mime_guess` for embed links |
+| `DownloadBytes` | `reqwest` |
+| `image.go` (decode, GIF frames, PNG grid, base64) | the `image` crate (`GifDecoder::into_frames`, `imageops::overlay` for the grid, PNG encoding) and the `base64` crate |
+| `video.go` (duration, frame at time) | the `ffprobe` and `ffmpeg` command-line tools through `tokio::process::Command`, as in Go; `ffmpeg-next` would need FFmpeg's C libraries at build time |
+| `AttachmentText`, `EmbedText` | hand-written; a few lines each over serenity's types |
+| `strings.go` | the standard library |
+| YouTube and PDF URL handling | dropped, as the Go OpenAI path already ignores them. Claude reads PDFs, so this can return with the Claude provider |
+
+Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging), `anyhow` (errors), `rusqlite_migration` (per-feature migrations), `tokio-util`'s `CancellationToken` (❌ stops an answer), `reqwest-eventsource` (Claude's SSE stream).
 
 Storage: `chat_turns` (see "AI providers" below).
 
