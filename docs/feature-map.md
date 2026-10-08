@@ -40,6 +40,12 @@ trait Feature: Send + Sync {
     async fn on_component(&self, ctx: &BotCtx, i: &ComponentInteraction) -> Result<()> { Ok(()) }
     async fn on_modal(&self, ctx: &BotCtx, i: &ModalInteraction) -> Result<()> { Ok(()) }
     async fn on_ready(&self, ctx: &BotCtx) -> Result<()> { Ok(()) }
+
+    // Tools this feature offers to the chat model (see "Chat tools").
+    fn tools(&self) -> Vec<ToolDef> { Vec::new() }
+    async fn call_tool(&self, ctx: &ToolCtx, name: &str, args: serde_json::Value) -> Result<String> {
+        Err(anyhow!("unknown tool {name}"))
+    }
 }
 ```
 
@@ -54,9 +60,9 @@ The exact shape of this gets settled in stage 1, with the smallest feature that 
 | Event | Who listens |
 |---|---|
 | Message created | Chat (mentions the bot), Reminders (mentions the bot and starts with "remind") |
-| Reaction added | Nothing yet; available for future features (for example reacting on a bot message) |
-| Slash command | Reminders (`/reminders`), Movie wheel (4 commands) |
-| Button / select menu | Reminders (delete menu), Movie wheel (5 components) |
+| Reaction added | Chat (❌ stops and 🔁 regenerates a reply; guard = reaction is on a bot reply and from the person who asked) |
+| Slash command | Reminders (`/reminders`, `/timezone`), Movie wheel (4 commands) |
+| Button / select menu | Reminders (delete menu, snooze buttons), Movie wheel (5 components) |
 | Modal submit | Movie wheel (bet amount) |
 | Ready | All: load state from SQLite, re-arm reminder timers, log counts |
 
@@ -72,9 +78,35 @@ Progress feedback: a ⏳ reaction while the model works, removed when it finishe
 
 Events and guards: message created, guard = not from a bot, mentions the bot, not a reminder trigger.
 
-Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, and returning generated files. Those go behind a trait. Discord streaming, message splitting and media extraction stay outside it so every provider reuses them.
+Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, running tool calls, and returning generated files. Those go behind a trait. Discord streaming, message splitting, media extraction and the bot's own tools stay outside it so every provider reuses them.
 
-Change from Go: the system prompt drops the memory/background-facts section, and no per-request memory block is added, so the prompt prefix stays identical between requests and caches well. The current time and channel name are still appended at the end.
+Prompt caching: the system prompt is fully static. The Go bot appended the current time, channel name and memory context to the instructions, which come first in every request, so the cache broke there and the conversation history after it was never reused. VoltBot drops memory and gives the model tools to look up the time and channel instead. The tool list is also static and in a fixed order, since it is part of the cached prefix.
+
+Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and 🔁 regenerates it from the same input. Only the person who asked can use them.
+
+Config: model name, reasoning effort and similar settings come from config, not constants in code.
+
+Message splitting: one splitter replaces the Go bot's two (`SplitParagraph` and `SplitMessageSlices`). It splits on paragraph, then line, then character boundaries, and re-opens code blocks it cuts. The Go code cuts at byte offsets; Rust panics when a string is sliced inside a multi-byte character such as an emoji, so the Rust version must only cut on `char` boundaries. This is a good function to write tests for first.
+
+#### Chat tools
+
+The provider's built-in tools stay on (web search, code interpreter). On top of those, the bot offers its own function tools, which work the same with every provider.
+
+Each feature can contribute tools, the same way it subscribes to events, so reminder tools live in the reminders module and wheel tools in the movie wheel module. A tool runs as the person who asked: it only sees channels they can see and only changes their own reminders.
+
+| Tool | Feature | What it returns or does |
+|---|---|---|
+| `get_current_time` | Chat | Current date and time in the asker's timezone (or one the model passes) |
+| `get_channel_info` | Chat | Channel name, topic, and parent channel for threads |
+| `get_user_info` | Chat | A member's display name, timezone, roles and join date |
+| `read_recent_messages` | Chat | The last N messages in the current channel, as text with author names |
+| `get_message` | Chat | One message from a Discord message link |
+| `create_reminder` | Reminders | Creates a reminder; `when` is text like "in 2h" or "friday 3pm", parsed by the same parser as typed reminders, and a parse error is returned so the model can retry |
+| `list_reminders` | Reminders | The asker's pending reminders |
+| `cancel_reminder` | Reminders | Deletes one of the asker's reminders |
+| `get_wheel_status` | Movie wheel | Current round, options, bets and balances (read only) |
+
+The tool loop: when the model asks for a tool, the bot runs it, sends the result back, and keeps streaming. Each tool call can show up briefly in the reply (for example "🔧 reading recent messages") so people can see what happened.
 
 Go helpers this needs (port as Rust functions):
 - `utility/messages.go`: `SplitMessageSlices`, `SplitParagraph`, `HasVisibleContent` (2000-char splitting), `GetMessagesBefore`, `GetReferencedMessage`, `ReplyChainUsers`, `MessageMentionsUser`, `IsReplyToUser`
@@ -92,13 +124,27 @@ Likely crates: `async-openai` (check it supports the Responses API and streaming
 
 What it does: `@Vivy remind me in 2h30m do the thing` or `@Vivy remind me at 16:30 CET do the thing` stores a reminder (with any attached images) and pings the user in the same channel when it is due. `/reminders` lists your pending reminders with a select menu to delete one.
 
-Events and guards: message created (guard = mentions the bot and text starts with `remind me`, `reminder` or `remind`), slash command `/reminders`, select menu `reminder`, ready (load pending reminders and re-arm timers).
+Events and guards: message created (guard = mentions the bot and text starts with `remind me`, `reminder` or `remind`), slash commands `/reminders` and `/timezone`, select menu `reminder`, snooze buttons, ready (start the scheduler).
 
-Parsing: relative offsets (`in 1y2mo3w4d5h6m7s`, long and short unit names) and absolute times (`at HH:MM` plus a date and timezone, IANA names or the abbreviations listed in `reminder/parse.go`). The Go parser has tests; port those tests too, they make a good first Rust exercise.
+Parsing: a real grammar written with the `winnow` parser-combinator crate, replacing the Go regex and prefix checks. Small parsers (`number`, `unit`, `duration`, `clock_time`, `date`, `weekday`, `timezone`) combine into one `when` parser, each with its own unit tests. When parsing fails, the error says which word it got stuck on. Supported forms:
 
-Storage: `reminders` table (user, channel, guild, message, images as base64 JSON, fire time, created time). Timers: one `tokio::time::sleep_until` task per reminder, cancelled through a map of handles when deleted.
+- Relative: `in 2h30m`, `in 1 week 2 days`
+- Clock times: `at 16:30`, `at 3pm`, `at noon`, `at midnight`
+- Days: `tomorrow`, `friday`, `next friday`, `on 2026-12-24`, optionally with `at <time>`
+- Timezone after a time: IANA names (`Europe/Oslo`) or common abbreviations. `CET`/`CEST` and similar map to a real zone so summer time is handled.
+- The time can come before or after the message: `remind me in 2h to check the oven` and `remind me to check the oven in 2h`
 
-Likely crates: `chrono`, `chrono-tz`, `regex`.
+Port the Go parser's test cases as the starting test suite.
+
+Timezone: `/timezone <IANA name>` stores a per-user zone (new `user_settings` table). Times without a zone use it, then fall back to UTC.
+
+Scheduler: one background task instead of a timer per reminder. It loads the next due reminder from SQLite, sleeps until then with `tokio::select!`, and is woken early through a `tokio::sync::Notify` whenever a reminder is added or deleted.
+
+Delivery: a reminder is only deleted after it was sent. If sending fails, it stays and is retried with a growing delay. The fired message has snooze buttons (10m, 1h, tomorrow) that create a new reminder with the same text and images.
+
+Storage: `reminders` table (user, channel, guild, message, images as BLOB or base64 JSON, fire time, created time, attempts), `user_settings` (user, timezone).
+
+Likely crates: `winnow`, `chrono`, `chrono-tz`.
 
 ### 3. Movie wheel
 
@@ -117,10 +163,10 @@ The money logic (`playerMoney`, `playerTax`, `payout`) is pure and easy to unit 
 
 | Stage | Work | Why this order |
 |---|---|---|
-| 1 | Skeleton: config from `.env`, SQLite, poise setup, the feature dispatcher and guards, plus Reminders | Reminders touch every event type (message, slash command, select menu, ready, timers) with simple logic, so they prove the skeleton |
+| 1 | Skeleton: config from `.env`, SQLite, poise setup, the feature dispatcher and guards, plus Reminders (parser, scheduler, timezone, snooze) | Reminders touch every event type (message, slash command, buttons, select menu, ready, timers), so they prove the skeleton |
 | 2 | Shared helpers: message splitting, sending and editing, media extraction, downloads | Chat needs them and they are easy to test on their own |
-| 3 | AI chat behind the provider trait, OpenAI implementation | The main feature; builds on stages 1 and 2 |
-| 4 | Movie wheel | Self-contained; mostly embeds, buttons and pure money logic |
+| 3 | AI chat behind the provider trait, OpenAI implementation, tool loop and chat tools, reaction controls | The main feature; builds on stages 1 and 2, and reminder tools reuse the stage 1 parser |
+| 4 | Movie wheel, plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
 | Later | Claude provider, then Gemini | When credits arrive |
 | Later | Image hashing redesign | TODO |
 
