@@ -1,0 +1,412 @@
+# VoltBot feature map
+
+This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it, which Discord events each feature listens to, and the order we port them in. It is the reference for every later stage.
+
+## Decisions so far
+
+| Topic | Decision |
+|---|---|
+| Discord library | `serenity` + `poise` (poise handles slash commands, serenity handles raw events) |
+| AI provider | OpenAI first, behind a provider trait. Claude next, through the plain Messages API (not the Agent SDK), then maybe Gemini |
+| Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` behind `tokio-rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, named after it (`reminders`, `reminder_images`, `wheel_*`, `chat_turns`), and its own migrations, recorded in a shared `schema_migrations` table. Core tables shared by all features: `user_settings`, `legacy_imports` |
+| Config | `.env` for secrets, `config.toml` for everything else (admin IDs, per-feature settings and guild/channel gating that Go hardcodes) |
+| Async runtime | `tokio` (serenity already uses it) |
+
+## Scope
+
+| Go feature | Go location | VoltBot |
+|---|---|---|
+| AI chat (mention the bot, streamed reply) | `handler/messages.go`, `apis/openai/chat.go` | **Port** |
+| Reminders (`@Vivy remind me in 2h ...`, `/reminders`) | `reminder/`, parts of `handler/` | **Port** |
+| Movie wheel betting game | `gamble/`, `handler/gamble_status.go`, wheel commands, buttons, modal | **Port** |
+| Image hashing and duplicate detection (`/hash_server`) | `hasher/` | **TODO** (redesign later) |
+| Image and video generation (`/draw`, `/video`, Wavespeed) | `apis/wavespeed/` | Dropped |
+| Long-term memory (notes, profiles, vector search, digest, admin commands) | `memory/`, `memory_*` commands | Dropped (see "Future memory" below) |
+
+## Architecture
+
+The Go bot has one big `HandleMessage` function that does hashing, memory capture, reminders and chat in sequence, and chat has to know about reminders to stay out of their way. VoltBot is built so that adding a feature means adding one folder and one line, without editing any other feature.
+
+### Rules
+
+1. **Features never import each other.** A feature may use `core`, `ai` and `util`, nothing else. Features talk to each other in two ways only: chat tools (a feature offers a tool, chat calls it) and bot events (a feature publishes an event, others may listen).
+2. **A feature declares everything it adds in one place**: commands, mention prefixes, component handlers, chat tools, migrations, background tasks and its `old.db` import. The dispatcher reads those declarations; nothing is registered by hand elsewhere.
+3. **Logic, storage and Discord are separate files.** Pure logic (the wheel ledger, the reminder parser, the message splitter) takes plain values and returns plain values, so it is tested without Discord or a database. SQL lives in `store.rs` and is tested against an in-memory SQLite. Discord code only translates events into calls to those two.
+
+### The `Feature` trait
+
+```rust
+#[async_trait]
+pub trait Feature: Send + Sync {
+    /// Also the config section, the custom ID prefix and the log label.
+    fn name(&self) -> &'static str;
+
+    // Declarations, read once at startup.
+    fn commands(&self) -> Vec<poise::Command<Data, Error>> { vec![] }
+    fn migrations(&self) -> Vec<Migration> { vec![] }
+    fn mention_prefixes(&self) -> &'static [&'static str] { &[] }
+    fn tools(&self) -> Vec<ToolDef> { vec![] }
+    async fn stats(&self, ctx: &BotCtx) -> Vec<Stat> { vec![] }  // shown on the control panel
+
+    // Lifecycle.
+    async fn start(&self, ctx: &BotCtx) -> Result<()> { Ok(()) }   // background tasks
+    async fn import_legacy(&self, ctx: &BotCtx, old: &OldDb) -> Result<usize> { Ok(0) }
+
+    // Events. Every method has an empty default, so a feature only writes the ones it uses.
+    async fn on_mention(&self, ctx: &BotCtx, msg: &Message, rest: &str) -> Result<()> { Ok(()) }
+    async fn on_message(&self, ctx: &BotCtx, msg: &Message) -> Result<()> { Ok(()) }
+    async fn on_reaction_add(&self, ctx: &BotCtx, r: &Reaction) -> Result<()> { Ok(()) }
+    async fn on_component(&self, ctx: &BotCtx, i: &ComponentInteraction, id: &str) -> Result<()> { Ok(()) }
+    async fn on_modal(&self, ctx: &BotCtx, i: &ModalInteraction, id: &str) -> Result<()> { Ok(()) }
+    async fn on_bot_event(&self, ctx: &BotCtx, event: &BotEvent) -> Result<()> { Ok(()) }
+    async fn call_tool(&self, ctx: &ToolCtx, name: &str, args: serde_json::Value) -> Result<String> {
+        Err(anyhow!("unknown tool {name}"))
+    }
+}
+```
+
+The whole bot is the list in `features/mod.rs`:
+
+```rust
+pub fn all() -> Vec<Arc<dyn Feature>> {
+    vec![
+        Arc::new(reminders::Reminders::default()),
+        Arc::new(wheel::Wheel::default()),
+        Arc::new(control_panel::ControlPanel::default()),
+        Arc::new(chat::Chat::default()),  // last: answers mentions nobody else claimed
+    ]
+}
+```
+
+### How the dispatcher routes events
+
+| Event | Routing |
+|---|---|
+| Message that @-mentions the bot | The mention is stripped. The first feature whose `mention_prefixes` match the start of the text gets `on_mention` (Reminders claims `remind me`, `reminder`, `remind`). If none match, Chat gets it. Chat never needs to know reminders exist. |
+| Any other message | `on_message` for every enabled feature. For observers like a future image hasher. |
+| Reaction added | `on_reaction_add` for every enabled feature; each checks its own guard (Chat: reaction on its own reply, from the person who asked). |
+| Button, select menu, modal | Custom IDs are `<feature name>:<action>:<args>`. The dispatcher strips the feature name and calls only that feature. Each feature parses the rest into its own action enum, so a typo is a compile error, not a silent no-op. |
+| Slash command | poise, from the commands each feature declared. |
+| `BotEvent` | Published by features through `ctx.events` (a `tokio::sync::broadcast` channel), delivered to every feature's `on_bot_event`. Starts small, for example `ReminderFired` and `WheelRoundResolved`. |
+
+Every handler runs in its own tokio task, so a slow or failing feature never blocks the others, and a panic is logged instead of crashing the bot (the Go bot has no panic recovery). Errors are logged with the feature name; an error type that marks a message as safe to show is sent back to the user, anything else becomes a generic "something went wrong".
+
+**Gating is config, not code.** Go hardcodes `MainServer` and a channel blacklist inside the handlers. VoltBot gives every feature an `enabled` flag and optional guild and channel allow/deny lists in its config section, and the dispatcher checks them before calling the feature:
+
+```toml
+[features.chat]
+enabled = true
+
+[features.wheel]
+guilds = [122962330165313536]            # only on the main server
+
+[features.image_hashing]                 # later
+guilds = [122962330165313536]
+deny_channels = [850179179281776670]
+```
+
+Secrets stay in `.env`; everything else goes in `config.toml`, and each feature reads its own `[features.<name>]` section into its own `serde` struct.
+
+### Logging and error reporting
+
+- **`tracing` everywhere.** The dispatcher opens a span for every event with the feature name, guild, channel, user and interaction or message ID, so every log line inside a handler carries that context without passing it around. `tracing-subscriber` writes readable lines in development and JSON in production, with the level set by `RUST_LOG` (for example `RUST_LOG=info,voltbot::features::chat=debug`).
+- **Errors keep their cause.** Handlers return `anyhow::Result`, and errors get `.context("what we were doing")` where they happen. The dispatcher logs the whole chain once, at `error` level, with the span's context. A panic hook logs panics the same way.
+- **Logs in Discord.** A small `tracing` layer forwards log events to the control panel's log channel (see "Control panel" below), rate limited and grouped so one broken feature doesn't flood it. An error message includes the feature, the error chain and a link to the triggering message.
+- **Optional: Sentry.** The `sentry` crate with its `tracing` integration groups errors, counts them, and keeps the breadcrumbs that led up to each one. It turns on when `SENTRY_DSN` is set; GlitchTip is a self-hostable server that speaks the same protocol.
+- **Running it.** A systemd service (`deploy/voltbot.service`): it restarts the bot on a crash and keeps the full logs in the journal (`journalctl -u voltbot -f`). Setup steps are in the README.
+
+### Shared services on `BotCtx`
+
+Features get everything shared through one context value: the serenity HTTP client and cache, `db`, `config`, `settings` (per-user values like the timezone), `ai`, `events`, and a shutdown `CancellationToken` that background tasks watch.
+
+- **`db`** wraps `tokio-rusqlite`: plain `rusqlite` SQL, run on a dedicated thread through `db.call(|conn| ...)`, so the async code never blocks and a connection is never held across an `.await`.
+- **`ai`** holds the provider registry. The provider trait lives in `ai`, not inside the chat feature, so any feature can make a one-off model call (a summary, a classification) through the same OpenAI or Claude setup.
+
+### Folder layout
+
+```
+src/
+  main.rs                 # load config, open db, build features, start serenity + poise
+  core/                   # ctx, dispatcher, guards, config, db, events, custom_id, errors
+  ai/                     # provider trait, Turn types, openai.rs, claude.rs
+  util/                   # message splitting, media download and conversion, text extraction
+  features/
+    mod.rs                # the feature list
+    reminders/
+      mod.rs              # impl Feature: wiring only
+      parse.rs            # winnow grammar (pure)
+      store.rs            # SQL
+      commands.rs         # /reminders, /timezone
+      ui.rs               # embeds, buttons, menus
+      tools.rs            # create/list/cancel_reminder
+      import.rs           # from old.db
+    wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, tools.rs, import.rs
+    chat/                 # mod.rs, history.rs, stream.rs, tools.rs
+```
+
+Plain modules in one crate. A Cargo workspace with a crate per feature would let the compiler enforce rule 1, but it adds build setup that isn't worth it yet.
+
+### Adding a feature
+
+1. Create `src/features/<name>/` with a struct that implements `Feature`.
+2. Fill in only the methods it needs: commands, mention prefixes, events, tools, migrations.
+3. Add one line to `features::all()`.
+4. Add a `[features.<name>]` section to `config.toml` if it needs settings.
+
+Nothing else changes. A future skill-based memory, for example, is a feature that declares its tables and offers chat tools such as `remember` and `recall`.
+
+## Feature details
+
+### 1. AI chat
+
+What it does: when someone @-mentions the bot, it builds a request from the message (text, attachment names, embed text, images, video frames), sends it to OpenAI's Responses API with web search and code interpreter turned on, and streams the answer into a Discord reply, editing it about once per second. Long answers are split across several messages. Files produced by the code interpreter are attached to the final message.
+
+Conversation history: in Go, every Discord message ID of a bot reply is stored with its OpenAI response ID (`response_ids` table), and replying to a bot message continues from that ID. That only works for OpenAI, because Claude and Gemini keep no conversation state on their side. VoltBot keeps its own provider-neutral history instead (see "AI providers" below), and OpenAI's response ID becomes an optional shortcut stored next to it.
+
+Progress feedback: Go adds a ⏳ reaction while the model works and swaps it for ✅ at the end. VoltBot drops the status reactions and shows the state in the reply itself, as a small line under the text using Discord's `-#` subtext markdown, updated with the same once-per-second edit that streams the answer:
+
+- `-# 💭 Thinking…` before any text arrives
+- `-# 🔧 Reading recent messages…` (one line per tool, named by the tool)
+- `-# ✍️ Writing…` while text streams
+- the line is removed when the answer is done, or replaced by `-# ⏹️ Stopped` or `-# ⚠️ Something went wrong: <short reason>`
+
+When an answer spans several messages, only the last one carries the line. This also saves two reaction API calls per message part.
+
+Events and guards: `on_mention` as the fallback for mentions no other feature claimed (bot authors are filtered out by the dispatcher); `on_reaction_add` for ❌/🔁.
+
+Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, and returning generated files. Those go behind a trait (see "AI providers" below). Discord streaming, message splitting, media extraction, the tool loop and the bot's own tools stay outside it so every provider reuses them.
+
+Prompt caching: the system prompt is fully static. The Go bot appended the current time, channel name and memory context to the instructions, which come first in every request, so the cache broke there and the conversation history after it was never reused. VoltBot drops memory and gives the model tools to look up the time and channel instead. The tool list is also static and in a fixed order, since it is part of the cached prefix.
+
+Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and 🔁 regenerates it from the same input. Only the person who asked can use them.
+
+Config: model name, reasoning effort and similar settings come from config, not constants in code.
+
+Message splitting: one splitter replaces the Go bot's two (`SplitParagraph` and `SplitMessageSlices`). It splits on paragraph, then line, then character boundaries, and re-opens code blocks it cuts. The Go code cuts at byte offsets; Rust panics when a string is sliced inside a multi-byte character such as an emoji, so the Rust version must only cut on `char` boundaries. This is a good function to write tests for first.
+
+#### Chat tools
+
+The provider's built-in tools stay on (web search, code interpreter). On top of those, the bot offers its own function tools, which work the same with every provider.
+
+Each feature can contribute tools, the same way it subscribes to events, so reminder tools live in the reminders module and wheel tools in the movie wheel module. A tool runs as the person who asked: it only sees channels they can see and only changes their own reminders.
+
+| Tool | Feature | What it returns or does |
+|---|---|---|
+| `get_current_time` | Chat | Current date and time in the asker's timezone (or one the model passes) |
+| `get_channel_info` | Chat | Channel name, topic, and parent channel for threads |
+| `get_user_info` | Chat | A member's display name, timezone, roles and join date |
+| `read_recent_messages` | Chat | The last N messages in the current channel, as text with author names |
+| `get_message` | Chat | One message from a Discord message link |
+| `create_reminder` | Reminders | Creates a reminder; `when` is text like "in 2h" or "friday 3pm", parsed by the same parser as typed reminders, and a parse error is returned so the model can retry |
+| `list_reminders` | Reminders | The asker's pending reminders |
+| `cancel_reminder` | Reminders | Deletes one of the asker's reminders |
+| `get_wheel_status` | Movie wheel | Current round, options, bets and balances (read only) |
+
+The tool loop: when the model asks for a tool, the bot runs it, sends the result back, and keeps streaming. The status line under the reply shows which tool is running.
+
+Go helpers and what replaces them. Most come from serenity, poise or a well-known crate; only a few small functions are written by hand:
+
+| Go helper | In VoltBot |
+|---|---|
+| `ResolveMentions`, `CleanMessage` | `serenity::utils::content_safe` (turns `<@id>` into names) |
+| `MessageMentionsUser`, `IsBotDirectedMessage` | `Message::mentions_user_id` |
+| `GetReferencedMessage`, `IsReplyToUser` | `Message::referenced_message`, which Discord already sends with a reply; older turns come from `chat_turns` |
+| `GetMessagesBefore`, `GetChannelMessages` | `ChannelId::messages` with `GetMessages::new().before(id).limit(n)` |
+| `discord/discord.go` (send, edit, defer, followup, ephemeral) | poise: `ctx.defer_ephemeral()`, `ctx.send(CreateReply::default().ephemeral(true))`, and `.edit()` on the returned handle |
+| `suppressLinkEmbeds` | the `SUPPRESS_EMBEDS` message flag on bot replies |
+| `IsAdmin` | a poise `check` function on admin commands, reading admin IDs from config |
+| Modal plumbing in `handler/modals.go` | poise's `Modal` derive and `execute_modal` (the wheel's bet amount) |
+| `SplitParagraph`, `SplitMessageSlices` | the `text-splitter` crate's `MarkdownSplitter` (char-safe, prefers paragraph and line breaks, keeps code blocks whole when they fit) plus a small hand-written wrapper that closes and reopens a code fence it had to cut |
+| `URLToExt`, `MediaType`, `IsImageURL`, `IsVideoURL` | the attachment's own `content_type` from Discord first, then `url` + `mime_guess` for embed links |
+| `DownloadBytes` | `reqwest` |
+| `image.go` (decode, GIF frames, PNG grid, base64) | the `image` crate (`GifDecoder::into_frames`, `imageops::overlay` for the grid, PNG encoding) and the `base64` crate |
+| `video.go` (duration, frame at time) | the `ffprobe` and `ffmpeg` command-line tools through `tokio::process::Command`, as in Go; `ffmpeg-next` would need FFmpeg's C libraries at build time |
+| `AttachmentText`, `EmbedText` | hand-written; a few lines each over serenity's types |
+| `strings.go` | the standard library |
+| YouTube and PDF URL handling | dropped, as the Go OpenAI path already ignores them. Claude reads PDFs, so this can return with the Claude provider |
+
+Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging, see "Logging and error reporting"), `anyhow` (errors), `rusqlite_migration` (per-feature migrations), `tokio-util`'s `CancellationToken` (❌ stops an answer), `reqwest-eventsource` (Claude's SSE stream).
+
+Storage: `chat_turns` (see "AI providers" below).
+
+Likely crates: `async-openai` (check it supports the Responses API and streaming; fall back to `reqwest` + `serde` + SSE if not), `reqwest`, `base64`, `image`.
+
+#### AI providers
+
+**Claude: use the Claude API, not the Agent SDK.** There is no official Rust Agent SDK; Anthropic ships it for Python and TypeScript only. The Rust crates under that name are community projects, and they work by starting the Claude Code CLI as a subprocess, so the bot server would need Node.js and Claude Code installed and would start a process per message. The Agent SDK is built for coding agents: its built-in tools read and write files and run shell commands on the machine, which is the wrong thing to hand to Discord users. It also needs an API key, since Claude subscription logins aren't allowed for apps other people use, so it doesn't save money. Its sessions are local transcript files on disk resumed by session ID, which is a different model from Discord reply chains.
+
+The plain Claude API (Messages API) has everything the bot needs: streaming, images, custom tools, server-side web search and web fetch, code execution, adaptive thinking with an effort setting, and prompt caching. There is no official Rust client SDK either, so the Claude provider calls the HTTP API with `reqwest` + `serde` and parses the SSE stream. That is a few hundred lines and doubles as a good learning exercise. (Community crates exist, but they tend to lag behind new API features.)
+
+**Conversation state differs per provider.** OpenAI can keep the conversation on its side (`previous_response_id`). Claude and Gemini are stateless: every request sends the whole history, and prompt caching makes the repeated part cheap. The provider trait therefore always receives the full history, plus an optional continuation ID the provider may use instead:
+
+```rust
+struct ChatRequest {
+    system: String,                // static, cache friendly
+    history: Vec<Turn>,            // provider-neutral, oldest first
+    continuation: Option<String>,  // e.g. OpenAI response ID, only if this provider wrote it
+    tools: Vec<ToolDef>,           // the bot's own tools, fixed order
+}
+
+enum ChatEvent {
+    TextDelta(String),
+    ToolCall { id: String, name: String, args: serde_json::Value },
+    File(GeneratedFile),           // from code interpreter / code execution
+    Done { continuation: Option<String> },
+}
+
+#[async_trait]
+trait ChatProvider: Send + Sync {
+    fn name(&self) -> &'static str;   // "openai", "claude", "gemini"
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatEvent>>>;
+}
+```
+
+The tool loop lives outside the trait: when a `ToolCall` arrives, the bot runs the tool, appends the call and its result to the history, and calls `stream` again. Each provider converts `Turn` into its own wire format and handles its own caching details (Claude needs `cache_control`; OpenAI caches automatically with `prompt_cache_key`).
+
+**One history table, marked per provider.** Replaces Go's `response_ids`:
+
+`chat_turns (discord_message_id PK, parent_message_id, role, content_json, native_json NULL, provider, model, continuation_id NULL, created_at)`
+
+Every user message the bot answers and every bot reply gets a row. `content_json` holds provider-neutral content (text, image references, tool calls and results). `provider` says which provider wrote the row, and `continuation_id` holds OpenAI's response ID when there is one. When someone replies to a bot message, the bot walks `parent_message_id` up the chain. If the newest bot turn was written by the current provider and has a `continuation_id`, it sends that. Otherwise it sends the rebuilt history. This means switching providers in the middle of a conversation works, and it no longer depends on fetching old messages from Discord.
+
+**Thinking is stored, but only replayed to the model that wrote it.** For bot turns, `native_json` keeps the provider's raw output for that turn exactly as it came back: Claude's thinking blocks (with their signatures), OpenAI's encrypted reasoning items (requested with `include: ["reasoning.encrypted_content"]`), and the tool calls and results in their original order. When the rebuilt history goes to the same provider and model, the bot sends `native_json` unchanged. That keeps the model's earlier reasoning available, keeps the request prefix byte-identical so the prompt cache still hits, and follows Claude's rule that thinking blocks must be passed back unmodified. For any other provider or model, the bot sends only the neutral `content_json`, because thinking blocks are tied to the model that produced them. History is append-only: turns are never edited, and 🔁 regenerate adds a new sibling turn under the same parent instead of overwriting. Thinking is never shown in Discord. Image attachments are stored by URL; Discord CDN links expire, so the rebuild refreshes them through Discord's refresh-urls endpoint before sending.
+
+### 2. Reminders
+
+What it does: `@Vivy remind me in 2h30m do the thing` or `@Vivy remind me at 16:30 CET do the thing` stores a reminder (with any attached images) and pings the user in the same channel when it is due. `/reminders` lists your pending reminders with a select menu to delete one.
+
+Events and guards: `on_mention` through the mention prefixes `remind me`, `reminder` and `remind`; slash commands `/reminders` and `/timezone`; the delete menu and snooze buttons (`reminders:` custom IDs); `start` runs the scheduler; publishes `BotEvent::ReminderFired`.
+
+Parsing: a real grammar written with the `winnow` parser-combinator crate, replacing the Go regex and prefix checks. Small parsers (`number`, `unit`, `duration`, `clock_time`, `date`, `weekday`, `timezone`) combine into one `when` parser, each with its own unit tests. When parsing fails, the error says which word it got stuck on. Supported forms:
+
+- Relative: `in 2h30m`, `in 1 week 2 days`
+- Clock times: `at 16:30`, `at 3pm`, `at noon`, `at midnight`
+- Days: `tomorrow`, `friday`, `next friday`, `on 2026-12-24`, optionally with `at <time>`
+- Timezone after a time: IANA names (`Europe/Oslo`) or common abbreviations. `CET`/`CEST` and similar map to a real zone so summer time is handled.
+- The time can come before or after the message: `remind me in 2h to check the oven` and `remind me to check the oven in 2h`
+
+Port the Go parser's test cases as the starting test suite. Existing reminders are imported from `old.db` (see "Importing from voltgpt").
+
+Timezone: `/timezone <IANA name>` stores a per-user zone (new `user_settings` table). Times without a zone use it, then fall back to UTC.
+
+Scheduler: one background task instead of a timer per reminder. It loads the next due reminder from SQLite, sleeps until then with `tokio::select!`, and is woken early through a `tokio::sync::Notify` whenever a reminder is added or deleted.
+
+Delivery: a reminder is only deleted after it was sent. If sending fails, it stays and is retried with a growing delay. The fired message has snooze buttons (10m, 1h, tomorrow) that create a new reminder with the same text and images.
+
+Storage: `reminders` (id, user, channel, guild, message, fire time, created time, attempts), `reminder_images` (reminder id, filename, data as a BLOB instead of Go's base64 JSON), and the shared `user_settings` (user, timezone).
+
+Likely crates: `winnow`, `chrono`, `chrono-tz`.
+
+### 3. Movie wheel
+
+What it does: a betting game for movie night. Admins add options to the wheel, players claim 100 per round, bet on which option wins, and admins set the winner. Players who bet under 10% of their money get taxed. A status embed shows the round with buttons for claim, bet and winner.
+
+Commands: `/wheel_status`, `/wheel_add` (admin), `/insert_bet` (admin), `/reset_wheel` (admin).
+Components: `button_currentround`, `button_claim`, `button_bet`, `button_winner`, `menu_bet` (place, remove, winner). Modal: `modal_bet` (amount). In VoltBot these become actions of one `wheel:` custom ID enum (`wheel:claim:<round>`, `wheel:bet:<round>`, and so on).
+
+Events and guards: slash commands, buttons, select menus, modal submit; admin guard on the admin actions.
+
+Storage: Go saves the whole game as one JSON blob in `game_state` and rewrites it after every change. VoltBot uses small tables instead, because seasons, undo, admin edits and the chat tool all need to find or change one claim or bet at a time:
+
+```sql
+CREATE TABLE wheel_seasons (id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL,
+                            started_at INTEGER NOT NULL, ended_at INTEGER);
+CREATE TABLE wheel_options (season_id INTEGER NOT NULL REFERENCES wheel_seasons(id),
+                            user_id INTEGER NOT NULL, PRIMARY KEY (season_id, user_id));
+CREATE TABLE wheel_rounds  (id INTEGER PRIMARY KEY, season_id INTEGER NOT NULL REFERENCES wheel_seasons(id),
+                            number INTEGER NOT NULL, winner_id INTEGER, resolved_at INTEGER,
+                            UNIQUE (season_id, number));
+CREATE TABLE wheel_claims  (round_id INTEGER NOT NULL REFERENCES wheel_rounds(id),
+                            user_id INTEGER NOT NULL, PRIMARY KEY (round_id, user_id));
+CREATE TABLE wheel_bets    (round_id INTEGER NOT NULL REFERENCES wheel_rounds(id),
+                            by_id INTEGER NOT NULL, on_id INTEGER NOT NULL,
+                            amount INTEGER NOT NULL CHECK (amount > 0),
+                            PRIMARY KEY (round_id, by_id, on_id));
+```
+
+The keys enforce rules for free: one claim per player per round, one bet per player per option per round (placing it again updates the amount with `INSERT ... ON CONFLICT DO UPDATE`). The active season is the one with `ended_at IS NULL`; a reset sets `ended_at` and starts a new one. Players are everyone who claimed or bet in the season, so there is no separate players table. Balances are still never stored: the bot loads the season's rows into plain structs and runs the ledger function over them. Each change is one small `INSERT`, `UPDATE` or `DELETE` inside a transaction, so nothing has to be kept in memory between commands and no global game mutex is needed.
+
+Rules today, so the port keeps them exact: every round a player can claim 100. Before each payout, a player who bet less than 10% of their money loses 3% of it per missing percentage point (up to 30%). A winning bet pays `amount × (options − 1)`, where options are the wheel options left in that round; a losing bet loses its amount. A player can bet on at most half of the remaining options (rounded up). Integer division truncates, as in Go.
+
+Changes in the port:
+
+- **One ledger function.** Go recomputes a player's money from round 0 for every row of the status embed. VoltBot computes a ledger once, a pure function that folds over the rounds and returns every player's balance, tax and payout per round. The embed, the bet checks and the `get_wheel_status` tool all read from it. It is the first thing to write, with unit tests.
+- **Same numbers as today.** A one-time import reads the current `game_state` JSON from voltgpt into the tables as the first season, and a test checks that the ledger produces the same balances the Go bot shows, so the running game carries over.
+- **Store user IDs, not user objects.** Go saves the whole Discord user in the JSON, so names and avatars go stale. VoltBot stores IDs and looks names up when it renders the embed.
+- **Fix a wrong winner.** Once a winner is set, a new round starts and the old one can no longer be changed, so a mis-click is permanent. Admins get an "Undo winner" action on the latest resolved round, allowed while the new round has no bets yet.
+- **Winner without bets.** Go refuses to set a winner when nobody bet ("No bets!"), which blocks the wheel if a movie was watched without bets. VoltBot allows it.
+- **Seasons instead of a hard reset.** `/reset_wheel` deletes everything with no confirmation. VoltBot asks for confirmation with a button and archives the old game as a finished season, so past results stay viewable.
+- **One game per server.** Go has a single global game. VoltBot keys the game by guild ID; it costs nothing and avoids surprises.
+- **No lock held during Discord calls.** Go keeps `gamble.Mu` locked while it calls the Discord API. With the tables above, each action is a short database transaction, and the bot only talks to Discord after it commits.
+
+Ideas for later, not part of the port: a `/wheel_spin` command that picks the winner randomly with an animated embed, and a per-player balance history.
+
+### 4. Control panel
+
+What it does: gives admins two channels to watch the bot without logging in to the server.
+
+**Log channel.** The `tracing` layer posts log events here:
+
+- `warn` and `error` always, with the feature, the error chain, and a link to the message that triggered it
+- lifecycle lines at `info`: 🟢 started (version, git commit, features loaded, `old.db` import results), 🔴 shutting down, 🔌 gateway reconnected
+- the minimum level is configurable, and a burst of the same error is grouped into one message with a count ("×12 in the last minute") instead of one post each
+
+**Status channel.** One message that the bot keeps editing every 60 seconds (well inside Discord's rate limits). Its ID is saved in the database, so after a restart the bot edits the same message instead of posting a new one. It shows:
+
+- 🟢 Online, uptime, version and git commit, gateway latency, server count
+- memory use, database size, errors in the last hour and the last 24 hours, and when the last error happened
+- one block per feature from its `stats()`: for example, pending reminders and the next one due; chat requests today, tokens used and prompt cache hit rate; the current wheel round and its bet count
+- "Updated <t:…:R>" at the bottom. Discord renders that as "12 seconds ago" and keeps counting on its own, so a crashed bot is obvious even though it can't edit the message any more. On a clean shutdown the bot changes the header to 🔴 Offline before it exits.
+
+Config:
+
+```toml
+[features.control_panel]
+log_channel = 123456789012345678
+status_channel = 123456789012345678
+log_level = "warn"            # lifecycle lines are always posted
+status_interval_secs = 60
+```
+
+Events: `start` runs the refresh loop; `on_bot_event` listens for lifecycle events from the core. The log layer is part of the core logging setup and only needs the channel ID, so errors from startup, before any feature runs, still reach Discord.
+
+Storage: `control_panel_state` (key, value) for the status message ID. Chat records each request's token usage, including cached input tokens, in `chat_usage`, which is where the cache hit rate comes from.
+
+Likely crates: `sysinfo` (memory use), `vergen` or a small `build.rs` (git commit in the binary).
+
+## Port order
+
+| Stage | Work | Why this order |
+|---|---|---|
+| 1 | Core: config (`.env` + `config.toml`), `BotCtx`, SQLite and migrations, the `old.db` importer, poise setup, the dispatcher (mention routing, custom ID routing, gating, error reporting), bot events, plus the control panel (log and status channels) and Reminders (parser, scheduler, timezone, snooze, import) | Reminders touch every event type (message, slash command, buttons, select menu, ready, timers), so they prove the skeleton |
+| 2 | Shared helpers: message splitting, sending and editing, media extraction, downloads | Chat needs them and they are easy to test on their own |
+| 3 | AI chat behind the provider trait, OpenAI implementation, tool loop and chat tools, reaction controls | The main feature; builds on stages 1 and 2, and reminder tools reuse the stage 1 parser |
+| 4 | Movie wheel (ledger, tables, import), plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
+| Later | Claude provider (Messages API over `reqwest`), then Gemini | When credits arrive |
+| Later | Image hashing redesign | TODO |
+
+## Importing from voltgpt (`old.db`)
+
+Copy voltgpt's `voltgpt.db` next to the bot as `old.db` and start the bot. On startup it checks for `old.db`, opens it read-only, and imports what VoltBot uses, each part in one transaction. A `legacy_imports (part, imported_at, rows)` table records each finished part so a restart never imports twice. When every part is done, the file is renamed to `old.db.imported` and kept, so image hashes can be imported later when hashing comes back.
+
+Each feature owns its import function (`reminders::import_legacy`, `wheel::import_legacy`), so the reminders import ships in stage 1 and the wheel import in stage 4. A part whose feature isn't ported yet is simply skipped and picked up on a later start.
+
+| Old table | What happens |
+|---|---|
+| `reminders` | Imported. IDs become integers, the base64 image JSON is decoded into the new image storage, and `fire_at`/`created_at` are kept. Reminders that came due while the bot was down fire right after startup, same as Go. |
+| `game_state` | Imported as the first, still active season of the wheel tables: options, rounds, winners, claims and bets, with user objects reduced to IDs. The Go game has no guild, so it goes to the guild in `IMPORT_GUILD_ID` (defaults to voltgpt's main server). A test checks that the imported season shows the same balances as the Go bot. |
+| `response_ids` | Skipped. They hold only OpenAI response IDs with no message text, and OpenAI drops stored responses after 30 days, so they would rarely still work. Replying to an old bot message starts a fresh conversation that includes the replied-to message. |
+| `image_hashes` | Skipped for now; kept in `old.db.imported` for when hashing returns. |
+| `users`, memory tables (`guild_user_profiles`, `interaction_notes`, `note_participants`, `channel_buffers`, `memory_job_runs`, `vec_notes`) | Skipped; memory is dropped. |
+
+## TODO: image hashing
+
+The Go bot hashes every image and video in the main server after 3 seconds (to let embeds load), stores perceptual hashes, and replies when a near-duplicate is posted. `/hash_server` back-fills a whole server. Revisit once the design is decided; the `img_hash` or `image_hasher` crates are the Rust equivalents of `goimagehash`.
+
+## Future memory
+
+Not ported. If it comes back, the idea is skill-based: per-user folders or tables that the model queries through a tool when it needs them, so nothing is injected into every prompt and the cache hit rate stays high.
+
+## Go code that is not needed
+
+Everything under `memory/`, `apis/wavespeed/`, `hasher/` (for now), `handler/memory_digest.go`, the `memory_*`, `draw`, `video` and `hash_server` commands, the `users` table, and the memory tables in `db/db.go`.
