@@ -172,7 +172,7 @@ Parsing: a real grammar written with the `winnow` parser-combinator crate, repla
 - Timezone after a time: IANA names (`Europe/Oslo`) or common abbreviations. `CET`/`CEST` and similar map to a real zone so summer time is handled.
 - The time can come before or after the message: `remind me in 2h to check the oven` and `remind me to check the oven in 2h`
 
-Port the Go parser's test cases as the starting test suite.
+Port the Go parser's test cases as the starting test suite. Existing reminders are imported from `old.db` (see "Importing from voltgpt").
 
 Timezone: `/timezone <IANA name>` stores a per-user zone (new `user_settings` table). Times without a zone use it, then fall back to UTC.
 
@@ -238,6 +238,20 @@ Ideas for later, not part of the port: a `/wheel_spin` command that picks the wi
 | 4 | Movie wheel, plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
 | Later | Claude provider (Messages API over `reqwest`), then Gemini | When credits arrive |
 | Later | Image hashing redesign | TODO |
+
+## Importing from voltgpt (`old.db`)
+
+Copy voltgpt's `voltgpt.db` next to the bot as `old.db` and start the bot. On startup it checks for `old.db`, opens it read-only, and imports what VoltBot uses, each part in one transaction. A `legacy_imports (part, imported_at, rows)` table records each finished part so a restart never imports twice. When every part is done, the file is renamed to `old.db.imported` and kept, so image hashes can be imported later when hashing comes back.
+
+Each feature owns its import function (`reminders::import_legacy`, `wheel::import_legacy`), so the reminders import ships in stage 1 and the wheel import in stage 4. A part whose feature isn't ported yet is simply skipped and picked up on a later start.
+
+| Old table | What happens |
+|---|---|
+| `reminders` | Imported. IDs become integers, the base64 image JSON is decoded into the new image storage, and `fire_at`/`created_at` are kept. Reminders that came due while the bot was down fire right after startup, same as Go. |
+| `game_state` | Imported as the first, still active season of the wheel tables: options, rounds, winners, claims and bets, with user objects reduced to IDs. The Go game has no guild, so it goes to the guild in `IMPORT_GUILD_ID` (defaults to voltgpt's main server). A test checks that the imported season shows the same balances as the Go bot. |
+| `response_ids` | Skipped. They hold only OpenAI response IDs with no message text, and OpenAI drops stored responses after 30 days, so they would rarely still work. Replying to an old bot message starts a fresh conversation that includes the replied-to message. |
+| `image_hashes` | Skipped for now; kept in `old.db.imported` for when hashing returns. |
+| `users`, memory tables (`guild_user_profiles`, `interaction_notes`, `note_participants`, `channel_buffers`, `memory_job_runs`, `vec_notes`) | Skipped; memory is dropped. |
 
 ## TODO: image hashing
 
