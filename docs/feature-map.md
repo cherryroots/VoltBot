@@ -75,7 +75,14 @@ What it does: when someone @-mentions the bot, it builds a request from the mess
 
 Conversation history: in Go, every Discord message ID of a bot reply is stored with its OpenAI response ID (`response_ids` table), and replying to a bot message continues from that ID. That only works for OpenAI, because Claude and Gemini keep no conversation state on their side. VoltBot keeps its own provider-neutral history instead (see "AI providers" below), and OpenAI's response ID becomes an optional shortcut stored next to it.
 
-Progress feedback: a ⏳ reaction while the model works, removed when it finishes.
+Progress feedback: Go adds a ⏳ reaction while the model works and swaps it for ✅ at the end. VoltBot drops the status reactions and shows the state in the reply itself, as a small line under the text using Discord's `-#` subtext markdown, updated with the same once-per-second edit that streams the answer:
+
+- `-# 💭 Thinking…` before any text arrives
+- `-# 🔧 Reading recent messages…` (one line per tool, named by the tool)
+- `-# ✍️ Writing…` while text streams
+- the line is removed when the answer is done, or replaced by `-# ⏹️ Stopped` or `-# ⚠️ Something went wrong: <short reason>`
+
+When an answer spans several messages, only the last one carries the line. This also saves two reaction API calls per message part.
 
 Events and guards: message created, guard = not from a bot, mentions the bot, not a reminder trigger.
 
@@ -107,7 +114,7 @@ Each feature can contribute tools, the same way it subscribes to events, so remi
 | `cancel_reminder` | Reminders | Deletes one of the asker's reminders |
 | `get_wheel_status` | Movie wheel | Current round, options, bets and balances (read only) |
 
-The tool loop: when the model asks for a tool, the bot runs it, sends the result back, and keeps streaming. Each tool call can show up briefly in the reply (for example "🔧 reading recent messages") so people can see what happened.
+The tool loop: when the model asks for a tool, the bot runs it, sends the result back, and keeps streaming. The status line under the reply shows which tool is running.
 
 Go helpers this needs (port as Rust functions):
 - `utility/messages.go`: `SplitMessageSlices`, `SplitParagraph`, `HasVisibleContent` (2000-char splitting), `GetMessagesBefore`, `GetReferencedMessage`, `ReplyChainUsers`, `MessageMentionsUser`, `IsReplyToUser`
