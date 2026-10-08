@@ -8,7 +8,7 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 |---|---|
 | Discord library | `serenity` + `poise` (poise handles slash commands, serenity handles raw events) |
 | AI provider | OpenAI first, behind a provider trait so Claude and Gemini can be added later |
-| Storage | SQLite, raw SQL through `rusqlite` (same idea as the Go bot: no ORM) |
+| Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, prefixed with its name, and its own migrations, recorded in a shared `schema_migrations` table |
 | Async runtime | `tokio` (serenity already uses it) |
 
 ## Scope
