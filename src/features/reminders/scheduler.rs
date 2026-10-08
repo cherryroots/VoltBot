@@ -2,8 +2,8 @@
 //!
 //! It sends whatever is due, then sleeps until the next reminder (at most an hour). Adding or
 //! deleting a reminder wakes it early through `wake`, so it never sleeps past a new one.
-//! A reminder is only marked sent after Discord accepted it; a failed send is retried later
-//! with a growing delay.
+//! A reminder is only marked sent after Discord accepted it. If the send with images fails,
+//! it's sent again without them; if that fails too, it's retried later with a growing delay.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -72,10 +72,24 @@ async fn deliver(ctx: &BotCtx, reminder: Reminder) -> Result<()> {
     let id = reminder.id;
     let channel = ChannelId::new(reminder.channel_id);
 
-    match channel
-        .send_message(&ctx.http, ui::fired_message(&reminder, now))
-        .await
+    let mut sent = channel
+        .send_message(&ctx.http, ui::fired_message(&reminder, now, true))
+        .await;
+    // If the images were the problem (too big for the server now, say), send it without
+    // them. The reminder links to the original message, which still has them.
+    if let Err(err) = &sent
+        && !reminder.images.is_empty()
     {
+        warn!(
+            reminder = id,
+            "couldn't send a reminder with its images, sending it without: {err}"
+        );
+        sent = channel
+            .send_message(&ctx.http, ui::fired_message(&reminder, now, false))
+            .await;
+    }
+
+    match sent {
         Ok(_) => {
             ctx.db
                 .call(move |conn| Ok(store::mark_sent(conn, id, now)?))

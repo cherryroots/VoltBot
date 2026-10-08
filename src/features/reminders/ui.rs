@@ -62,17 +62,32 @@ pub fn confirmation(fire_at: i64, message: &str, zone_hint: bool, skipped: &[Str
     }
     if !skipped.is_empty() {
         text.push_str(&format!(
-            "\n-# Not saved, over 10 MB: {}",
+            "\n-# Couldn't save {}, so the reminder will link to your message instead.",
             skipped.join(", ")
         ));
     }
     text
 }
 
-/// The delivered reminder: pings only its owner, carries its images and snooze buttons.
-pub fn fired_message(reminder: &Reminder, now: i64) -> CreateMessage {
+/// The delivered reminder: pings only its owner, links to the message that set it, and
+/// carries its images and snooze buttons. With `with_images` false the images are left off
+/// (used when Discord refused the upload) and counted in the "missing" hint instead.
+pub fn fired_message(reminder: &Reminder, now: i64, with_images: bool) -> CreateMessage {
+    let set = match reminder.source_message_id {
+        Some(message) => {
+            let guild = reminder
+                .guild_id
+                .map_or("@me".to_string(), |id| id.to_string());
+            // The <> around the link stops Discord from showing a preview of it.
+            format!(
+                "[Reminder set](<https://discord.com/channels/{guild}/{}/{message}>)",
+                reminder.channel_id
+            )
+        }
+        None => "Reminder set".to_string(),
+    };
     let mut content = format!(
-        "<@{}> ⏰ {}\n-# Reminder set <t:{}:f>",
+        "<@{}> ⏰ {}\n-# {set} <t:{}:f>",
         reminder.user_id,
         shorten(&reminder.message, 1800),
         reminder.created_at
@@ -80,6 +95,15 @@ pub fn fired_message(reminder: &Reminder, now: i64) -> CreateMessage {
     // Say so when it's late, for example after the bot was offline.
     if now - reminder.fire_at > 5 * 60 {
         content.push_str(&format!(", due <t:{}:R>", reminder.fire_at));
+    }
+    let mut missing = reminder.missing_images as usize;
+    if !with_images {
+        missing += reminder.images.len();
+    }
+    match missing {
+        0 => {}
+        1 => content.push_str(" · [image missing]"),
+        n => content.push_str(&format!(" · [{n} images missing]")),
     }
 
     let buttons = SNOOZES
@@ -99,6 +123,9 @@ pub fn fired_message(reminder: &Reminder, now: i64) -> CreateMessage {
         .content(content)
         .allowed_mentions(CreateAllowedMentions::new().users([UserId::new(reminder.user_id)]))
         .components(vec![CreateActionRow::Buttons(buttons)]);
+    if !with_images {
+        return message;
+    }
     for image in &reminder.images {
         message = message.add_file(CreateAttachment::bytes(
             image.data.clone(),
@@ -160,6 +187,61 @@ pub fn list_reply(reminders: &[Summary]) -> CreateReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::features::reminders::store::Image;
+
+    fn reminder() -> Reminder {
+        Reminder {
+            id: 1,
+            user_id: 2,
+            channel_id: 3,
+            guild_id: Some(4),
+            message: "check the oven".into(),
+            fire_at: 1000,
+            created_at: 500,
+            attempts: 0,
+            source_message_id: Some(5),
+            missing_images: 0,
+            images: vec![Image {
+                filename: "a.png".into(),
+                data: vec![1],
+            }],
+        }
+    }
+
+    /// The text the message would send.
+    fn content(message: &CreateMessage) -> String {
+        let json = serde_json::to_value(message).unwrap();
+        json["content"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn fired_message_links_to_the_source() {
+        let text = content(&fired_message(&reminder(), 1000, true));
+        assert_eq!(
+            text,
+            "<@2> ⏰ check the oven\n-# [Reminder set](<https://discord.com/channels/4/3/5>) <t:500:f>"
+        );
+
+        let mut dm = reminder();
+        dm.guild_id = None;
+        assert!(content(&fired_message(&dm, 1000, true)).contains("/channels/@me/3/5"));
+
+        let mut imported = reminder();
+        imported.source_message_id = None;
+        assert!(
+            content(&fired_message(&imported, 1000, true)).contains("-# Reminder set <t:500:f>")
+        );
+    }
+
+    #[test]
+    fn fired_message_counts_missing_images() {
+        let mut r = reminder();
+        assert!(!content(&fired_message(&r, 1000, true)).contains("missing"));
+        assert!(content(&fired_message(&r, 1000, false)).ends_with(" · [image missing]"));
+        r.missing_images = 2;
+        assert!(content(&fired_message(&r, 1000, true)).ends_with(" · [2 images missing]"));
+        assert!(content(&fired_message(&r, 1000, false)).ends_with(" · [3 images missing]"));
+    }
 
     #[test]
     fn action_round_trip() {

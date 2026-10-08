@@ -26,6 +26,10 @@ pub const MIGRATIONS: &[&str] = &[
         data BLOB NOT NULL,
         PRIMARY KEY (reminder_id, position)
     );",
+    // 2: link back to the message that set the reminder, and count images that couldn't be
+    // saved, so the delivered reminder can say so.
+    "ALTER TABLE reminders ADD COLUMN source_message_id INTEGER;
+    ALTER TABLE reminders ADD COLUMN missing_images INTEGER NOT NULL DEFAULT 0;",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +47,10 @@ pub struct NewReminder {
     pub message: String,
     pub fire_at: i64,
     pub created_at: i64,
+    /// The "@Vivy remind me ..." message, if known (imported reminders don't have it).
+    pub source_message_id: Option<u64>,
+    /// Attachments that couldn't be saved (too big, or the download failed).
+    pub missing_images: u32,
     pub images: Vec<Image>,
 }
 
@@ -56,6 +64,8 @@ pub struct Reminder {
     pub fire_at: i64,
     pub created_at: i64,
     pub attempts: u32,
+    pub source_message_id: Option<u64>,
+    pub missing_images: u32,
     pub images: Vec<Image>,
 }
 
@@ -79,9 +89,19 @@ pub struct Stats {
 /// Adds a reminder and its images. Call inside a transaction (see [`add`]).
 pub fn insert(conn: &Connection, new: &NewReminder) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO reminders (user_id, channel_id, guild_id, message, fire_at, created_at, next_try_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?5)",
-        params![new.user_id, new.channel_id, new.guild_id, new.message, new.fire_at, new.created_at],
+        "INSERT INTO reminders (user_id, channel_id, guild_id, message, fire_at, created_at,
+                                source_message_id, missing_images, next_try_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?5)",
+        params![
+            new.user_id,
+            new.channel_id,
+            new.guild_id,
+            new.message,
+            new.fire_at,
+            new.created_at,
+            new.source_message_id,
+            new.missing_images
+        ],
     )?;
     let id = conn.last_insert_rowid();
     for (position, image) in new.images.iter().enumerate() {
@@ -113,7 +133,8 @@ pub fn next_try_at(conn: &Connection) -> rusqlite::Result<Option<i64>> {
 /// Reminders that should be sent now, oldest first.
 pub fn due(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Reminder>> {
     let mut stmt = conn.prepare(
-        "SELECT id, user_id, channel_id, guild_id, message, fire_at, created_at, attempts
+        "SELECT id, user_id, channel_id, guild_id, message, fire_at, created_at, attempts,
+                source_message_id, missing_images
          FROM reminders WHERE sent_at IS NULL AND next_try_at <= ?1
          ORDER BY next_try_at LIMIT 50",
     )?;
@@ -127,7 +148,8 @@ pub fn due(conn: &Connection, now: i64) -> rusqlite::Result<Vec<Reminder>> {
 pub fn get(conn: &Connection, id: i64) -> rusqlite::Result<Option<Reminder>> {
     let reminder = conn
         .query_row(
-            "SELECT id, user_id, channel_id, guild_id, message, fire_at, created_at, attempts
+            "SELECT id, user_id, channel_id, guild_id, message, fire_at, created_at, attempts,
+                    source_message_id, missing_images
              FROM reminders WHERE id = ?1",
             [id],
             reminder_from_row,
@@ -222,6 +244,8 @@ fn reminder_from_row(row: &Row) -> rusqlite::Result<Reminder> {
         fire_at: row.get(5)?,
         created_at: row.get(6)?,
         attempts: row.get(7)?,
+        source_message_id: row.get(8)?,
+        missing_images: row.get(9)?,
         images: Vec::new(),
     })
 }
@@ -260,6 +284,8 @@ mod tests {
             message: format!("at {fire_at}"),
             fire_at,
             created_at: 0,
+            source_message_id: None,
+            missing_images: 0,
             images: Vec::new(),
         }
     }
@@ -278,9 +304,13 @@ mod tests {
                 data: vec![3],
             },
         ];
+        reminder.source_message_id = Some(30);
+        reminder.missing_images = 1;
         let id = add(&mut conn, &reminder).unwrap();
         let got = get(&conn, id).unwrap().unwrap();
         assert_eq!(got.images, reminder.images);
+        assert_eq!(got.source_message_id, Some(30));
+        assert_eq!(got.missing_images, 1);
         assert_eq!(got.guild_id, Some(20));
         assert_eq!(list_pending(&conn, 1).unwrap()[0].image_count, 2);
     }

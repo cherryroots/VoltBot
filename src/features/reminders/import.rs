@@ -55,6 +55,9 @@ fn read_reminder(row: &Row) -> anyhow::Result<NewReminder> {
         message: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         fire_at: row.get(6)?,
         created_at: row.get(7)?,
+        // voltgpt didn't keep the message that set the reminder.
+        source_message_id: None,
+        missing_images: 0,
         images: decode_images(images.as_deref()).context("images")?,
     })
 }

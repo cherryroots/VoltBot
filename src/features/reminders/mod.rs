@@ -25,6 +25,7 @@ use chrono_tz::Tz;
 use serenity::all::{
     ComponentInteraction, ComponentInteractionDataKind, CreateAllowedMentions,
     CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage, Message,
+    PremiumTier,
 };
 use tokio::sync::Notify;
 use tracing::{info, warn};
@@ -33,9 +34,6 @@ use self::parse::When;
 use self::store::{Image, NewReminder};
 use self::ui::Action;
 use crate::core::{BotCtx, Command, Feature, LegacyImport, Result, Stat, settings, user_error};
-
-/// Attachments bigger than this aren't saved: the bot couldn't upload them again.
-const MAX_IMAGE_BYTES: u32 = 10 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct Reminders {
@@ -94,7 +92,11 @@ impl Feature for Reminders {
             .map_err(user_error)?
             .timestamp();
 
-        let (images, skipped) = download_images(msg).await;
+        // Only keep what the bot can upload again in this server, which depends on its boosts.
+        let tier = msg
+            .guild_id
+            .and_then(|id| ctx.cache.guild(id).map(|guild| guild.premium_tier));
+        let (images, skipped) = download_images(msg, upload_limit(tier)).await;
         let new = NewReminder {
             user_id: msg.author.id.get(),
             channel_id: msg.channel_id.get(),
@@ -102,6 +104,8 @@ impl Feature for Reminders {
             message: parsed.message.clone(),
             fire_at,
             created_at: Utc::now().timestamp(),
+            source_message_id: Some(msg.id.get()),
+            missing_images: skipped.len() as u32,
             images,
         };
         let id = ctx
@@ -199,6 +203,8 @@ impl Reminders {
             message: reminder.message,
             fire_at: until,
             created_at: reminder.created_at,
+            source_message_id: reminder.source_message_id,
+            missing_images: reminder.missing_images,
             images: reminder.images,
         };
         ctx.db.call(move |conn| Ok(store::add(conn, &new)?)).await?;
@@ -217,14 +223,25 @@ impl Reminders {
     }
 }
 
+/// The biggest file the bot can upload in a server with this boost level, in bytes.
+/// DMs (`None`) get the base limit.
+fn upload_limit(tier: Option<PremiumTier>) -> u32 {
+    const MIB: u32 = 1024 * 1024;
+    match tier {
+        Some(PremiumTier::Tier2) => 50 * MIB,
+        Some(PremiumTier::Tier3) => 100 * MIB,
+        _ => 10 * MIB,
+    }
+}
+
 /// Downloads the images (and videos) attached to the message. Returns them and the names
-/// of the ones that were too big to keep.
-async fn download_images(msg: &Message) -> (Vec<Image>, Vec<String>) {
+/// of the ones that couldn't be kept: bigger than `max_bytes`, or the download failed.
+async fn download_images(msg: &Message, max_bytes: u32) -> (Vec<Image>, Vec<String>) {
     let mut images = Vec::new();
     let mut skipped = Vec::new();
     // Discord only sets a width on images and videos.
     for attachment in msg.attachments.iter().filter(|a| a.width.is_some()) {
-        if attachment.size > MAX_IMAGE_BYTES {
+        if attachment.size > max_bytes {
             skipped.push(attachment.filename.clone());
             continue;
         }
@@ -233,8 +250,25 @@ async fn download_images(msg: &Message) -> (Vec<Image>, Vec<String>) {
                 filename: attachment.filename.clone(),
                 data,
             }),
-            Err(err) => warn!("couldn't download {}: {err}", attachment.filename),
+            Err(err) => {
+                warn!("couldn't download {}: {err}", attachment.filename);
+                skipped.push(attachment.filename.clone());
+            }
         }
     }
     (images, skipped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_limit_follows_boosts() {
+        let mib = 1024 * 1024;
+        assert_eq!(upload_limit(None), 10 * mib);
+        assert_eq!(upload_limit(Some(PremiumTier::Tier1)), 10 * mib);
+        assert_eq!(upload_limit(Some(PremiumTier::Tier2)), 50 * mib);
+        assert_eq!(upload_limit(Some(PremiumTier::Tier3)), 100 * mib);
+    }
 }

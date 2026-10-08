@@ -273,7 +273,7 @@ Every user message the bot answers and every bot reply gets a row. `content_json
 
 ### 2. Reminders
 
-What it does: `@Vivy remind me in 2h30m do the thing` or `@Vivy remind me at 16:30 CET do the thing` stores a reminder (with any attached images) and pings the user in the same channel when it is due. `/reminders` lists your pending reminders with a select menu to delete one.
+What it does: `@Vivy remind me in 2h30m do the thing` or `@Vivy remind me at 16:30 CET do the thing` stores a reminder (with any attached images) and pings the user in the same channel when it is due, with a link back to the message that set it. Images are kept up to the bot's upload limit in that server, which follows its boost level (10 MB, 50 MB at level 2, 100 MB at level 3); anything bigger is named in the confirmation and counted as missing in the fired reminder. `/reminders` lists your pending reminders with a select menu to delete one.
 
 Events and guards: `on_mention` through the mention prefixes `remind me`, `reminder` and `remind`; slash commands `/reminders` and `/timezone`; the delete menu and snooze buttons (`reminders:` custom IDs); `start` runs the scheduler; publishes `BotEvent::ReminderFired`.
 
@@ -291,9 +291,9 @@ Timezone: `/timezone <IANA name>` stores a per-user zone (new `user_settings` ta
 
 Scheduler: one background task instead of a timer per reminder. It loads the next due reminder from SQLite, sleeps until then with `tokio::select!`, and is woken early through a `tokio::sync::Notify` whenever a reminder is added or deleted.
 
-Delivery: a reminder is only marked sent after Discord accepted it. If sending fails, it stays and is retried with a growing delay (1 minute, doubling up to 6 hours); after 10 failed sends it is dropped with an error in the log channel that includes its text. The fired message has snooze buttons (10m, 1h, tomorrow) that create a new reminder with the same text and images; sent reminders are kept for a week so those buttons keep working, then purged.
+Delivery: a reminder is only marked sent after Discord accepted it. If sending with images fails, it is sent again without them, with an `[image missing]` hint (the link to the original message still has them). If that fails too, it stays and is retried with a growing delay (1 minute, doubling up to 6 hours); after 10 failed sends it is dropped with an error in the log channel that includes its text. The fired message has snooze buttons (10m, 1h, tomorrow) that create a new reminder with the same text and images; sent reminders are kept for a week so those buttons keep working, then purged.
 
-Storage: `reminders` (id, user, channel, guild, message, fire time, created time, next try time, attempts, sent time), `reminder_images` (reminder id, filename, data as a BLOB instead of Go's base64 JSON), and the shared `user_settings` (user, timezone).
+Storage: `reminders` (id, user, channel, guild, message, fire time, created time, source message, missing image count, next try time, attempts, sent time), `reminder_images` (reminder id, filename, data as a BLOB instead of Go's base64 JSON), and the shared `user_settings` (user, timezone).
 
 Likely crates: `winnow`, `chrono`, `chrono-tz`.
 
