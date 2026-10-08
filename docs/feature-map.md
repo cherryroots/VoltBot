@@ -72,13 +72,13 @@ The exact shape of this gets settled in stage 1, with the smallest feature that 
 
 What it does: when someone @-mentions the bot, it builds a request from the message (text, attachment names, embed text, images, video frames), sends it to OpenAI's Responses API with web search and code interpreter turned on, and streams the answer into a Discord reply, editing it about once per second. Long answers are split across several messages. Files produced by the code interpreter are attached to the final message.
 
-Conversation history: every Discord message ID of a bot reply is stored with its OpenAI response ID (`response_ids` table). Replying to a bot message continues from that response ID. If no ID is found, the reply chain is fetched and rebuilt as input.
+Conversation history: in Go, every Discord message ID of a bot reply is stored with its OpenAI response ID (`response_ids` table), and replying to a bot message continues from that ID. That only works for OpenAI, because Claude and Gemini keep no conversation state on their side. VoltBot keeps its own provider-neutral history instead (see "AI providers" below), and OpenAI's response ID becomes an optional shortcut stored next to it.
 
 Progress feedback: a ⏳ reaction while the model works, removed when it finishes.
 
 Events and guards: message created, guard = not from a bot, mentions the bot, not a reminder trigger.
 
-Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, running tool calls, and returning generated files. Those go behind a trait. Discord streaming, message splitting, media extraction and the bot's own tools stay outside it so every provider reuses them.
+Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, and returning generated files. Those go behind a trait (see "AI providers" below). Discord streaming, message splitting, media extraction, the tool loop and the bot's own tools stay outside it so every provider reuses them.
 
 Prompt caching: the system prompt is fully static. The Go bot appended the current time, channel name and memory context to the instructions, which come first in every request, so the cache broke there and the conversation history after it was never reused. VoltBot drops memory and gives the model tools to look up the time and channel instead. The tool list is also static and in a fixed order, since it is part of the cached prefix.
 
@@ -116,9 +116,47 @@ Go helpers this needs (port as Rust functions):
 - `utility/video.go`: video frames through ffmpeg (call the `ffmpeg` binary directly with `tokio::process::Command`)
 - `discord/discord.go`: send/edit helpers, link-embed suppression, error message helper
 
-Storage: `response_ids (message_id, response_id)`.
+Storage: `chat_turns` (see "AI providers" below).
 
 Likely crates: `async-openai` (check it supports the Responses API and streaming; fall back to `reqwest` + `serde` + SSE if not), `reqwest`, `base64`, `image`.
+
+#### AI providers
+
+**Claude: use the Claude API, not the Agent SDK.** There is no official Rust Agent SDK; Anthropic ships it for Python and TypeScript only. The Rust crates under that name are community projects, and they work by starting the Claude Code CLI as a subprocess, so the bot server would need Node.js and Claude Code installed and would start a process per message. The Agent SDK is built for coding agents: its built-in tools read and write files and run shell commands on the machine, which is the wrong thing to hand to Discord users. It also needs an API key, since Claude subscription logins aren't allowed for apps other people use, so it doesn't save money. Its sessions are local transcript files on disk resumed by session ID, which is a different model from Discord reply chains.
+
+The plain Claude API (Messages API) has everything the bot needs: streaming, images, custom tools, server-side web search and web fetch, code execution, adaptive thinking with an effort setting, and prompt caching. There is no official Rust client SDK either, so the Claude provider calls the HTTP API with `reqwest` + `serde` and parses the SSE stream. That is a few hundred lines and doubles as a good learning exercise. (Community crates exist, but they tend to lag behind new API features.)
+
+**Conversation state differs per provider.** OpenAI can keep the conversation on its side (`previous_response_id`). Claude and Gemini are stateless: every request sends the whole history, and prompt caching makes the repeated part cheap. The provider trait therefore always receives the full history, plus an optional continuation ID the provider may use instead:
+
+```rust
+struct ChatRequest {
+    system: String,                // static, cache friendly
+    history: Vec<Turn>,            // provider-neutral, oldest first
+    continuation: Option<String>,  // e.g. OpenAI response ID, only if this provider wrote it
+    tools: Vec<ToolDef>,           // the bot's own tools, fixed order
+}
+
+enum ChatEvent {
+    TextDelta(String),
+    ToolCall { id: String, name: String, args: serde_json::Value },
+    File(GeneratedFile),           // from code interpreter / code execution
+    Done { continuation: Option<String> },
+}
+
+#[async_trait]
+trait ChatProvider: Send + Sync {
+    fn name(&self) -> &'static str;   // "openai", "claude", "gemini"
+    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatEvent>>>;
+}
+```
+
+The tool loop lives outside the trait: when a `ToolCall` arrives, the bot runs the tool, appends the call and its result to the history, and calls `stream` again. Each provider converts `Turn` into its own wire format and handles its own caching details (Claude needs `cache_control`; OpenAI caches automatically with `prompt_cache_key`).
+
+**One history table, marked per provider.** Replaces Go's `response_ids`:
+
+`chat_turns (discord_message_id PK, parent_message_id, role, content_json, provider, model, continuation_id NULL, created_at)`
+
+Every user message the bot answers and every bot reply gets a row. `content_json` holds provider-neutral content (text, image references, tool calls and results). `provider` says which provider wrote the row, and `continuation_id` holds OpenAI's response ID when there is one. When someone replies to a bot message, the bot walks `parent_message_id` up the chain. If the newest bot turn was written by the current provider and has a `continuation_id`, it sends that. Otherwise it sends the rebuilt history. This means switching providers in the middle of a conversation works, and it no longer depends on fetching old messages from Discord. Image attachments are stored by URL; Discord CDN links expire, so the rebuild refreshes them through Discord's refresh-urls endpoint before sending.
 
 ### 2. Reminders
 
@@ -167,7 +205,7 @@ The money logic (`playerMoney`, `playerTax`, `payout`) is pure and easy to unit 
 | 2 | Shared helpers: message splitting, sending and editing, media extraction, downloads | Chat needs them and they are easy to test on their own |
 | 3 | AI chat behind the provider trait, OpenAI implementation, tool loop and chat tools, reaction controls | The main feature; builds on stages 1 and 2, and reminder tools reuse the stage 1 parser |
 | 4 | Movie wheel, plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
-| Later | Claude provider, then Gemini | When credits arrive |
+| Later | Claude provider (Messages API over `reqwest`), then Gemini | When credits arrive |
 | Later | Image hashing redesign | TODO |
 
 ## TODO: image hashing
