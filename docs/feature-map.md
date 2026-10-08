@@ -7,8 +7,9 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 | Topic | Decision |
 |---|---|
 | Discord library | `serenity` + `poise` (poise handles slash commands, serenity handles raw events) |
-| AI provider | OpenAI first, behind a provider trait so Claude and Gemini can be added later |
-| Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, prefixed with its name, and its own migrations, recorded in a shared `schema_migrations` table |
+| AI provider | OpenAI first, behind a provider trait. Claude next, through the plain Messages API (not the Agent SDK), then maybe Gemini |
+| Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, named after it (`reminders`, `reminder_images`, `wheel_*`, `chat_turns`), and its own migrations, recorded in a shared `schema_migrations` table. Core tables shared by all features: `user_settings`, `legacy_imports` |
+| Config | `.env` for secrets and settings, including the admin user IDs that Go hardcodes |
 | Async runtime | `tokio` (serenity already uses it) |
 
 ## Scope
@@ -64,7 +65,7 @@ The exact shape of this gets settled in stage 1, with the smallest feature that 
 | Slash command | Reminders (`/reminders`, `/timezone`), Movie wheel (4 commands) |
 | Button / select menu | Reminders (delete menu, snooze buttons), Movie wheel (5 components) |
 | Modal submit | Movie wheel (bet amount) |
-| Ready | All: load state from SQLite, re-arm reminder timers, log counts |
+| Ready | Core: run migrations and the `old.db` import. Reminders: start the scheduler. All: log counts |
 
 ## Feature details
 
@@ -180,7 +181,7 @@ Scheduler: one background task instead of a timer per reminder. It loads the nex
 
 Delivery: a reminder is only deleted after it was sent. If sending fails, it stays and is retried with a growing delay. The fired message has snooze buttons (10m, 1h, tomorrow) that create a new reminder with the same text and images.
 
-Storage: `reminders` table (user, channel, guild, message, images as BLOB or base64 JSON, fire time, created time, attempts), `user_settings` (user, timezone).
+Storage: `reminders` (id, user, channel, guild, message, fire time, created time, attempts), `reminder_images` (reminder id, filename, data as a BLOB instead of Go's base64 JSON), and the shared `user_settings` (user, timezone).
 
 Likely crates: `winnow`, `chrono`, `chrono-tz`.
 
@@ -213,7 +214,7 @@ CREATE TABLE wheel_bets    (round_id INTEGER NOT NULL REFERENCES wheel_rounds(id
 
 The keys enforce rules for free: one claim per player per round, one bet per player per option per round (placing it again updates the amount with `INSERT ... ON CONFLICT DO UPDATE`). The active season is the one with `ended_at IS NULL`; a reset sets `ended_at` and starts a new one. Players are everyone who claimed or bet in the season, so there is no separate players table. Balances are still never stored: the bot loads the season's rows into plain structs and runs the ledger function over them. Each change is one small `INSERT`, `UPDATE` or `DELETE` inside a transaction, so nothing has to be kept in memory between commands and no global game mutex is needed.
 
-Rules today, so the port keeps them exact: every round a player can claim 100. Before each payout, a player who bet less than 10% of their money loses 3% of it per missing percentage point (up to 30%). A winning bet pays `amount × (options − 1)`, where options are the wheel options left in that round; a losing bet loses its amount. A player can bet on at most half of the remaining options (rounded up). Balances are never stored: they are recomputed from the full list of rounds, claims and bets every time. Integer division truncates, as in Go.
+Rules today, so the port keeps them exact: every round a player can claim 100. Before each payout, a player who bet less than 10% of their money loses 3% of it per missing percentage point (up to 30%). A winning bet pays `amount × (options − 1)`, where options are the wheel options left in that round; a losing bet loses its amount. A player can bet on at most half of the remaining options (rounded up). Integer division truncates, as in Go.
 
 Changes in the port:
 
@@ -232,10 +233,10 @@ Ideas for later, not part of the port: a `/wheel_spin` command that picks the wi
 
 | Stage | Work | Why this order |
 |---|---|---|
-| 1 | Skeleton: config from `.env`, SQLite, poise setup, the feature dispatcher and guards, plus Reminders (parser, scheduler, timezone, snooze) | Reminders touch every event type (message, slash command, buttons, select menu, ready, timers), so they prove the skeleton |
+| 1 | Skeleton: config from `.env`, SQLite and migrations, the `old.db` importer, poise setup, the feature dispatcher and guards, plus Reminders (parser, scheduler, timezone, snooze, import) | Reminders touch every event type (message, slash command, buttons, select menu, ready, timers), so they prove the skeleton |
 | 2 | Shared helpers: message splitting, sending and editing, media extraction, downloads | Chat needs them and they are easy to test on their own |
 | 3 | AI chat behind the provider trait, OpenAI implementation, tool loop and chat tools, reaction controls | The main feature; builds on stages 1 and 2, and reminder tools reuse the stage 1 parser |
-| 4 | Movie wheel, plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
+| 4 | Movie wheel (ledger, tables, import), plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
 | Later | Claude provider (Messages API over `reqwest`), then Gemini | When credits arrive |
 | Later | Image hashing redesign | TODO |
 
