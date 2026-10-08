@@ -193,9 +193,22 @@ Components: `button_currentround`, `button_claim`, `button_bet`, `button_winner`
 
 Events and guards: slash commands, buttons, select menus, modal submit; admin guard on the admin actions.
 
-Storage: the whole game is one JSON blob in `game_state`, loaded at startup and written after every change. Keep that: it maps directly to a `serde` struct behind a `tokio::sync::Mutex`.
+Storage: the whole game is one JSON blob in `game_state`, loaded at startup and written after every change. Keep that, one row per guild and season: it maps directly to a `serde` struct behind a `tokio::sync::Mutex`.
 
-The money logic (`playerMoney`, `playerTax`, `payout`) is pure and easy to unit test, so it's worth porting with tests before touching Discord.
+Rules today, so the port keeps them exact: every round a player can claim 100. Before each payout, a player who bet less than 10% of their money loses 3% of it per missing percentage point (up to 30%). A winning bet pays `amount × (options − 1)`, where options are the wheel options left in that round; a losing bet loses its amount. A player can bet on at most half of the remaining options (rounded up). Balances are never stored: they are recomputed from the full list of rounds, claims and bets every time. Integer division truncates, as in Go.
+
+Changes in the port:
+
+- **One ledger function.** Go recomputes a player's money from round 0 for every row of the status embed. VoltBot computes a ledger once, a pure function that folds over the rounds and returns every player's balance, tax and payout per round. The embed, the bet checks and the `get_wheel_status` tool all read from it. It is the first thing to write, with unit tests.
+- **Same numbers as today.** A one-time import reads the current `game_state` JSON from voltgpt, and a test checks that the ledger produces the same balances the Go bot shows, so the running game carries over.
+- **Store user IDs, not user objects.** Go saves the whole Discord user in the JSON, so names and avatars go stale. VoltBot stores IDs and looks names up when it renders the embed.
+- **Fix a wrong winner.** Once a winner is set, a new round starts and the old one can no longer be changed, so a mis-click is permanent. Admins get an "Undo winner" action on the latest resolved round, allowed while the new round has no bets yet.
+- **Winner without bets.** Go refuses to set a winner when nobody bet ("No bets!"), which blocks the wheel if a movie was watched without bets. VoltBot allows it.
+- **Seasons instead of a hard reset.** `/reset_wheel` deletes everything with no confirmation. VoltBot asks for confirmation with a button and archives the old game as a finished season, so past results stay viewable.
+- **One game per server.** Go has a single global game. VoltBot keys the game by guild ID; it costs nothing and avoids surprises.
+- **Don't hold the lock during Discord calls.** Go keeps `gamble.Mu` locked while it calls the Discord API. VoltBot locks the game state, makes the change, builds the embed, unlocks, and only then talks to Discord. With `tokio::sync::Mutex` this is easy to get wrong, so it's worth learning here.
+
+Ideas for later, not part of the port: a `/wheel_spin` command that picks the winner randomly with an animated embed, and a per-player balance history.
 
 ## Port order
 
