@@ -105,6 +105,14 @@ deny_channels = [850179179281776670]
 
 Secrets stay in `.env`; everything else goes in `config.toml`, and each feature reads its own `[features.<name>]` section into its own `serde` struct.
 
+### Logging and error reporting
+
+- **`tracing` everywhere.** The dispatcher opens a span for every event with the feature name, guild, channel, user and interaction or message ID, so every log line inside a handler carries that context without passing it around. `tracing-subscriber` writes readable lines in development and JSON in production, with the level set by `RUST_LOG` (for example `RUST_LOG=info,voltbot::features::chat=debug`).
+- **Errors keep their cause.** Handlers return `anyhow::Result`, and errors get `.context("what we were doing")` where they happen. The dispatcher logs the whole chain once, at `error` level, with the span's context. A panic hook logs panics the same way.
+- **Error alerts in Discord.** A small `tracing` layer forwards `error` events to an admin channel (set in `config.toml`), rate limited and grouped so one broken feature doesn't flood it. The message includes the feature, the error chain and a link to the triggering message.
+- **Optional: Sentry.** The `sentry` crate with its `tracing` integration groups errors, counts them, and keeps the breadcrumbs that led up to each one. It turns on when `SENTRY_DSN` is set; GlitchTip is a self-hostable server that speaks the same protocol.
+- **Running it.** The bot logs to stdout and doesn't care what starts it. A systemd unit (`Restart=on-failure`, logs in `journalctl -u voltbot`) or a Docker container with a log driver both work, and so does the current pmon3 setup.
+
 ### Shared services on `BotCtx`
 
 Features get everything shared through one context value: the serenity HTTP client and cache, `db`, `config`, `settings` (per-user values like the timezone), `ai`, `events`, and a shutdown `CancellationToken` that background tasks watch.
@@ -215,7 +223,7 @@ Go helpers and what replaces them. Most come from serenity, poise or a well-know
 | `strings.go` | the standard library |
 | YouTube and PDF URL handling | dropped, as the Go OpenAI path already ignores them. Claude reads PDFs, so this can return with the Claude provider |
 
-Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging), `anyhow` (errors), `rusqlite_migration` (per-feature migrations), `tokio-util`'s `CancellationToken` (❌ stops an answer), `reqwest-eventsource` (Claude's SSE stream).
+Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging, see "Logging and error reporting"), `anyhow` (errors), `rusqlite_migration` (per-feature migrations), `tokio-util`'s `CancellationToken` (❌ stops an answer), `reqwest-eventsource` (Claude's SSE stream).
 
 Storage: `chat_turns` (see "AI providers" below).
 
