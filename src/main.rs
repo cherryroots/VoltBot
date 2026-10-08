@@ -87,6 +87,13 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
             .map(|&id| serenity::UserId::new(id))
             .collect(),
         initialize_owners: false,
+        // There are no prefix commands: mentions go to the features through the dispatcher.
+        // Without this, poise also reads "@Vivy remind me ..." as a command and warns that
+        // it doesn't know "remind".
+        prefix_options: poise::PrefixFrameworkOptions {
+            mention_as_prefix: false,
+            ..Default::default()
+        },
         ..Default::default()
     };
 
