@@ -117,6 +117,21 @@ pub fn parse_reminder(text: &str) -> Result<Parsed, String> {
     }
 }
 
+/// Reads a time on its own, like "in 2h" or "tomorrow at 9am". Used by the chat tool, where
+/// the model passes the time and the message separately.
+pub fn parse_when(text: &str) -> Result<When, String> {
+    let mut input = text.trim();
+    match when.parse_next(&mut input) {
+        Ok(when) if input.trim_end_matches(['.', '!', '?', ' ']).is_empty() => Ok(when),
+        Ok(_) => Err(format!(
+            "I didn't understand \"{}\" after the time.",
+            input.trim()
+        )),
+        Err(ErrMode::Cut(err)) => Err(format!("I expected {}.", expected(&err))),
+        Err(_) => Err("That isn't a time I understand.".to_string()),
+    }
+}
+
 /// Turns a parsed time into an instant. `now` is the current time and `home` is the
 /// user's timezone, used when the text doesn't name one.
 pub fn resolve(when: &When, now: DateTime<Utc>, home: Tz) -> Result<DateTime<Utc>, String> {
@@ -491,6 +506,18 @@ fn to_utc(zone: Tz, date: NaiveDate, time: NaiveTime) -> Result<DateTime<Utc>, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_on_its_own() {
+        assert!(matches!(parse_when("in 2h"), Ok(When::In(_))));
+        assert!(matches!(
+            parse_when(" tomorrow at 9am "),
+            Ok(When::At { .. })
+        ));
+        assert!(parse_when("in 2h to cook").is_err());
+        assert!(parse_when("in soon").is_err());
+        assert!(parse_when("whenever").is_err());
+    }
 
     /// Sunday 2026-02-22 12:00 UTC, the same reference time as the Go tests.
     fn now() -> DateTime<Utc> {

@@ -23,6 +23,9 @@ use tokio_util::task::TaskTracker;
 use tracing::field::{Field, Visit};
 use tracing::span::{Attributes, Id};
 use tracing::{Event, Level, Subscriber};
+use tracing_subscriber::field::RecordFields;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt as _;
@@ -53,7 +56,11 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
     } else {
         // Colours only in a terminal, not in the systemd journal.
         let ansi = std::io::stdout().is_terminal();
-        tracing_subscriber::fmt::layer().with_ansi(ansi).boxed()
+        tracing_subscriber::fmt::layer()
+            .with_ansi(ansi)
+            .event_format(Compact)
+            .fmt_fields(CompactFields)
+            .boxed()
     };
 
     let min_level = Level::from_str(&config.discord_level)
@@ -83,6 +90,113 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
     }));
 
     Ok(receiver)
+}
+
+// ---------------------------------------------------------------------------------------
+// Readable lines on stdout
+// ---------------------------------------------------------------------------------------
+
+/// One short line per event:
+///
+/// ```text
+/// 2026-10-09T06:44:13Z  INFO chat::answer message{channel=2 message_id=3}: ran a chat tool tool="x"
+/// ```
+///
+/// Shorter than tracing's own format: the time to the second, our modules without
+/// `voltbot::features::`, and the spans without `feature`, `guild` and `user` (see
+/// [`CompactFields`]).
+struct Compact;
+
+impl<S, N> FormatEvent<S, N> for Compact
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let meta = event.metadata();
+        let ansi = writer.has_ansi_escapes();
+        let paint = |code: &'static str| if ansi { code } else { "" };
+        let (dim, bold, reset) = (paint("\x1b[2m"), paint("\x1b[1m"), paint("\x1b[0m"));
+        let colour = paint(match *meta.level() {
+            Level::ERROR => "\x1b[31m",
+            Level::WARN => "\x1b[33m",
+            Level::INFO => "\x1b[32m",
+            Level::DEBUG => "\x1b[34m",
+            Level::TRACE => "\x1b[35m",
+        });
+
+        write!(
+            writer,
+            "{dim}{}{reset} {colour}{:>5}{reset} {dim}{}{reset}",
+            Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
+            meta.level(),
+            short_target(meta.target()),
+        )?;
+        if let Some(scope) = ctx.event_scope() {
+            for span in scope.from_root() {
+                write!(writer, " {bold}{}{reset}", span.name())?;
+                if let Some(fields) = span.extensions().get::<FormattedFields<N>>()
+                    && !fields.is_empty()
+                {
+                    write!(writer, "{{{fields}}}")?;
+                }
+            }
+        }
+        write!(writer, ": ")?;
+        ctx.format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
+/// Writes fields as `name=value`, skipping `feature`, `guild` and `user`: the module already
+/// names the feature, and the channel and message ID are enough to find the message. The
+/// Discord log channel reads the spans itself, so its links still have the server.
+struct CompactFields;
+
+impl<'w> FormatFields<'w> for CompactFields {
+    fn format_fields<R: RecordFields>(&self, writer: Writer<'w>, fields: R) -> fmt::Result {
+        let mut visitor = CompactVisitor {
+            writer,
+            first: true,
+            result: Ok(()),
+        };
+        fields.record(&mut visitor);
+        visitor.result
+    }
+}
+
+struct CompactVisitor<'w> {
+    writer: Writer<'w>,
+    first: bool,
+    result: fmt::Result,
+}
+
+impl Visit for CompactVisitor<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if self.result.is_err() || matches!(field.name(), "feature" | "guild" | "user") {
+            return;
+        }
+        let space = if self.first { "" } else { " " };
+        self.first = false;
+        self.result = match field.name() {
+            // The log message itself, without a name.
+            "message" => write!(self.writer, "{space}{value:?}"),
+            name => write!(self.writer, "{space}{name}={value:?}"),
+        };
+    }
+}
+
+/// Our own modules without the `voltbot::` (and `features::`) in front.
+fn short_target(target: &str) -> &str {
+    target
+        .strip_prefix("voltbot::features::")
+        .or_else(|| target.strip_prefix("voltbot::"))
+        .unwrap_or(target)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -155,7 +269,7 @@ impl SpanFields {
             "feature" => self.feature = Some(value),
             "guild" => self.guild = Some(value),
             "channel" => self.channel = Some(value),
-            "message" => self.message = Some(value),
+            "message_id" => self.message = Some(value),
             _ => {}
         }
     }
@@ -362,6 +476,50 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A writer that keeps what the formatter wrote, for the test below.
+    #[derive(Clone, Default)]
+    struct Captured(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn compact_format() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .event_format(Compact)
+            .fmt_fields(CompactFields)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                "message",
+                feature = "chat",
+                guild = 1u64,
+                channel = 2u64,
+                user = 4u64
+            );
+            let _entered = span.enter();
+            tracing::info!(target: "voltbot::features::chat::answer", tool = "x", "ran a tool");
+        });
+        let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        let line = output.strip_suffix('\n').unwrap();
+        // "2026-10-09T06:44:13Z " in front.
+        assert_eq!(
+            &line[21..],
+            r#" INFO chat::answer message{channel=2}: ran a tool tool="x""#
+        );
+    }
 
     fn line(level: Level, text: &str) -> LogLine {
         LogLine {

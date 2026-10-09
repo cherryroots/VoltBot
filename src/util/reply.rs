@@ -7,10 +7,9 @@
 //! needed. Parts that didn't change cost no API call.
 
 use serenity::all::{
-    ChannelId, CreateAllowedMentions, CreateMessage, EditMessage, Http, MessageFlags, MessageId,
+    ChannelId, CreateAllowedMentions, CreateAttachment, CreateMessage, EditMessage, Http, Message,
+    MessageFlags, MessageId,
 };
-
-use super::split::{DISCORD_LIMIT, split_message};
 
 /// What has to happen to Discord message `n` to show the new parts.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +42,8 @@ pub struct LiveReply {
     reply_to: Option<MessageId>,
     /// The messages sent so far and the text each one shows.
     sent: Vec<(MessageId, String)>,
+    /// Set by [`LiveReply::resume`]: the next edits also remove the old messages' files.
+    clear_files: bool,
 }
 
 impl LiveReply {
@@ -51,6 +52,24 @@ impl LiveReply {
             channel,
             reply_to,
             sent: Vec::new(),
+            clear_files: false,
+        }
+    }
+
+    /// Takes over messages that were already sent, for example to show a regenerated answer
+    /// in place of the old one. The next [`LiveReply::show`] edits every message and removes
+    /// their files.
+    pub fn resume(
+        channel: ChannelId,
+        reply_to: Option<MessageId>,
+        messages: &[MessageId],
+    ) -> LiveReply {
+        LiveReply {
+            channel,
+            reply_to,
+            // An impossible text, so every message counts as changed.
+            sent: messages.iter().map(|id| (*id, "\0".to_string())).collect(),
+            clear_files: true,
         }
     }
 
@@ -60,9 +79,12 @@ impl LiveReply {
         for change in changes(&shown, parts) {
             match change {
                 Change::Edit(n) => {
-                    let edit = EditMessage::new()
+                    let mut edit = EditMessage::new()
                         .content(&parts[n])
                         .allowed_mentions(mentions());
+                    if self.clear_files {
+                        edit = edit.remove_all_attachments();
+                    }
                     self.channel
                         .edit_message(http, self.sent[n].0, edit)
                         .await?;
@@ -86,12 +108,26 @@ impl LiveReply {
                 }
             }
         }
+        self.clear_files = false;
         Ok(())
     }
 
-    /// Splits `text` and shows it.
-    pub async fn show_text(&mut self, http: &Http, text: &str) -> anyhow::Result<()> {
-        self.show(http, &split_message(text, DISCORD_LIMIT)).await
+    /// Adds files to the last message. Returns the message, whose attachments now have
+    /// Discord links.
+    pub async fn attach(
+        &mut self,
+        http: &Http,
+        files: Vec<CreateAttachment>,
+    ) -> anyhow::Result<Message> {
+        let (id, _) = self
+            .sent
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("nothing was sent yet"))?;
+        let mut edit = EditMessage::new();
+        for file in files {
+            edit = edit.new_attachment(file);
+        }
+        Ok(self.channel.edit_message(http, *id, edit).await?)
     }
 
     /// The Discord messages that make up the reply, in order.

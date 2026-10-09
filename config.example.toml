@@ -17,12 +17,26 @@ old_database = "old.db"
 # Lowest level posted there: "error", "warn" or "info".
 discord_level = "warn"
 
+# Model settings. The OpenAI key goes in .env (OPENAI_TOKEN).
+[ai.openai]
+model = "gpt-6.1-sol"
+# "none", "low", "medium", "high" or "xhigh".
+reasoning_effort = "medium"
+# How long answers are: "low", "medium" or "high".
+verbosity = "low"
+# Leave out for the account's default.
+service_tier = "fast"
+
 # Every feature has a section. These keys work in all of them:
 #   enabled = false                   turn the feature off
 #   guilds = [id, ...]                only in these servers
 #   deny_guilds = [id, ...]           never in these servers
 #   channels = [id, ...]              only in these channels
 #   deny_channels = [id, ...]         never in these channels
+
+[features.chat]
+# Answers @-mentions that no other feature claimed.
+enabled = true
 
 [features.reminders]
 enabled = true
