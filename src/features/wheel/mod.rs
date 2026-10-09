@@ -19,6 +19,8 @@ mod import;
 mod ledger;
 mod names;
 mod render;
+#[cfg(test)]
+mod sim;
 mod store;
 mod tools;
 mod ui;
