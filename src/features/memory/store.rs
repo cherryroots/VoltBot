@@ -4,7 +4,7 @@
 //! Each server has one memory folder, and each person has a private one for DMs. A folder
 //! is named by its scope: `server:<guild id>` or `dm:<user id>`.
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use super::folder::Folder;
 
@@ -32,6 +32,11 @@ pub const MIGRATIONS: &[&str] = &[
     // 2: when Vivy last reflected on each server's folder.
     "CREATE TABLE memory_reflections (
         scope TEXT PRIMARY KEY,
+        at INTEGER NOT NULL               -- unix seconds
+    );",
+    // 3: when Vivy last posted her diary in each diary channel.
+    "CREATE TABLE memory_diaries (
+        channel_id INTEGER PRIMARY KEY,
         at INTEGER NOT NULL               -- unix seconds
     );",
 ];
@@ -149,6 +154,51 @@ pub fn set_reflected(conn: &Connection, scope: &str, at: i64) -> rusqlite::Resul
     Ok(())
 }
 
+/// The newest version of `path` in any server's folder: (scope, content).
+pub fn newest_file(conn: &Connection, path: &str) -> rusqlite::Result<Option<(String, String)>> {
+    conn.query_row(
+        "SELECT scope, content FROM memory_files
+         WHERE path = ?1 AND scope LIKE 'server:%' ORDER BY updated_at DESC LIMIT 1",
+        [path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+}
+
+/// The files changed since `since`, with their current text (`None` if deleted).
+pub fn changed_since(
+    conn: &Connection,
+    scope: &str,
+    since: i64,
+) -> rusqlite::Result<Vec<(String, Option<String>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT c.path, f.content FROM memory_changes c
+         LEFT JOIN memory_files f ON f.scope = c.scope AND f.path = c.path
+         WHERE c.scope = ?1 AND c.at > ?2 ORDER BY c.path",
+    )?;
+    let rows = stmt.query_map(params![scope, since], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+/// When the diary was last posted in `channel`.
+pub fn diary_posted_at(conn: &Connection, channel: u64) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT at FROM memory_diaries WHERE channel_id = ?1",
+        [channel],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn set_diary_posted(conn: &Connection, channel: u64, at: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO memory_diaries (channel_id, at) VALUES (?1, ?2)
+         ON CONFLICT (channel_id) DO UPDATE SET at = excluded.at",
+        params![channel, at],
+    )?;
+    Ok(())
+}
+
 /// Files and folders in use, for the control panel.
 pub fn stats(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
@@ -245,6 +295,54 @@ mod tests {
             due_reflections(&conn, 200 + day, day).unwrap(),
             vec!["server:1"]
         );
+    }
+
+    #[test]
+    fn newest_files_changes_and_diaries() {
+        let conn = db();
+        let mood = |text: &str| {
+            let mut f = Folder::new();
+            f.insert("/memories/vivy/mood.md".into(), text.into());
+            f
+        };
+        save(
+            &conn,
+            "server:1",
+            &Folder::new(),
+            &mood("status: old"),
+            0,
+            100,
+        )
+        .unwrap();
+        save(
+            &conn,
+            "server:2",
+            &Folder::new(),
+            &mood("status: new"),
+            0,
+            200,
+        )
+        .unwrap();
+        save(&conn, "dm:3", &Folder::new(), &mood("status: dm"), 3, 300).unwrap();
+        assert_eq!(
+            newest_file(&conn, "/memories/vivy/mood.md").unwrap(),
+            Some(("server:2".to_string(), "status: new".to_string()))
+        );
+        assert_eq!(newest_file(&conn, "/memories/none").unwrap(), None);
+
+        let mut gone = mood("status: old");
+        gone.insert("/memories/a.md".into(), "a".into());
+        save(&conn, "server:1", &mood("status: old"), &gone, 0, 150).unwrap();
+        save(&conn, "server:1", &gone, &mood("status: old"), 0, 160).unwrap();
+        assert_eq!(
+            changed_since(&conn, "server:1", 120).unwrap(),
+            vec![("/memories/a.md".to_string(), None)]
+        );
+        assert_eq!(changed_since(&conn, "server:1", 0).unwrap().len(), 2);
+
+        assert_eq!(diary_posted_at(&conn, 5).unwrap(), None);
+        set_diary_posted(&conn, 5, 1000).unwrap();
+        assert_eq!(diary_posted_at(&conn, 5).unwrap(), Some(1000));
     }
 
     #[test]

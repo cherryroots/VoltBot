@@ -34,6 +34,24 @@ pub const MIGRATIONS: &[&str] = &[
         turn_id INTEGER NOT NULL REFERENCES chat_turns (id)
     );
     CREATE INDEX chat_messages_turn ON chat_messages (turn_id);",
+    // 2: check-ins Vivy planned for herself, and what the server's custom emoji look like.
+    "CREATE TABLE chat_follow_ups (
+        id INTEGER PRIMARY KEY,
+        guild_id INTEGER,                 -- NULL in DMs
+        channel_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,         -- who she checks in with
+        message_id INTEGER NOT NULL,      -- the message she planned it from
+        note TEXT NOT NULL,               -- what to ask about
+        due_at INTEGER NOT NULL,          -- unix seconds
+        created_at INTEGER NOT NULL
+    );
+    CREATE INDEX chat_follow_ups_due ON chat_follow_ups (due_at);
+    CREATE TABLE chat_emoji (
+        emoji_id INTEGER PRIMARY KEY,
+        guild_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        description TEXT NOT NULL
+    );",
 ];
 
 /// One piece of a stored turn. Media is kept as a link and downloaded again when an old
@@ -248,6 +266,105 @@ fn into_turn(row: RawRow) -> anyhow::Result<Turn> {
     })
 }
 
+/// A check-in Vivy planned for herself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FollowUp {
+    pub id: i64,
+    pub guild_id: Option<u64>,
+    pub channel_id: u64,
+    pub user_id: u64,
+    pub message_id: u64,
+    pub note: String,
+    pub due_at: i64,
+}
+
+pub fn add_follow_up(conn: &Connection, f: &FollowUp, now: i64) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO chat_follow_ups
+            (guild_id, channel_id, user_id, message_id, note, due_at, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            f.guild_id,
+            f.channel_id,
+            f.user_id,
+            f.message_id,
+            f.note,
+            f.due_at,
+            now
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// How many check-ins are planned with this person.
+pub fn pending_follow_ups(conn: &Connection, user: u64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT count(*) FROM chat_follow_ups WHERE user_id = ?1",
+        [user],
+        |row| row.get(0),
+    )
+}
+
+/// The check-ins that are due, and removes them: each one is tried once.
+pub fn take_due_follow_ups(conn: &mut Connection, now: i64) -> rusqlite::Result<Vec<FollowUp>> {
+    let tx = conn.transaction()?;
+    let due: Vec<FollowUp> = {
+        let mut stmt = tx.prepare(
+            "SELECT id, guild_id, channel_id, user_id, message_id, note, due_at
+             FROM chat_follow_ups WHERE due_at <= ?1 ORDER BY due_at",
+        )?;
+        let rows = stmt.query_map([now], |row| {
+            Ok(FollowUp {
+                id: row.get(0)?,
+                guild_id: row.get(1)?,
+                channel_id: row.get(2)?,
+                user_id: row.get(3)?,
+                message_id: row.get(4)?,
+                note: row.get(5)?,
+                due_at: row.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    tx.execute("DELETE FROM chat_follow_ups WHERE due_at <= ?1", [now])?;
+    tx.commit()?;
+    Ok(due)
+}
+
+/// When the next check-in is due.
+pub fn next_follow_up(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    conn.query_row("SELECT min(due_at) FROM chat_follow_ups", [], |row| {
+        row.get(0)
+    })
+}
+
+/// The emoji of a server that have a description, by ID.
+pub fn emoji_descriptions(
+    conn: &Connection,
+    guild: u64,
+) -> rusqlite::Result<std::collections::HashMap<u64, String>> {
+    let mut stmt =
+        conn.prepare("SELECT emoji_id, description FROM chat_emoji WHERE guild_id = ?1")?;
+    let rows = stmt.query_map([guild], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+pub fn set_emoji_description(
+    conn: &Connection,
+    emoji: u64,
+    guild: u64,
+    name: &str,
+    description: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO chat_emoji (emoji_id, guild_id, name, description) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (emoji_id) DO UPDATE SET name = excluded.name,
+            description = excluded.description",
+        params![emoji, guild, name, description],
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +385,41 @@ mod tests {
             }),
             created_at: 0,
         }
+    }
+
+    #[test]
+    fn follow_ups_are_taken_once_when_due() {
+        let mut conn = test_connection("chat", MIGRATIONS);
+        let follow_up = |due_at| FollowUp {
+            id: 0,
+            guild_id: Some(1),
+            channel_id: 2,
+            user_id: 3,
+            message_id: 4,
+            note: "the interview".into(),
+            due_at,
+        };
+        add_follow_up(&conn, &follow_up(100), 0).unwrap();
+        add_follow_up(&conn, &follow_up(200), 0).unwrap();
+        assert_eq!(pending_follow_ups(&conn, 3).unwrap(), 2);
+        assert_eq!(next_follow_up(&conn).unwrap(), Some(100));
+        assert!(take_due_follow_ups(&mut conn, 50).unwrap().is_empty());
+        let due = take_due_follow_ups(&mut conn, 150).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].note, "the interview");
+        assert!(take_due_follow_ups(&mut conn, 150).unwrap().is_empty());
+        assert_eq!(next_follow_up(&conn).unwrap(), Some(200));
+    }
+
+    #[test]
+    fn emoji_descriptions_by_server() {
+        let conn = test_connection("chat", MIGRATIONS);
+        set_emoji_description(&conn, 10, 1, "pog", "a surprised face").unwrap();
+        set_emoji_description(&conn, 10, 1, "pog2", "a very surprised face").unwrap();
+        set_emoji_description(&conn, 11, 2, "kek", "laughing").unwrap();
+        let first = emoji_descriptions(&conn, 1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[&10], "a very surprised face");
     }
 
     #[test]

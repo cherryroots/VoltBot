@@ -7,6 +7,8 @@
 //! - `tools.rs`: chat's own tools (time, channel, users, messages, pins, events)
 //! - `search.rs`: the `search_messages` tool
 //! - `chime.rs`: chiming in now and then without being mentioned
+//! - `follow_up.rs`: check-ins Vivy plans for herself, and their delivery
+//! - `emoji.rs`: the server's custom emoji, described once from their pictures
 //! - `prompt.md`: the system prompt
 //!
 //! Reactions on an answer, from the person who asked: ❌ stops it while it's being written
@@ -14,6 +16,8 @@
 
 mod answer;
 mod chime;
+mod emoji;
+mod follow_up;
 mod history;
 mod search;
 mod store;
@@ -26,6 +30,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
 use serenity::all::{Message, MessageId, Reaction, ReactionType, UserId};
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -43,6 +48,8 @@ pub struct Chat {
     /// Answers being written right now, so ❌ can stop them.
     running: Mutex<Vec<Running>>,
     chime: chime::Chime,
+    /// Wakes the follow-up task when a check-in is planned.
+    follow_ups: Arc<Notify>,
 }
 
 struct Running {
@@ -68,7 +75,10 @@ impl Feature for Chat {
     }
 
     fn tools(&self) -> Vec<ToolDef> {
-        tools::defs()
+        let mut defs = tools::defs();
+        defs.push(emoji::def());
+        defs.push(follow_up::def());
+        defs
     }
 
     async fn run_tool(
@@ -78,7 +88,17 @@ impl Feature for Chat {
         name: &str,
         args: &Value,
     ) -> Result<String> {
-        tools::run(ctx, asker, name, args).await
+        match name {
+            "list_server_emoji" => emoji::list(ctx, asker).await,
+            "schedule_follow_up" => follow_up::schedule(ctx, asker, args, &self.follow_ups).await,
+            _ => tools::run(ctx, asker, name, args).await,
+        }
+    }
+
+    async fn start(&self, ctx: &BotCtx) -> Result<()> {
+        follow_up::spawn(ctx, self.follow_ups.clone());
+        emoji::spawn(ctx);
+        Ok(())
     }
 
     async fn on_mention(&self, ctx: &BotCtx, msg: &Message, rest: &str) -> Result<()> {

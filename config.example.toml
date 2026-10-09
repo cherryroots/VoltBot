@@ -40,9 +40,9 @@ service_tier = "fast"
 [features.chat]
 # Answers @-mentions that no other feature claimed.
 enabled = true
-# Now and then Vivy reads the last 25 messages and chimes in with one line, an emoji
-# reaction, or nothing. The chance per message (0 turns it off), and how long a channel
-# waits before she considers it again.
+# Now and then Vivy reads the last 25 messages and chimes in with one line, a question,
+# an emoji reaction, or nothing. The chance per message (0 turns it off), and how long a
+# channel waits before she considers it again.
 chime_chance = 0.03
 chime_cooldown_minutes = 60
 
@@ -56,8 +56,10 @@ enabled = true
 [features.memory]
 # Notes Vivy keeps between conversations, through chat's `memory` tool and /memory.
 # Once a day, each server whose memory changed gets a reflection: Vivy tidies the folder
-# and updates her notes about herself.
+# and updates her notes about herself and her mood, which sets her Discord status.
 enabled = true
+# Channels where Vivy posts a weekly diary entry about her week in that server.
+# diary_channels = [123456789012345678]
 
 [features.control_panel]
 # Channel with the status message the bot keeps up to date.

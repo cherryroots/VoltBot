@@ -1,18 +1,21 @@
 //! The daily reflection: once a day, in each server whose memory changed, Vivy rereads her
 //! memory folder, tidies it (merges duplicates, drops what's stale, keeps files short) and
-//! updates her notes about herself from what she learned.
+//! updates her notes about herself from what she learned, including her mood
+//! (`/memories/vivy/mood.md`), whose `status:` line becomes her Discord status.
+//!
+//! The same hourly loop posts the weekly diary (`diary.rs`).
 
 use std::time::Duration;
 
-use async_trait::async_trait;
 use chrono::Utc;
 use serenity::all::GuildId;
 use tracing::{Instrument as _, error, info, info_span, warn};
 
 use super::folder::{self, Command};
-use super::{store, tool};
-use crate::ai::{ChatRequest, Input, Part, Role, ToolCall, ToolRunner, Turn, complete};
+use super::{diary, store, tool};
+use crate::ai::{ChatRequest, Input, Part, Role, Turn, complete};
 use crate::core::{BotCtx, Result};
+use crate::util::shorten;
 
 /// How often a server's folder is reflected on, at most.
 const EVERY_SECS: i64 = 24 * 60 * 60;
@@ -20,11 +23,16 @@ const EVERY_SECS: i64 = 24 * 60 * 60;
 const CHECK: Duration = Duration::from_secs(60 * 60);
 /// Memory commands in one reflection, at most.
 const MAX_ROUNDS: usize = 25;
+/// Her mood file; its `status:` line is her Discord status.
+const MOOD_FILE: &str = "/memories/vivy/mood.md";
+/// Discord's limit for a custom status.
+const MAX_STATUS: usize = 128;
 
 const SYSTEM: &str = "You are Vivy, a Discord bot with a memory folder for this server. \
 It's the end of the day, and you're looking after your memory: nobody is talking to you, and nothing you write here is posted. \
 Use the memory tool to keep the folder useful: merge notes that say the same thing, fix notes that contradict each other (a person's own word about themselves wins), delete what's stale or trivial, move notes into the file where they belong, and keep each file short. \
 Then update /memories/vivy/ from what you learned recently: your personality, your interests, your opinions, how you get along with people here. Grow naturally from what happened; don't invent big changes. Keep /memories/vivy/ under 2K. \
+Last, rewrite /memories/vivy/mood.md with two lines: `mood:` and a few words on how you feel lately and why, and `status:` and a short line for your Discord status (under 80 characters, in your voice, about what's on your mind; no hashtags). Let your mood follow what happened, and let it change from day to day. \
 When you're done, answer with one line saying what you changed.";
 
 pub fn spawn(ctx: &BotCtx) {
@@ -34,9 +42,13 @@ pub fn spawn(ctx: &BotCtx) {
 }
 
 async fn run(ctx: BotCtx) {
+    restore_status(&ctx).await;
     loop {
         if let Err(err) = reflect_due(&ctx).await {
             error!("reflecting on memory: {err:#}");
+        }
+        if let Err(err) = diary::post_due(&ctx).await {
+            error!("writing the diary: {err:#}");
         }
         tokio::select! {
             () = tokio::time::sleep(CHECK) => {}
@@ -62,8 +74,9 @@ async fn reflect_due(ctx: &BotCtx) -> Result<()> {
         if !allowed {
             continue;
         }
-        if let Err(err) = reflect(ctx, &scope).await {
-            warn!(scope, "reflection failed: {err:#}");
+        match reflect(ctx, &scope).await {
+            Ok(()) => update_status(ctx, &scope).await,
+            Err(err) => warn!(scope, "reflection failed: {err:#}"),
         }
         // Done or failed, the next try is tomorrow.
         let (at, done) = (Utc::now().timestamp(), scope.clone());
@@ -133,7 +146,7 @@ async fn reflect(ctx: &BotCtx, scope: &str) -> Result<()> {
         tools: vec![tool::def()],
         cache_key: format!("memory:{scope}"),
     };
-    let runner = Runner {
+    let runner = tool::FolderRunner {
         ctx: ctx.clone(),
         scope: scope.to_string(),
     };
@@ -142,22 +155,78 @@ async fn reflect(ctx: &BotCtx, scope: &str) -> Result<()> {
     Ok(())
 }
 
-/// Runs memory commands in the folder being reflected on, logged as Vivy's own changes.
-struct Runner {
-    ctx: BotCtx,
-    scope: String,
+/// Sets her Discord status from her newest mood, at start. Presence is the same in every
+/// server, so the server that reflected last decides it.
+async fn restore_status(ctx: &BotCtx) {
+    let newest = ctx
+        .db
+        .call(|conn| Ok(store::newest_file(conn, MOOD_FILE)?))
+        .await;
+    match newest {
+        Ok(Some((_, mood))) => {
+            if let Some(status) = parse_status(&mood) {
+                ctx.set_status(&status).await;
+            }
+        }
+        Ok(None) => {}
+        Err(err) => warn!("reading her mood: {err:#}"),
+    }
 }
 
-#[async_trait]
-impl ToolRunner for Runner {
-    async fn run(&self, call: &ToolCall) -> String {
-        if call.name != "memory" {
-            return format!("Error: there is no tool named {}.", call.name);
+/// Sets her Discord status from the mood she just wrote in `scope`.
+async fn update_status(ctx: &BotCtx, scope: &str) {
+    let scope = scope.to_string();
+    let folder = ctx
+        .db
+        .call(move |conn| Ok(store::load(conn, &scope)?))
+        .await;
+    match folder {
+        Ok(folder) => {
+            if let Some(status) = folder.get(MOOD_FILE).and_then(|m| parse_status(m)) {
+                info!("status: {status}");
+                ctx.set_status(&status).await;
+            }
         }
-        let user = self.ctx.bot_id.get();
-        match tool::run_in(&self.ctx, self.scope.clone(), user, &call.args).await {
-            Ok(text) => text,
-            Err(err) => format!("Error: {err:#}"),
-        }
+        Err(err) => warn!("reading her mood: {err:#}"),
+    }
+}
+
+/// The `status:` line of her mood file, without the label or quotes.
+fn parse_status(mood: &str) -> Option<String> {
+    let line = mood.lines().find_map(|line| {
+        let (label, rest) = line.split_once(':')?;
+        let label = label
+            .trim()
+            .trim_start_matches('-')
+            .trim()
+            .trim_matches('*');
+        label.eq_ignore_ascii_case("status").then_some(rest)
+    })?;
+    let status = line.trim().trim_matches(['"', '`', '*']).trim();
+    (!status.is_empty()).then(|| shorten(status, MAX_STATUS))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_the_status_line() {
+        assert_eq!(
+            parse_status("mood: cozy\nstatus: rewatching Alien for the third time"),
+            Some("rewatching Alien for the third time".into())
+        );
+        assert_eq!(
+            parse_status("- **Status**: \"thinking about soup\""),
+            Some("thinking about soup".into())
+        );
+        assert_eq!(
+            parse_status("- Status: \"thinking about soup\""),
+            Some("thinking about soup".into())
+        );
+        assert_eq!(parse_status("mood: tired"), None);
+        assert_eq!(parse_status("status:   "), None);
+        let long = parse_status(&format!("status: {}", "a".repeat(300))).unwrap();
+        assert!(long.chars().count() <= MAX_STATUS);
     }
 }

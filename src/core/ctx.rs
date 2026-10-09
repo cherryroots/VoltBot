@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serenity::all::{Cache, Http, ShardManager, UserId};
+use serenity::all::{ActivityData, Cache, Http, ShardManager, UserId};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -49,6 +49,14 @@ impl BotCtx {
 
     pub fn gate(&self, feature: &str) -> Gate {
         self.config.gate(feature)
+    }
+
+    /// Sets the bot's custom status, the line under its name, on every gateway connection.
+    pub async fn set_status(&self, text: &str) {
+        let activity = ActivityData::custom(text);
+        for runner in self.shard_manager.runners.lock().await.values() {
+            runner.runner_tx.set_activity(Some(activity.clone()));
+        }
     }
 
     /// Whether the user is listed in `admins` in config.toml.

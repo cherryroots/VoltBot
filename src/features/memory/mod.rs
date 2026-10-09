@@ -10,8 +10,11 @@
 //! - `tool.rs`: the chat tool and the file list
 //! - `commands.rs`: `/memory show`, `forget` and `delete`
 //! - `reflect.rs`: the daily reflection, where Vivy tidies her memory and updates her own notes
+//!   and mood (which sets her Discord status)
+//! - `diary.rs`: the weekly diary she posts in `diary_channels`
 
 mod commands;
+mod diary;
 mod folder;
 mod reflect;
 mod store;

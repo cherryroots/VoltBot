@@ -16,7 +16,8 @@ use chrono::Utc;
 use chrono_tz::Tz;
 use serde::Deserialize;
 use serenity::all::{
-    ChannelId, CreateAllowedMentions, CreateMessage, GetMessages, Message, ReactionType,
+    ChannelId, CreateAllowedMentions, CreateMessage, GetMessages, GuildId, Message, ReactionType,
+    UserId,
 };
 use tracing::{info, warn};
 
@@ -80,7 +81,7 @@ impl Chime {
 
     /// Rolls the dice for a message, and reads along if it hits.
     pub async fn on_message(&self, ctx: &BotCtx, msg: &Message) -> Result<()> {
-        let (Some(guild), Some(provider)) = (msg.guild_id, ctx.ai.chat.clone()) else {
+        let Some(guild) = msg.guild_id.filter(|_| ctx.ai.chat.is_some()) else {
             return Ok(());
         };
         // Messages to her get a real answer instead.
@@ -99,86 +100,7 @@ impl Chime {
             channel: msg.channel_id,
             message: msg.id,
         };
-        let transcript = read_along(ctx, msg).await?;
-        let mut parts = vec![Part::Text(format!("{transcript}\n{INSTRUCTIONS}"))];
-        parts.extend(
-            answer::context_for(ctx, &asker, true)
-                .await
-                .into_iter()
-                .map(Part::Text),
-        );
-        let (tools, owners) = answer::tools_for(ctx, &asker);
-        let request = ChatRequest {
-            system: SYSTEM_PROMPT.to_string(),
-            input: Input::Full(vec![Turn {
-                role: Role::User,
-                parts,
-            }]),
-            tools,
-            cache_key: format!("discord:{}", msg.channel_id),
-        };
-        let runner = Runner {
-            ctx: ctx.clone(),
-            asker,
-            owners,
-        };
-        let done = complete(provider.as_ref(), request, &runner, MAX_ROUNDS).await?;
-
-        match decide(&done.text) {
-            Decision::Pass => info!("read along and passed"),
-            Decision::React(emoji) => {
-                let reaction = ReactionType::try_from(emoji.as_str())
-                    .with_context(|| format!("{emoji:?} isn't an emoji"))?;
-                msg.react(&ctx.http, reaction).await?;
-                info!("chimed in with {emoji}");
-            }
-            Decision::Say(line) => {
-                let sent = msg
-                    .channel_id
-                    .send_message(
-                        &ctx.http,
-                        CreateMessage::new()
-                            .content(&line)
-                            .allowed_mentions(CreateAllowedMentions::new()),
-                    )
-                    .await?;
-                info!("chimed in");
-                // Saved like a question and its answer, so a reply to her line continues.
-                let question = NewTurn {
-                    parent_id: None,
-                    role: Role::User,
-                    author_id: msg.author.id.get(),
-                    channel_id: msg.channel_id.get(),
-                    parts: vec![StoredPart::Text { text: transcript }],
-                    written: None,
-                    created_at: Utc::now().timestamp(),
-                };
-                let written = Written {
-                    provider: provider.name().to_string(),
-                    model: provider.model().to_string(),
-                    continuation_id: done.continuation,
-                    native_json: Some(serde_json::Value::Array(done.natives).to_string()),
-                };
-                let (sent_id, bot_id) = (sent.id.get(), ctx.bot_id.get());
-                ctx.db
-                    .call(move |conn| {
-                        let question_id = store::add_turn(conn, &question, &[])?;
-                        let answer = NewTurn {
-                            parent_id: Some(question_id),
-                            role: Role::Assistant,
-                            author_id: bot_id,
-                            channel_id: question.channel_id,
-                            parts: vec![StoredPart::Text { text: line }],
-                            written: Some(written),
-                            created_at: Utc::now().timestamp(),
-                        };
-                        store::add_turn(conn, &answer, &[sent_id])
-                    })
-                    .await
-                    .context("saving the chime-in")?;
-            }
-        }
-        Ok(())
+        speak(ctx, &asker, Some(msg), INSTRUCTIONS, None).await
     }
 
     /// Whether to read along now: the dice hit and the channel isn't cooling down. A hit
@@ -201,30 +123,145 @@ impl Chime {
 /// What she's asked after reading along. In the question, not the system prompt, so the
 /// system prompt stays the same as for answers and shares their cache.
 const INSTRUCTIONS: &str = "You're reading along in this channel; nobody asked you anything. \
-Chime in only when you have something that fits: a joke, a reaction, a fact, an opinion. Most of the time, pass. \
+Chime in only when you have something that fits: a joke, a reaction, a fact, an opinion, or a short question about what they're talking about when you don't know it and are curious (what a name or in-joke means, how something turned out). Most of the time, pass. \
+When someone answers one of your questions later, save what you learned. \
 Reactions after a message show how people took it, your own lines included. \
 If you noticed something lasting about the server, its people or yourself, you can save it with the memory tool first. \
 Then answer with exactly one of: PASS; REACT followed by one emoji; or one short line the way people write on Discord, with no greeting.";
 
-/// The last [`READ_MESSAGES`] messages of the channel, oldest first, ending with `msg`.
-async fn read_along(ctx: &BotCtx, msg: &Message) -> Result<String> {
-    let mut messages = msg
-        .channel_id
-        .messages(
+/// Reads the last messages of `asker.channel` (ending with `last`, when given), asks the
+/// model what to do with `instructions`, and does it: posts a line, reacts to `last`, or
+/// nothing. A posted line is saved like an answer, so a reply to it continues the
+/// conversation. `mention` is the one person the line may ping.
+pub async fn speak(
+    ctx: &BotCtx,
+    asker: &Asker,
+    last: Option<&Message>,
+    instructions: &str,
+    mention: Option<UserId>,
+) -> Result<()> {
+    let provider = ctx.ai.chat.clone().context("chat has no model")?;
+    let transcript = read_along(ctx, asker.guild, asker.channel, last).await?;
+    let mut parts = vec![Part::Text(format!("{transcript}\n{instructions}"))];
+    parts.extend(
+        answer::context_for(ctx, asker, true)
+            .await
+            .into_iter()
+            .map(Part::Text),
+    );
+    let (tools, owners) = answer::tools_for(ctx, asker);
+    let request = ChatRequest {
+        system: SYSTEM_PROMPT.to_string(),
+        input: Input::Full(vec![Turn {
+            role: Role::User,
+            parts,
+        }]),
+        tools,
+        cache_key: format!("discord:{}", asker.channel),
+    };
+    let runner = Runner {
+        ctx: ctx.clone(),
+        asker: asker.clone(),
+        owners,
+    };
+    let done = complete(provider.as_ref(), request, &runner, MAX_ROUNDS).await?;
+
+    let line = match (decide(&done.text), last) {
+        (Decision::Say(line), _) => line,
+        (Decision::React(emoji), Some(msg)) => {
+            let reaction = ReactionType::try_from(emoji.as_str())
+                .with_context(|| format!("{emoji:?} isn't an emoji"))?;
+            msg.react(&ctx.http, reaction).await?;
+            info!("reacted with {emoji}");
+            return Ok(());
+        }
+        _ => {
+            info!("read along and passed");
+            return Ok(());
+        }
+    };
+    let pings = match mention {
+        Some(user) => CreateAllowedMentions::new().users([user]),
+        None => CreateAllowedMentions::new(),
+    };
+    let sent = asker
+        .channel
+        .send_message(
             &ctx.http,
-            GetMessages::new().before(msg.id).limit(READ_MESSAGES - 1),
+            CreateMessage::new().content(&line).allowed_mentions(pings),
         )
         .await?;
+    info!("spoke up on her own");
+    // Saved like a question and its answer, so a reply to her line continues.
+    let question = NewTurn {
+        parent_id: None,
+        role: Role::User,
+        author_id: asker.user.get(),
+        channel_id: asker.channel.get(),
+        parts: vec![StoredPart::Text { text: transcript }],
+        written: None,
+        created_at: Utc::now().timestamp(),
+    };
+    let written = Written {
+        provider: provider.name().to_string(),
+        model: provider.model().to_string(),
+        continuation_id: done.continuation,
+        native_json: Some(serde_json::Value::Array(done.natives).to_string()),
+    };
+    let (sent_id, bot_id) = (sent.id.get(), ctx.bot_id.get());
+    ctx.db
+        .call(move |conn| {
+            let question_id = store::add_turn(conn, &question, &[])?;
+            let answer = NewTurn {
+                parent_id: Some(question_id),
+                role: Role::Assistant,
+                author_id: bot_id,
+                channel_id: question.channel_id,
+                parts: vec![StoredPart::Text { text: line }],
+                written: Some(written),
+                created_at: Utc::now().timestamp(),
+            };
+            store::add_turn(conn, &answer, &[sent_id])
+        })
+        .await
+        .context("saving what she said")?;
+    Ok(())
+}
+
+/// The last [`READ_MESSAGES`] messages of the channel, oldest first, ending with `last`
+/// when given (otherwise with the newest).
+async fn read_along(
+    ctx: &BotCtx,
+    guild: Option<GuildId>,
+    channel: ChannelId,
+    last: Option<&Message>,
+) -> Result<String> {
+    let mut messages = match last {
+        Some(msg) => {
+            let mut before = channel
+                .messages(
+                    &ctx.http,
+                    GetMessages::new().before(msg.id).limit(READ_MESSAGES - 1),
+                )
+                .await?;
+            before.insert(0, msg.clone());
+            before
+        }
+        None => {
+            channel
+                .messages(&ctx.http, GetMessages::new().limit(READ_MESSAGES))
+                .await?
+        }
+    };
+    // Discord gives the newest first.
     messages.reverse();
-    messages.push(msg.clone());
-    let channel = msg
-        .guild_id
+    let name = guild
         .and_then(|guild| ctx.cache.guild(guild))
         .and_then(|guild| {
             guild
                 .channels
-                .get(&msg.channel_id)
-                .or_else(|| guild.threads.iter().find(|t| t.id == msg.channel_id))
+                .get(&channel)
+                .or_else(|| guild.threads.iter().find(|t| t.id == channel))
                 .map(|c| c.name.clone())
         })
         .unwrap_or_default();
@@ -233,7 +270,7 @@ async fn read_along(ctx: &BotCtx, msg: &Message) -> Result<String> {
         .map(|m| format_message(ctx, m, Tz::UTC))
         .collect();
     Ok(format!(
-        "<recent_messages channel=\"#{channel}\">\n{}\n</recent_messages>",
+        "<recent_messages channel=\"#{name}\">\n{}\n</recent_messages>",
         lines.join("\n")
     ))
 }

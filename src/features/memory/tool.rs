@@ -4,13 +4,14 @@
 //! can send `{"type": "memory_20250818", "name": "memory"}` instead of this definition and
 //! route the calls here unchanged.
 
+use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{Value, json};
 use tracing::info;
 
 use super::folder::{self, Command, Folder, ROOT};
 use super::store;
-use crate::ai::ToolDef;
+use crate::ai::{ToolCall, ToolDef, ToolRunner};
 use crate::core::{Asker, BotCtx, Result, user_error};
 
 /// The most files listed next to a question. The model can view the folder for the rest.
@@ -105,6 +106,27 @@ pub async fn run_in(ctx: &BotCtx, scope: String, user: u64, args: &Value) -> Res
         info!(scope = log_scope, "memory: {path} changed for <@{user}>");
     }
     Ok(text)
+}
+
+/// Runs memory commands in one folder as Vivy herself, for the reflection and the diary,
+/// where nobody is asking.
+pub struct FolderRunner {
+    pub ctx: BotCtx,
+    pub scope: String,
+}
+
+#[async_trait]
+impl ToolRunner for FolderRunner {
+    async fn run(&self, call: &ToolCall) -> String {
+        if call.name != "memory" {
+            return format!("Error: there is no tool named {}.", call.name);
+        }
+        let user = self.ctx.bot_id.get();
+        match run_in(&self.ctx, self.scope.clone(), user, &call.args).await {
+            Ok(text) => text,
+            Err(err) => format!("Error: {err:#}"),
+        }
+    }
 }
 
 /// Vivy's own notes about herself in this server, the files under [`SELF_DIR`], or `None`
