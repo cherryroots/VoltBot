@@ -201,6 +201,9 @@ Each feature can contribute tools, the same way it subscribes to events, so remi
 | `get_user_info` | Chat | A member's display name, timezone, roles and join date |
 | `read_recent_messages` | Chat | The last N messages in the current channel, as text with author names |
 | `get_message` | Chat | One message from a Discord message link |
+| `search_messages` | Chat | Discord's server-wide message search (words, author, channel, attachment type, dates), filtered to channels the asker can read, with message links |
+| `get_pinned_messages` | Chat | The current channel's pins |
+| `list_server_events` | Chat | The server's upcoming and ongoing scheduled events |
 | `create_reminder` | Reminders | Creates a reminder; `when` is text like "in 2h" or "friday 3pm", parsed by the same parser as typed reminders, and a parse error is returned so the model can retry |
 | `list_reminders` | Reminders | The asker's pending reminders |
 | `cancel_reminder` | Reminders | Deletes one of the asker's reminders |

@@ -1,4 +1,5 @@
 //! Chat's own tools: what the model can look up about Discord and the time.
+//! `search_messages` lives in `search.rs`.
 //!
 //! Each tool runs as the person who asked ([`Asker`]): it only reads channels that person
 //! can read. Results are plain text, which is what the model reads best.
@@ -7,10 +8,11 @@ use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use serde_json::{Value, json};
 use serenity::all::{
-    ChannelId, ChannelType, ContentSafeOptions, GetMessages, GuildChannel, Message, MessageId,
-    UserId, content_safe,
+    ChannelId, ChannelType, ContentSafeOptions, GetMessages, GuildChannel, GuildId, Member,
+    Message, MessageId, ScheduledEventStatus, UserId, content_safe,
 };
 
+use super::search;
 use crate::ai::ToolDef;
 use crate::core::{Asker, BotCtx, Result, settings, user_error};
 use crate::util::shorten;
@@ -19,6 +21,8 @@ use crate::util::shorten;
 const MAX_RECENT: u64 = 50;
 /// Each message is cut to this many characters in tool results.
 const MAX_MESSAGE_CHARS: usize = 600;
+/// Most pinned messages `get_pinned_messages` returns.
+const MAX_PINS: usize = 25;
 
 pub fn defs() -> Vec<ToolDef> {
     vec![
@@ -66,6 +70,17 @@ pub fn defs() -> Vec<ToolDef> {
                 "required": ["link"],
             }),
         },
+        search::def(),
+        ToolDef {
+            name: "get_pinned_messages",
+            description: "The pinned messages of the current channel, newest first, with links.",
+            parameters: json!({"type": "object", "properties": {}}),
+        },
+        ToolDef {
+            name: "list_server_events",
+            description: "The server's upcoming and ongoing scheduled events: name, time, place, description and how many are interested.",
+            parameters: json!({"type": "object", "properties": {}}),
+        },
     ]
 }
 
@@ -83,12 +98,15 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, name: &str, args: &Value) -> Resul
             let link = text("link").ok_or_else(|| user_error("`link` is required."))?;
             message_from_link(ctx, asker, link).await
         }
+        "search_messages" => search::run(ctx, asker, args).await,
+        "get_pinned_messages" => pinned_messages(ctx, asker).await,
+        "list_server_events" => server_events(ctx, asker).await,
         _ => Err(user_error(format!("chat has no tool named {name}"))),
     }
 }
 
 /// The asker's timezone, or UTC.
-async fn home_zone(ctx: &BotCtx, user: UserId) -> Tz {
+pub(super) async fn home_zone(ctx: &BotCtx, user: UserId) -> Tz {
     settings::timezone(&ctx.db, user)
         .await
         .ok()
@@ -180,19 +198,7 @@ async fn user_info(ctx: &BotCtx, asker: &Asker, user: Option<&str>) -> Result<St
 
     let member = match user {
         None => guild_id.member(&ctx.http, asker.user).await?,
-        Some(query) => match parse_user_id(query) {
-            Some(id) => guild_id
-                .member(&ctx.http, id)
-                .await
-                .map_err(|_| user_error(format!("Nobody with ID {id} is in this server.")))?,
-            None => {
-                let found = guild_id.search_members(&ctx.http, query, Some(5)).await?;
-                found
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| user_error(format!("No member matches \"{query}\".")))?
-            }
-        },
+        Some(query) => find_member(ctx, guild_id, query).await?,
     };
 
     let roles: Vec<String> = match ctx.cache.guild(guild_id) {
@@ -221,6 +227,22 @@ async fn user_info(ctx: &BotCtx, asker: &Asker, user: Option<&str>) -> Result<St
         None => "Timezone: not set".to_string(),
     });
     Ok(lines.join("\n"))
+}
+
+/// A server member from a mention, user ID or name.
+pub(super) async fn find_member(ctx: &BotCtx, guild: GuildId, query: &str) -> Result<Member> {
+    match parse_user_id(query) {
+        Some(id) => guild
+            .member(&ctx.http, id)
+            .await
+            .map_err(|_| user_error(format!("Nobody with ID {id} is in this server."))),
+        None => guild
+            .search_members(&ctx.http, query, Some(5))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| user_error(format!("No member matches \"{query}\"."))),
+    }
 }
 
 /// "<@123>", "<@!123>" or "123" → the ID.
@@ -258,7 +280,7 @@ async fn recent_messages(ctx: &BotCtx, asker: &Asker, count: u64) -> Result<Stri
 }
 
 /// "[2026-10-09 14:02] Rene: text (2 attachments)"
-fn format_message(ctx: &BotCtx, msg: &Message, zone: Tz) -> String {
+pub(super) fn format_message(ctx: &BotCtx, msg: &Message, zone: Tz) -> String {
     let time = DateTime::from_timestamp(msg.timestamp.unix_timestamp(), 0)
         .unwrap_or_default()
         .with_timezone(&zone)
@@ -284,6 +306,16 @@ fn format_message(ctx: &BotCtx, msg: &Message, zone: Tz) -> String {
         }
     }
     line
+}
+
+/// The link that opens a message in Discord.
+pub(super) fn message_link(
+    guild: Option<GuildId>,
+    channel: ChannelId,
+    message: MessageId,
+) -> String {
+    let guild = guild.map_or("@me".to_string(), |g| g.to_string());
+    format!("https://discord.com/channels/{guild}/{channel}/{message}")
 }
 
 /// The (server, channel, message) of a message link. The server is `None` for DMs.
@@ -324,7 +356,7 @@ async fn message_from_link(ctx: &BotCtx, asker: &Asker, link: &str) -> Result<St
 
 /// Whether the asker may read messages in `channel`. In DMs only the DM itself; in a
 /// server, channels in the same server where they can view and read history.
-async fn can_read(
+pub(super) async fn can_read(
     ctx: &BotCtx,
     asker: &Asker,
     guild: Option<u64>,
@@ -365,6 +397,77 @@ async fn can_read(
     Ok(permissions.view_channel() && permissions.read_message_history())
 }
 
+async fn pinned_messages(ctx: &BotCtx, asker: &Asker) -> Result<String> {
+    let pins = asker.channel.pins(&ctx.http).await?;
+    if pins.is_empty() {
+        return Ok("This channel has no pinned messages.".to_string());
+    }
+    let zone = home_zone(ctx, asker.user).await;
+    let lines: Vec<String> = pins
+        .iter()
+        .take(MAX_PINS)
+        .map(|m| {
+            format!(
+                "{} {}",
+                format_message(ctx, m, zone),
+                message_link(asker.guild, m.channel_id, m.id)
+            )
+        })
+        .collect();
+    Ok(lines.join("\n"))
+}
+
+async fn server_events(ctx: &BotCtx, asker: &Asker) -> Result<String> {
+    let Some(guild) = asker.guild else {
+        return Ok("Direct messages have no server events.".to_string());
+    };
+    let mut events = guild.scheduled_events(&ctx.http, true).await?;
+    events.retain(|e| {
+        matches!(
+            e.status,
+            ScheduledEventStatus::Scheduled | ScheduledEventStatus::Active
+        )
+    });
+    if events.is_empty() {
+        return Ok("The server has no upcoming events.".to_string());
+    }
+    events.sort_by_key(|e| e.start_time);
+    let zone = home_zone(ctx, asker.user).await;
+    let local = |timestamp: i64| {
+        DateTime::from_timestamp(timestamp, 0)
+            .unwrap_or_default()
+            .with_timezone(&zone)
+            .format("%A %Y-%m-%d %H:%M")
+            .to_string()
+    };
+    let mut blocks = Vec::new();
+    for event in &events {
+        let start = event.start_time.unix_timestamp();
+        let mut lines = vec![format!("{} (ID {})", event.name, event.id)];
+        let mut when = format!("Starts: {} {} (<t:{start}:F>)", local(start), zone.name());
+        if let Some(end) = event.end_time {
+            when.push_str(&format!(", ends {}", local(end.unix_timestamp())));
+        }
+        if event.status == ScheduledEventStatus::Active {
+            when.push_str(", happening now");
+        }
+        lines.push(when);
+        if let Some(channel) = event.channel_id {
+            lines.push(format!("Where: <#{channel}>"));
+        } else if let Some(place) = event.metadata.as_ref().and_then(|m| m.location.clone()) {
+            lines.push(format!("Where: {place}"));
+        }
+        if let Some(count) = event.user_count {
+            lines.push(format!("Interested: {count}"));
+        }
+        if let Some(description) = event.description.as_deref().filter(|d| !d.is_empty()) {
+            lines.push(format!("Description: {}", shorten(description, 300)));
+        }
+        blocks.push(lines.join("\n"));
+    }
+    Ok(blocks.join("\n\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,6 +488,13 @@ mod tests {
         );
         assert_eq!(parse_link("https://example.com/channels/1/2/3"), None);
         assert_eq!(parse_link("https://discord.com/channels/1/2"), None);
+    }
+
+    #[test]
+    fn links_to_messages() {
+        let link = message_link(Some(GuildId::new(1)), ChannelId::new(2), MessageId::new(3));
+        assert_eq!(link, "https://discord.com/channels/1/2/3");
+        assert_eq!(parse_link(&link), Some((Some(1), 2, 3)));
     }
 
     #[test]

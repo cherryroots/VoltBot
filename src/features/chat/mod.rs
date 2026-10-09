@@ -4,7 +4,8 @@
 //! - `answer.rs`: one answer: streaming, the status line, tool calls, files
 //! - `history.rs`: Discord messages to chat turns, and stored turns to model input
 //! - `store.rs`: the `chat_turns` and `chat_messages` tables
-//! - `tools.rs`: chat's own tools (time, channel, users, messages)
+//! - `tools.rs`: chat's own tools (time, channel, users, messages, pins, events)
+//! - `search.rs`: the `search_messages` tool
 //! - `prompt.md`: the system prompt
 //!
 //! Reactions on an answer, from the person who asked: ❌ stops it while it's being written
@@ -12,6 +13,7 @@
 
 mod answer;
 mod history;
+mod search;
 mod store;
 mod tools;
 
