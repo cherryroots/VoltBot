@@ -50,4 +50,9 @@ impl BotCtx {
     pub fn gate(&self, feature: &str) -> Gate {
         self.config.gate(feature)
     }
+
+    /// Whether the user is listed in `admins` in config.toml.
+    pub fn is_admin(&self, user: UserId) -> bool {
+        self.config.admins.contains(&user.get())
+    }
 }

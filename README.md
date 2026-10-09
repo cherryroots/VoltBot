@@ -16,7 +16,9 @@ VoltBot is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://g
 
 ## Status
 
-Stage 3 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, the shared helpers (message splitting, multi-message replies, media and text extraction, GIF and video frames), and AI chat with OpenAI, its tools, and the ❌/🔁 reaction controls. The movie wheel comes next. See `docs/feature-map.md` for the plan and the order.
+Stage 4 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, the shared helpers (message splitting, multi-message replies, media and text extraction, GIF and video frames), AI chat with OpenAI, its tools, and the ❌/🔁 reaction controls, and the movie wheel. Next up are the Claude and Gemini providers and the image hashing redesign. See `docs/feature-map.md` for the plan and the order.
+
+The movie wheel is voltgpt's betting game for movie night. `/wheel_status` shows the round with Claim, Place Bet, Remove Bet and Set Winner buttons; admins use `/wheel_add`, `/insert_bet` and `/reset_wheel`, and can undo a winner set by mistake. `/reset_wheel` starts a new season and keeps the old one viewable with `/wheel_status season:`.
 
 Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorrow at 9am`, `next friday`, `on 2026-12-24 at noon`, and the time at the end (`… in 2h`). `/reminders` lists and deletes them, `/timezone` sets your zone, and delivered reminders have snooze buttons.
 
@@ -55,7 +57,7 @@ sudo chmod 600 /opt/voltbot/.env
 
 Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`, and `OPENAI_TOKEN` for chat) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
 
-**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders right away and the movie wheel game once that feature is ported, each only once, then renames the file to `old.db.imported`. If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
+**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders and the running movie wheel game, each only once, then renames the file to `old.db.imported`. voltgpt's wheel had no server, so it goes to the server in `IMPORT_GUILD_ID` in `.env` (voltgpt's main server if unset). If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
 
 ### 4. Run with systemd
 

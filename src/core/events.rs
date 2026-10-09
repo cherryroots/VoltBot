@@ -4,15 +4,21 @@
 //! about, the feature publishes a [`BotEvent`] with `ctx.publish(...)`, and every feature's
 //! `on_bot_event` receives it. Nobody has to listen.
 
-use serenity::all::{ChannelId, UserId};
+use serenity::all::{ChannelId, GuildId, UserId};
 
 #[derive(Debug, Clone)]
-#[allow(dead_code, reason = "no feature listens yet; chat and the wheel will")]
+#[allow(dead_code, reason = "no feature listens yet")]
 pub enum BotEvent {
     /// A reminder was delivered.
     ReminderFired {
         reminder_id: i64,
         user_id: UserId,
         channel_id: ChannelId,
+    },
+    /// A movie wheel round got its winner.
+    WheelRoundResolved {
+        guild_id: GuildId,
+        round: i64,
+        winner: UserId,
     },
 }

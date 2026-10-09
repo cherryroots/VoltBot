@@ -353,6 +353,18 @@ Changes in the port:
 - **One game per server.** Go has a single global game. VoltBot keys the game by guild ID; it costs nothing and avoids surprises.
 - **No lock held during Discord calls.** Go keeps `gamble.Mu` locked while it calls the Discord API. With the tables above, each action is a short database transaction, and the bot only talks to Discord after it commits.
 
+How it was built (stage 4), where it differs from the plan above:
+
+- **Tables** as above, plus `ON DELETE CASCADE` on every child table and a partial unique index on `wheel_seasons (guild_id) WHERE ended_at IS NULL`, so a server can't have two active seasons.
+- **IDs**: buttons `wheel:claim|bet|unbet|winner|undo:<round id>` and `wheel:current`; the menus `wheel:pick:<place|remove|winner>:<round id>:<status message id>`; the modal `wheel:amount:<round id>:<option user id>:<status message id>`; the reset confirmation `wheel:reset:<0|1>`. Round IDs are database IDs, so a button on an old message can't change a newer round.
+- **Undo winner** is a button on the resolved round's status message, shown while the round after it has no bets. It deletes that new round (with its claims) and reopens the old one.
+- **Seasons**: `/reset_wheel keep_options` asks for confirmation with a button, ends the season and starts the next one. `/wheel_status season:<n> round:<n>` shows any round of any season; past seasons have no buttons.
+- **Admins** are `admins` in `config.toml`, checked inside each admin command and button (a poise `check` would answer with the "turned off" message).
+- **The bet amount modal** is a plain serenity `CreateModal`, because it opens from a select menu, not from a slash command.
+- **Names** are looked up when a round is shown (nickname, then global name, then username) and remembered for 10 minutes.
+- **Small differences from voltgpt**: the player list is everyone who claimed or bet this season (voltgpt also listed people who only opened the bet menu), a tax of 0 isn't listed as "Taxed", and the Delta column uses →.
+- **Import**: voltgpt's game becomes the active season of `IMPORT_GUILD_ID`. If that server already has a game, the import is filed as an ended season instead.
+
 Ideas for later, not part of the port: a `/wheel_spin` command that picks the winner randomly with an animated embed, and a per-player balance history.
 
 ### 4. Control panel
