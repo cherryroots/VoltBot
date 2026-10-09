@@ -1,5 +1,5 @@
 //! The wheel's Discord parts besides the picture: the status buttons, the menus, the bet
-//! modal, and the button IDs. Everything here takes plain values and builds messages;
+//! slip and modal, and the button IDs. Everything here takes plain values and builds messages;
 //! nothing talks to Discord or the database.
 
 use std::collections::HashMap;
@@ -9,7 +9,9 @@ use serenity::all::{
     CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
 
-use super::ledger::{BET_CAP, CLAIM, RoundLedger, Rules, Season, TAX_THRESHOLD, can_undo};
+use super::ledger::{
+    BET_CAP, CLAIM, RoundLedger, Rules, Season, TAX_THRESHOLD, can_undo, check_bet,
+};
 use crate::util::shorten;
 
 /// Display names by user ID, looked up before rendering.
@@ -18,7 +20,7 @@ pub type Names = HashMap<u64, String>;
 /// What a select menu is for.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum PickKind {
-    /// Pick an option to bet on; the amount modal follows.
+    /// Pick an option to bet on; the bet slip follows.
     Place,
     /// Pick one of your bets to remove.
     Remove,
@@ -77,6 +79,19 @@ pub enum Action {
         round: i64,
         message: u64,
     },
+    /// A bet slip button: bet `percent`% of the round's money on `on`.
+    Stake {
+        round: i64,
+        on: u64,
+        message: u64,
+        percent: i64,
+    },
+    /// The bet slip's "Other amount" button, which opens the amount modal.
+    Other {
+        round: i64,
+        on: u64,
+        message: u64,
+    },
     /// The bet amount modal.
     Amount {
         round: i64,
@@ -107,6 +122,13 @@ impl Action {
                 round,
                 message,
             } => format!("wheel:pick:{}:{round}:{message}", kind.as_str()),
+            Action::Stake {
+                round,
+                on,
+                message,
+                percent,
+            } => format!("wheel:stake:{round}:{on}:{message}:{percent}"),
+            Action::Other { round, on, message } => format!("wheel:other:{round}:{on}:{message}"),
             Action::Amount { round, on, message } => {
                 format!("wheel:amount:{round}:{on}:{message}")
             }
@@ -138,6 +160,17 @@ impl Action {
             ["pick", kind, round, message] => Action::Pick {
                 kind: PickKind::parse(kind)?,
                 round: round.parse().ok()?,
+                message: message.parse().ok()?,
+            },
+            ["stake", round, on, message, percent] => Action::Stake {
+                round: round.parse().ok()?,
+                on: on.parse().ok()?,
+                message: message.parse().ok()?,
+                percent: percent.parse().ok()?,
+            },
+            ["other", round, on, message] => Action::Other {
+                round: round.parse().ok()?,
+                on: on.parse().ok()?,
                 message: message.parse().ok()?,
             },
             ["amount", round, on, message] => Action::Amount {
@@ -288,19 +321,121 @@ pub fn pick_menu(
     (content.to_string(), vec![CreateActionRow::SelectMenu(menu)])
 }
 
+/// The bet slip: a private message about betting on one option, with a button per share
+/// of the player's money. It shows the odds and the player's bet as they are now, and is
+/// rebuilt after every bet. `note` says what just happened.
+pub fn bet_slip(
+    season: &Season,
+    numbers: &RoundLedger,
+    user: u64,
+    on: u64,
+    on_name: &str,
+    message: u64,
+    note: Option<&str>,
+) -> (String, Vec<CreateActionRow>) {
+    let round = season.rounds.last().map_or(0, |r| r.id);
+    let mine = season
+        .rounds
+        .last()
+        .and_then(|r| r.bets.iter().find(|b| b.by == user && b.on == on));
+    let money = numbers.money(user);
+    let standing = numbers.standing(user);
+    let bet = standing.map_or(0, |s| s.bet);
+
+    let mut lines = vec![format!("**Bet on {on_name}**")];
+    if let Some(note) = note {
+        lines.push(note.to_string());
+    }
+    lines.push(match (numbers.rules, numbers.odds(on)) {
+        (Rules::Pool, Some(odds)) => format!(
+            "{} is on it, which pays ×{odds:.1} right now. The pot is {}.",
+            numbers.total_on(on),
+            numbers.pot
+        ),
+        (Rules::Pool, None) => format!(
+            "Nobody has bet on {on_name} yet: a bet here would take the whole pot of {}.",
+            numbers.pot
+        ),
+        (Rules::Classic, _) => format!(
+            "A winning bet pays ×{}.",
+            numbers.options_left.len().saturating_sub(1)
+        ),
+    });
+    lines.push(format!(
+        "You have {money} this round and have bet {bet} of it. You can bet {} more.",
+        numbers.usable(user)
+    ));
+    if let Some(mine) = mine {
+        let back = numbers.result(mine, on) + mine.amount;
+        lines.push(format!(
+            "Your bet on {on_name}: **{}**. If {on_name} won now, you'd get {back} back.",
+            mine.amount
+        ));
+    }
+    if standing.is_some_and(|s| s.under_threshold()) {
+        lines.push(format!(
+            "-# Bet at least {} in total ({TAX_THRESHOLD}%) to avoid the tax.",
+            standing.map_or(0, |s| s.safe_bet())
+        ));
+    }
+    if numbers.rules == Rules::Pool {
+        lines.push("-# The odds change as others bet, until the winner is set.".to_string());
+    }
+
+    let percents: &[i64] = match numbers.rules {
+        Rules::Pool => &[TAX_THRESHOLD, 25, BET_CAP],
+        Rules::Classic => &[TAX_THRESHOLD, 25, 50, 100],
+    };
+    let mut buttons: Vec<CreateButton> = percents
+        .iter()
+        .map(|&percent| {
+            let amount = (money * percent + 99) / 100;
+            let current = mine.is_some_and(|b| b.amount == amount);
+            let allowed = check_bet(season, user, on, &amount.to_string()).is_ok();
+            CreateButton::new(
+                Action::Stake {
+                    round,
+                    on,
+                    message,
+                    percent,
+                }
+                .custom_id(),
+            )
+            .label(format!("{percent}% · {amount}"))
+            .style(if current {
+                ButtonStyle::Success
+            } else {
+                ButtonStyle::Secondary
+            })
+            .disabled(current || !allowed)
+        })
+        .collect();
+    buttons.push(
+        CreateButton::new(Action::Other { round, on, message }.custom_id())
+            .label("Other amount…")
+            .style(ButtonStyle::Primary),
+    );
+    (lines.join("\n"), vec![CreateActionRow::Buttons(buttons)])
+}
+
 /// The modal asking how much to bet. `existing` is the player's current bet on this option.
 pub fn amount_modal(
     round: i64,
     on: u64,
     message: u64,
     on_name: &str,
-    usable: i64,
+    money: i64,
+    max: i64,
     existing: i64,
 ) -> CreateModal {
-    // Discord allows 45 characters in a label.
-    let label = shorten(&format!("Amount (you can bet {})", usable + existing), 45);
+    // Discord allows 45 characters in a label and 100 in a placeholder.
+    let label = shorten(&format!("Amount (up to {max})"), 45);
+    let placeholder = shorten(
+        &format!("A number like 50, or a share of your {money} like 25%"),
+        100,
+    );
     let mut input = CreateInputText::new(InputTextStyle::Short, label, "amount")
-        .placeholder("A number like 50, or a percentage like 25%")
+        .placeholder(placeholder)
         .required(true);
     if existing > 0 {
         input = input.value(existing.to_string());
@@ -333,7 +468,7 @@ pub fn help_text(rules: Rules) -> String {
     format!(
         "**How the movie wheel works**
 - **Claim!** gives you {CLAIM} once every round.
-- **Place Bet!** on the options you think will win: type an amount like `50` or a share of your money like `25%`. You can bet on up to half of the options left.{cap} Betting on the same option again changes that bet, and **Remove Bet!** takes it back while the round is open.
+- **Place Bet!** on the options you think will win: pick an option, then a share of your money, or type an amount like `50` under Other amount. The bet slip shows what the option pays right now. You can bet on up to half of the options left.{cap} Betting on the same option again changes that bet, and **Remove Bet!** takes it back while the round is open.
 - **Bet at least {TAX_THRESHOLD}%** of your money every round. Otherwise you lose 3% of your money for every missing percentage point when the round ends, up to 30%.{tax}
 {payouts}
 - An option leaves the wheel once it has won. Admins add options with `/wheel_add` and start a new season with `/reset_wheel`."
@@ -458,6 +593,17 @@ mod tests {
                 keep_options: false,
             },
             Action::Help { season: 4 },
+            Action::Stake {
+                round: 3,
+                on: u64::MAX,
+                message: u64::MAX,
+                percent: 25,
+            },
+            Action::Other {
+                round: 3,
+                on: 7,
+                message: 99,
+            },
         ] {
             let id = action.custom_id();
             assert!(id.len() <= 100, "{id}");
@@ -466,5 +612,70 @@ mod tests {
         }
         assert_eq!(Action::parse("pick:steal:1:2"), None);
         assert_eq!(Action::parse("claim"), None);
+    }
+
+    #[test]
+    fn bet_slip_shows_odds_and_limits() {
+        // Pool rules. Alice (1) has 200 and bet 40 on Bob (2); Charlie (3) bet 60 on Dana (4).
+        let season = Season {
+            id: 1,
+            number: 2,
+            rules: Rules::Pool,
+            options: vec![1, 2, 3, 4],
+            rounds: vec![Round {
+                id: 5,
+                number: 1,
+                claims: vec![1, 1, 3],
+                bets: vec![bet(1, 2, 40), bet(3, 4, 60)],
+                ..Round::default()
+            }],
+        };
+        let numbers = ledger(&season);
+        let (text, rows) = bet_slip(&season, &numbers[0], 1, 2, "Bob", 99, Some("✅ Bet 40."));
+        assert!(text.contains("✅ Bet 40."), "{text}");
+        assert!(text.contains("40 is on it, which pays ×2.5 right now. The pot is 100."));
+        assert!(
+            text.contains("You have 200 this round and have bet 40 of it. You can bet 60 more.")
+        );
+        assert!(text.contains("Your bet on Bob: **40**. If Bob won now, you'd get 100 back."));
+        let rows = serde_json::to_value(rows).unwrap();
+        let buttons = rows[0]["components"].as_array().unwrap();
+        let labels: Vec<&str> = buttons
+            .iter()
+            .map(|b| b["label"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            labels,
+            ["10% · 20", "25% · 50", "50% · 100", "Other amount…"]
+        );
+        let disabled: Vec<bool> = buttons
+            .iter()
+            .map(|b| b["disabled"].as_bool().unwrap_or(false))
+            .collect();
+        // Changing the bet on Bob frees its 40, so even 50% (100) fits under the cap.
+        assert_eq!(disabled, [false, false, false, false]);
+
+        // On Dana, Alice can add at most 60 more.
+        let (text, rows) = bet_slip(&season, &numbers[0], 1, 4, "Dana", 99, None);
+        assert!(
+            text.contains("60 is on it, which pays ×1.7 right now."),
+            "{text}"
+        );
+        assert!(!text.contains("Your bet on"));
+        let rows = serde_json::to_value(rows).unwrap();
+        let disabled: Vec<bool> = rows[0]["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["disabled"].as_bool().unwrap_or(false))
+            .collect();
+        assert_eq!(disabled, [false, false, true, false]);
+
+        // Nobody bet on Alice yet.
+        let (text, _) = bet_slip(&season, &numbers[0], 1, 1, "Alice", 99, None);
+        assert!(
+            text.contains("a bet here would take the whole pot of 100"),
+            "{text}"
+        );
     }
 }

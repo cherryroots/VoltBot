@@ -142,6 +142,15 @@ pub async fn on_component(ctx: &BotCtx, i: &ComponentInteraction, action: &str) 
         }) => picked(ctx, i, guild, kind, round, MessageId::new(message)).await,
         Some(Action::Reset { keep_options }) => reset(ctx, i, guild, keep_options).await,
         Some(Action::Help { season }) => help(ctx, i, guild, season).await,
+        Some(Action::Stake {
+            round,
+            on,
+            message,
+            percent,
+        }) => stake(ctx, i, guild, round, on, message, percent).await,
+        Some(Action::Other { round, on, message }) => {
+            other_amount(ctx, i, guild, round, on, message).await
+        }
         Some(Action::Amount { .. }) | None => bail!("unknown action {action:?}"),
     }
 }
@@ -152,8 +161,98 @@ pub async fn on_modal(ctx: &BotCtx, i: &ModalInteraction, action: &str) -> Resul
     };
     let guild = i.guild_id.ok_or_else(|| user_error(SERVER_ONLY))?;
     let input = modal_value(i).unwrap_or_default();
-    let by = i.user.id.get();
+    let (game, amount) = place_bet(ctx, guild, round, i.user.id.get(), on, input).await?;
+    // The modal came from a bet slip, which is updated in place.
+    i.defer(&ctx.http).await?;
+    let note = format!("✅ Bet {amount}.");
+    let slip = slip(ctx, guild, &game, i.user.id.get(), on, message, Some(&note)).await?;
+    i.edit_response(&ctx.http, slip).await?;
+    edit_status(
+        ctx,
+        i.channel_id,
+        MessageId::new(message),
+        guild,
+        &game,
+        game.latest(),
+    )
+    .await;
+    Ok(())
+}
 
+/// A bet slip button: bets a share of the player's money.
+async fn stake(
+    ctx: &BotCtx,
+    i: &ComponentInteraction,
+    guild: GuildId,
+    round: i64,
+    on: u64,
+    message: u64,
+    percent: i64,
+) -> Result<()> {
+    let input = format!("{percent}%");
+    let (game, amount) = place_bet(ctx, guild, round, i.user.id.get(), on, input).await?;
+    i.defer(&ctx.http).await?;
+    let note = format!("✅ Bet {amount}.");
+    let slip = slip(ctx, guild, &game, i.user.id.get(), on, message, Some(&note)).await?;
+    i.edit_response(&ctx.http, slip).await?;
+    edit_status(
+        ctx,
+        i.channel_id,
+        MessageId::new(message),
+        guild,
+        &game,
+        game.latest(),
+    )
+    .await;
+    Ok(())
+}
+
+/// The bet slip's "Other amount…": the modal to type an amount.
+async fn other_amount(
+    ctx: &BotCtx,
+    i: &ComponentInteraction,
+    guild: GuildId,
+    round: i64,
+    on: u64,
+    message: u64,
+) -> Result<()> {
+    // The modal must be the first response, so no deferring: the name is usually cached.
+    let game = ctx
+        .db
+        .call(move |conn| open_round(conn, guild.get(), round))
+        .await?;
+    let user = i.user.id.get();
+    let numbers = ledger(&game.season);
+    let current = numbers.last().context("a season has rounds")?;
+    let existing = game.season.rounds[game.latest()]
+        .bets
+        .iter()
+        .find(|b| b.by == user && b.on == on)
+        .map_or(0, |b| b.amount);
+    let names = names::lookup(ctx, guild, &[on]).await;
+    let modal = ui::amount_modal(
+        round,
+        on,
+        message,
+        ui::name(&names, on),
+        current.money(user),
+        current.usable(user) + existing,
+        existing,
+    );
+    i.create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+        .await?;
+    Ok(())
+}
+
+/// Checks and saves a bet in one transaction. Returns the game after it and the amount.
+async fn place_bet(
+    ctx: &BotCtx,
+    guild: GuildId,
+    round: i64,
+    by: u64,
+    on: u64,
+    input: String,
+) -> Result<(Game, i64)> {
     let (game, amount) = ctx
         .db
         .call(move |conn| {
@@ -173,13 +272,34 @@ pub async fn on_modal(ctx: &BotCtx, i: &ModalInteraction, action: &str) -> Resul
         })
         .await?;
     info!("bet {amount} on {on}");
+    Ok((game, amount))
+}
 
-    let on_name = names::lookup(ctx, guild, &[on]).await.remove(&on);
-    let text = format!("Bet {amount} on {}.", on_name.unwrap_or_default());
-    i.create_response(&ctx.http, update_text(text)).await?;
-    let message = MessageId::new(message);
-    edit_status(ctx, i.channel_id, message, guild, &game, game.latest()).await;
-    Ok(())
+/// The bet slip of `user` for option `on`, as an edit of the private message it's on.
+async fn slip(
+    ctx: &BotCtx,
+    guild: GuildId,
+    game: &Game,
+    user: u64,
+    on: u64,
+    message: u64,
+    note: Option<&str>,
+) -> Result<EditInteractionResponse> {
+    let numbers = ledger(&game.season);
+    let current = numbers.last().context("a season has rounds")?;
+    let names = names::lookup(ctx, guild, &[on]).await;
+    let (content, buttons) = ui::bet_slip(
+        &game.season,
+        current,
+        user,
+        on,
+        ui::name(&names, on),
+        message,
+        note,
+    );
+    Ok(EditInteractionResponse::new()
+        .content(content)
+        .components(buttons))
 }
 
 /// "View Current Round": shows the latest round on this message.
@@ -299,30 +419,13 @@ async fn picked(
     let user = i.user.id.get();
     match kind {
         PickKind::Place => {
-            // The amount comes from a modal, which must be the first response, so only read
-            // here; the bet is checked again when the amount arrives.
             let game = ctx
                 .db
                 .call(move |conn| open_round(conn, guild.get(), round))
                 .await?;
-            let numbers = ledger(&game.season);
-            let usable = numbers.last().map_or(0, |n| n.usable(user));
-            let existing = game.season.rounds[game.latest()]
-                .bets
-                .iter()
-                .find(|b| b.by == user && b.on == on)
-                .map_or(0, |b| b.amount);
-            let names = names::lookup(ctx, guild, &[on]).await;
-            let modal = ui::amount_modal(
-                round,
-                on,
-                message.get(),
-                ui::name(&names, on),
-                usable,
-                existing,
-            );
-            i.create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
-                .await?;
+            i.defer(&ctx.http).await?;
+            let slip = slip(ctx, guild, &game, user, on, message.get(), None).await?;
+            i.edit_response(&ctx.http, slip).await?;
         }
         PickKind::Remove => {
             let game = ctx
