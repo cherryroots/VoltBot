@@ -524,10 +524,16 @@ mod tests {
                     .build(),
             )
         };
-        line(format_args!("No fonts with a 𝗓/U+1D5D3 character were found."));
-        line(format_args!("No fonts with a 𝗓/U+1D5D3 character were found."));
+        line(format_args!(
+            "No fonts with a 𝗓/U+1D5D3 character were found."
+        ));
+        line(format_args!(
+            "No fonts with a 𝗓/U+1D5D3 character were found."
+        ));
         line(format_args!("Fallback from Inter to DejaVu Sans."));
-        line(format_args!("No fonts with a ᰁ/U+10C01 character were found."));
+        line(format_args!(
+            "No fonts with a ᰁ/U+10C01 character were found."
+        ));
         assert_eq!(bridge.seen.lock().unwrap().len(), 2);
     }
 
