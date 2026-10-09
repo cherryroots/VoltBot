@@ -1,8 +1,8 @@
 //! The server's custom emoji, so Vivy can use them like a regular.
 //!
 //! A background task looks at each emoji's picture once and saves a short description
-//! (`chat_emoji`): every emoji at the first start, then only new ones, checked every
-//! [`CHECK`]. The `list_server_emoji` tool lists them with their descriptions.
+//! (`chat_emoji`): every emoji at the first start, then only new ones, checked at each
+//! start and once a day ([`CHECK`]), since new emoji are rare. The `list_server_emoji` tool lists them with their descriptions.
 
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ use crate::util::media::{self, Media, MediaKind};
 use crate::util::shorten;
 
 /// How often to look for new emoji.
-const CHECK: Duration = Duration::from_secs(10 * 60);
+const CHECK: Duration = Duration::from_secs(24 * 60 * 60);
 /// The most emoji `list_server_emoji` returns.
 const MAX_LISTED: usize = 250;
 
