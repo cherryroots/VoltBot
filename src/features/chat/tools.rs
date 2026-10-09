@@ -9,7 +9,7 @@ use chrono_tz::Tz;
 use serde_json::{Value, json};
 use serenity::all::{
     ChannelId, ChannelType, ContentSafeOptions, GetMessages, GuildChannel, GuildId, Member,
-    Message, MessageId, ScheduledEventStatus, UserId, content_safe,
+    Message, MessageId, ReactionType, ScheduledEventStatus, UserId, content_safe,
 };
 
 use super::search;
@@ -391,7 +391,33 @@ pub(super) fn format_message(ctx: &BotCtx, msg: &Message, zone: Tz) -> String {
             line.push_str(&format!(" [embed: {}]", shorten(title, 100)));
         }
     }
+    let reactions: Vec<(String, u64)> = msg
+        .reactions
+        .iter()
+        .map(|r| {
+            let emoji = match &r.reaction_type {
+                ReactionType::Custom {
+                    name: Some(name), ..
+                } => format!(":{name}:"),
+                other => other.to_string(),
+            };
+            (emoji, r.count)
+        })
+        .collect();
+    line.push_str(&reaction_text(&reactions));
     line
+}
+
+/// " [reactions: 😂 3, :pog: 1]", or nothing without reactions.
+fn reaction_text(reactions: &[(String, u64)]) -> String {
+    if reactions.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = reactions
+        .iter()
+        .map(|(emoji, count)| format!("{emoji} {count}"))
+        .collect();
+    format!(" [reactions: {}]", list.join(", "))
 }
 
 /// The link that opens a message in Discord.
@@ -557,6 +583,13 @@ async fn server_events(ctx: &BotCtx, asker: &Asker) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reactions_after_the_message() {
+        assert_eq!(reaction_text(&[]), "");
+        let list = [("😂".to_string(), 3), (":pog:".to_string(), 1)];
+        assert_eq!(reaction_text(&list), " [reactions: 😂 3, :pog: 1]");
+    }
 
     #[test]
     fn channels_by_category() {
