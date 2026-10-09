@@ -19,6 +19,7 @@ use anyhow::Context as _;
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{self, fontdb};
 use skrifa::MetadataProvider as _;
+use tracing::warn;
 
 use super::ledger::{BET_CAP, OutcomeKind, Rules, Standing, TAX_THRESHOLD, outcomes};
 use super::ui::View;
@@ -725,7 +726,8 @@ fn fallback_font(c: char) -> Option<Font> {
     {
         None
     } else {
-        db.faces()
+        let found = db
+            .faces()
             .filter(|face| has_char(db, face.id, c))
             .filter_map(family)
             .min_by_key(|(name, weight)| {
@@ -736,7 +738,15 @@ fn fallback_font(c: char) -> Option<Font> {
                     _ => 3,
                 };
                 (kind, weight.abs_diff(600))
-            })
+            });
+        // Once per character, thanks to the cache below.
+        if found.is_none() && !c.is_control() && !is_mark(c) {
+            warn!(
+                "no installed font has {c} (U+{:04X}); it shows as a box. See the README for fonts.",
+                c as u32
+            );
+        }
+        found
     };
     KNOWN
         .lock()
