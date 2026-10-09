@@ -1,7 +1,6 @@
 //! Turning Discord messages into chat turns, and stored turns into what the model reads.
 
 use std::collections::HashMap;
-use std::time::Duration;
 
 use anyhow::Context as _;
 use serde_json::{Value, json};
@@ -21,23 +20,6 @@ const MAX_MEDIA_PER_MESSAGE: usize = 8;
 const MEDIA_TURNS: usize = 4;
 /// How far up a reply chain the history goes.
 pub const MAX_TURNS: usize = 40;
-
-/// Discord sometimes adds link previews (and the GIF of a GIF link) a moment after the
-/// message arrives. When a message has links but no previews yet, wait and read it again.
-pub async fn with_previews(ctx: &BotCtx, msg: &Message) -> Message {
-    let has_link = msg.content.contains("https://") || msg.content.contains("http://");
-    if !has_link || !msg.embeds.is_empty() {
-        return msg.clone();
-    }
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    match msg.channel_id.message(&ctx.http, msg.id).await {
-        Ok(fresh) => fresh,
-        Err(err) => {
-            warn!("couldn't read the message again for link previews: {err}");
-            msg.clone()
-        }
-    }
-}
 
 /// The name the model sees for a message's author: server nickname, display name or
 /// username.

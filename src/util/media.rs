@@ -11,7 +11,9 @@ use std::collections::HashSet;
 use anyhow::{Context as _, bail};
 use base64::Engine as _;
 use reqwest::Url;
-use serenity::all::Message;
+use serenity::all::{Http, Message};
+use std::time::Duration;
+use tracing::warn;
 
 use super::frames;
 
@@ -146,7 +148,7 @@ pub fn find_media(msg: &Message) -> Vec<Media> {
 
 /// The http(s) links in a message's text, including `<link>` (no preview) and links in
 /// brackets.
-fn links(text: &str) -> Vec<&str> {
+pub fn links(text: &str) -> Vec<&str> {
     text.split_whitespace()
         .filter_map(|word| {
             let start = word.find("https://").or_else(|| word.find("http://"))?;
@@ -155,6 +157,23 @@ fn links(text: &str) -> Vec<&str> {
             Some(link.trim_end_matches([')', ']', '.', ',', '!', '?', '"', '\'']))
         })
         .collect()
+}
+
+/// Discord sometimes adds link previews (and the GIF of a GIF link) a moment after the
+/// message arrives. When a message has links but no previews yet, wait and read it again.
+pub async fn with_previews(http: &Http, msg: &Message) -> Message {
+    let has_link = msg.content.contains("https://") || msg.content.contains("http://");
+    if !has_link || !msg.embeds.is_empty() {
+        return msg.clone();
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    match msg.channel_id.message(http, msg.id).await {
+        Ok(fresh) => fresh,
+        Err(err) => {
+            warn!("couldn't read the message again for link previews: {err}");
+            msg.clone()
+        }
+    }
 }
 
 /// Downloads `url`, giving up once it is bigger than `max_bytes`.
