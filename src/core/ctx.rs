@@ -11,6 +11,7 @@ use tokio_util::task::TaskTracker;
 use super::config::{Config, Gate};
 use super::db::Db;
 use super::{BotEvent, Feature};
+use crate::ai::Ai;
 
 /// Cheap to clone: every field is a handle to something shared.
 #[derive(Clone)]
@@ -23,6 +24,10 @@ pub struct BotCtx {
     pub shard_manager: Arc<ShardManager>,
     pub db: Db,
     pub config: Arc<Config>,
+    /// AI models (chat, and one-off calls any feature can make).
+    pub ai: Ai,
+    /// For downloading files from the web (attachments, links). Shares connections.
+    pub web: reqwest::Client,
     /// Publish with [`BotCtx::publish`]; the dispatcher delivers to every feature.
     pub events: broadcast::Sender<BotEvent>,
     /// Cancelled when the bot shuts down. Background tasks stop when they see it.

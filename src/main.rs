@@ -1,6 +1,7 @@
 //! VoltBot: load the config, open the database, connect to Discord, and hand events to the
 //! features in `features::all()`.
 
+mod ai;
 mod core;
 mod features;
 mod util;
@@ -43,6 +44,12 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
         std::env::var("DISCORD_TOKEN").context("DISCORD_TOKEN is not set (put it in .env)")?;
     let config = Arc::new(config);
     let features = Arc::new(features::all());
+    let web = reqwest::Client::builder()
+        .user_agent(concat!("VoltBot/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        .context("creating the HTTP client")?;
+    let ai = ai_from_env(&config, &web);
 
     // Database: open, run every owner's migrations, then import voltgpt's data if present.
     let db = Db::open(&config.database)
@@ -113,6 +120,8 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
                     shard_manager: framework.shard_manager().clone(),
                     db,
                     config: config.clone(),
+                    ai,
+                    web,
                     events,
                     shutdown: setup_shutdown,
                     tasks: setup_tasks,
@@ -201,6 +210,24 @@ async fn register_commands(
         }
     }
     Ok(())
+}
+
+/// Sets up the AI providers whose keys are in `.env`.
+fn ai_from_env(config: &Config, web: &reqwest::Client) -> ai::Ai {
+    let mut ai = ai::Ai::default();
+    match std::env::var("OPENAI_TOKEN") {
+        Ok(token) if !token.trim().is_empty() => {
+            let base = std::env::var("OPENAI_BASE").ok();
+            ai.chat = Some(Arc::new(ai::OpenAi::new(
+                web.clone(),
+                token.trim().to_string(),
+                base.as_deref(),
+                config.ai.openai.clone(),
+            )));
+        }
+        _ => warn!("OPENAI_TOKEN is not set, so chat is off"),
+    }
+    ai
 }
 
 /// Imports voltgpt's `old.db` if it's there. Returns a summary for the start notice.

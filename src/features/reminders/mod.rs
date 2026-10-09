@@ -8,12 +8,14 @@
 //! - `commands.rs`: `/reminders` and `/timezone`
 //! - `ui.rs`: message texts, buttons and the delete menu
 //! - `import.rs`: reminders from voltgpt's database
+//! - `tools.rs`: create, list and cancel reminders from chat
 
 mod commands;
 mod import;
 mod parse;
 mod scheduler;
 mod store;
+mod tools;
 mod ui;
 
 use std::sync::Arc;
@@ -33,7 +35,10 @@ use tracing::{info, warn};
 use self::parse::When;
 use self::store::{Image, NewReminder};
 use self::ui::Action;
-use crate::core::{BotCtx, Command, Feature, LegacyImport, Result, Stat, settings, user_error};
+use crate::ai::ToolDef;
+use crate::core::{
+    Asker, BotCtx, Command, Feature, LegacyImport, Result, Stat, settings, user_error,
+};
 
 #[derive(Default)]
 pub struct Reminders {
@@ -64,6 +69,24 @@ impl Feature for Reminders {
             part: "reminders",
             run: import::import,
         })
+    }
+
+    fn tools(&self) -> Vec<ToolDef> {
+        tools::defs()
+    }
+
+    async fn run_tool(
+        &self,
+        ctx: &BotCtx,
+        asker: &Asker,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<String> {
+        let (changed, text) = tools::run(ctx, asker, name, args).await?;
+        if changed {
+            self.wake.notify_one();
+        }
+        Ok(text)
     }
 
     async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {

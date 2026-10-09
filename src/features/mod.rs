@@ -3,6 +3,7 @@
 //! To add a feature: create a folder here with a struct that implements
 //! [`crate::core::Feature`], then add one line to [`all`].
 
+mod chat;
 mod control_panel;
 mod reminders;
 
@@ -14,5 +15,6 @@ pub fn all() -> Vec<Arc<dyn Feature>> {
     vec![
         Arc::new(reminders::Reminders::default()),
         Arc::new(control_panel::ControlPanel),
+        Arc::new(chat::Chat::default()),
     ]
 }

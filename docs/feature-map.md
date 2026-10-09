@@ -59,7 +59,9 @@ pub trait Feature: Send + Sync {
     async fn on_component(&self, ctx: &BotCtx, i: &ComponentInteraction, id: &str) -> Result<()> { Ok(()) }
     async fn on_modal(&self, ctx: &BotCtx, i: &ModalInteraction, id: &str) -> Result<()> { Ok(()) }
     async fn on_bot_event(&self, ctx: &BotCtx, event: &BotEvent) -> Result<()> { Ok(()) }
-    async fn call_tool(&self, ctx: &ToolCtx, name: &str, args: serde_json::Value) -> Result<String> {
+    // A chat tool from `tools()`, run for the person who asked (`Asker`: user, guild,
+    // channel, message).
+    async fn run_tool(&self, ctx: &BotCtx, asker: &Asker, name: &str, args: &Value) -> Result<String> {
         Err(anyhow!("unknown tool {name}"))
     }
 }
@@ -128,7 +130,7 @@ Features get everything shared through one context value: the serenity HTTP clie
 src/
   main.rs                 # load config, open db, build features, start serenity + poise
   core/                   # ctx, dispatcher, guards, config, db, events, custom_id, errors
-  ai/                     # provider trait, Turn types, openai.rs, claude.rs
+  ai/                     # mod.rs (provider trait, Turn types), sse.rs, openai.rs, later claude.rs
   util/                   # split.rs, reply.rs (multi-message replies), media.rs, frames.rs, text.rs
   features/
     mod.rs                # the feature list
@@ -141,7 +143,7 @@ src/
       tools.rs            # create/list/cancel_reminder
       import.rs           # from old.db
     wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, tools.rs, import.rs
-    chat/                 # mod.rs, history.rs, stream.rs, tools.rs
+    chat/                 # mod.rs, answer.rs, history.rs, store.rs, tools.rs, prompt.md
 ```
 
 Plain modules in one crate. A Cargo workspace with a crate per feature would let the compiler enforce rule 1, but it adds build setup that isn't worth it yet.
@@ -178,11 +180,11 @@ Provider trait: the parts that differ per provider are building the input, strea
 
 Prompt caching: the system prompt is fully static. The Go bot appended the current time, channel name and memory context to the instructions, which come first in every request, so the cache broke there and the conversation history after it was never reused. VoltBot drops memory and gives the model tools to look up the time and channel instead. The tool list is also static and in a fixed order, since it is part of the cached prefix.
 
-Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and 🔁 regenerates it from the same input. Only the person who asked can use them.
+Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and 🔁 regenerates it from the same input, editing the old answer's messages in place. Only the person who asked can use them. The bot removes the 🔁 again, so it can be used for the next try.
 
-Config: model name, reasoning effort and similar settings come from config, not constants in code.
+Config: model name, reasoning effort, verbosity and service tier come from `[ai.openai]` in `config.toml`, not constants in code. The key is `OPENAI_TOKEN` in `.env` (with an optional `OPENAI_BASE`); without it chat answers that it is turned off.
 
-GIFs from Discord's picker (Klipy since Tenor's API closed, also Giphy) are a link to the GIF's page plus a `gifv` embed with an MP4 `video` and a still `thumbnail`; `util::media` reads the MP4 and skips the still, whatever the provider. Discord can add link previews in a later message update, so if a mention has links but no embeds yet, chat should fetch the message again before reading its media.
+GIFs from Discord's picker (Klipy since Tenor's API closed, also Giphy) are a link to the GIF's page plus a `gifv` embed with an MP4 `video` and a still `thumbnail`; `util::media` reads the MP4 and skips the still, whatever the provider. Discord can add link previews in a later message update, so if a mention has links but no embeds yet, chat waits two seconds and fetches the message again before reading its media.
 
 Message splitting: one splitter replaces the Go bot's two (`SplitParagraph` and `SplitMessageSlices`). It splits on paragraph, then line, then character boundaries, and re-opens code blocks it cuts. The Go code cuts at byte offsets; Rust panics when a string is sliced inside a multi-byte character such as an emoji, so the Rust version must only cut on `char` boundaries. This is a good function to write tests for first.
 
@@ -227,11 +229,11 @@ Go helpers and what replaces them. Most come from serenity, poise or a well-know
 | `strings.go` | the standard library |
 | YouTube and PDF URL handling | dropped, as the Go OpenAI path already ignores them. Claude reads PDFs, so this can return with the Claude provider |
 
-Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging, see "Logging and error reporting"), `anyhow` (errors), `tokio-util`'s `CancellationToken` (❌ stops an answer), `reqwest-eventsource` (Claude's SSE stream).
+Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging, see "Logging and error reporting"), `anyhow` (errors), `tokio-util`'s `CancellationToken` (❌ stops an answer).
 
-Storage: `chat_turns` (see "AI providers" below).
+Storage: `chat_turns` and `chat_messages` (see "AI providers" below).
 
-Likely crates: `async-openai` (check it supports the Responses API and streaming; fall back to `reqwest` + `serde` + SSE if not), `reqwest`, `base64`.
+OpenAI is called over plain `reqwest` + `serde`, with a small SSE parser in `ai/sse.rs`, rather than a client crate. The Claude provider needs the same pieces, so they are written once, and the Responses API's events are easy to read straight from its JSON.
 
 #### AI providers
 
@@ -242,36 +244,43 @@ The plain Claude API (Messages API) has everything the bot needs: streaming, ima
 **Conversation state differs per provider.** OpenAI can keep the conversation on its side (`previous_response_id`). Claude and Gemini are stateless: every request sends the whole history, and prompt caching makes the repeated part cheap. The provider trait therefore always receives the full history, plus an optional continuation ID the provider may use instead:
 
 ```rust
+enum Input {
+    Full(Vec<Turn>),                                // provider-neutral, oldest first
+    After { continuation: String, new: Vec<Turn> }, // only if this provider and model wrote it
+}
+
 struct ChatRequest {
-    system: String,                // static, cache friendly
-    history: Vec<Turn>,            // provider-neutral, oldest first
-    continuation: Option<String>,  // e.g. OpenAI response ID, only if this provider wrote it
-    tools: Vec<ToolDef>,           // the bot's own tools, fixed order
+    system: String,          // static, cache friendly
+    input: Input,
+    tools: Vec<ToolDef>,     // the bot's own tools, fixed order
+    cache_key: String,
 }
 
 enum ChatEvent {
     TextDelta(String),
-    ToolCall { id: String, name: String, args: serde_json::Value },
-    File(GeneratedFile),           // from code interpreter / code execution
-    Done { continuation: Option<String> },
+    Activity(Activity),      // thinking, searching the web, running code, writing
+    Done(Done),              // continuation, tool calls, generated files, raw output
 }
 
 #[async_trait]
 trait ChatProvider: Send + Sync {
     fn name(&self) -> &'static str;   // "openai", "claude", "gemini"
-    async fn stream(&self, req: ChatRequest) -> Result<BoxStream<'static, Result<ChatEvent>>>;
+    fn model(&self) -> &str;
+    async fn stream(&self, req: ChatRequest) -> Result<mpsc::Receiver<Result<ChatEvent>>>;
+    async fn download_file(&self, file: &GeneratedFile) -> Result<Vec<u8>>;
 }
 ```
 
-The tool loop lives outside the trait: when a `ToolCall` arrives, the bot runs the tool, appends the call and its result to the history, and calls `stream` again. Each provider converts `Turn` into its own wire format and handles its own caching details (Claude needs `cache_control`; OpenAI caches automatically with `prompt_cache_key`).
+The tool loop lives outside the trait: when `Done` lists tool calls, the bot runs them, sends their results as the next input, and calls `stream` again (at most 8 rounds per answer). Each provider converts `Turn` into its own wire format and handles its own caching details (Claude needs `cache_control`; OpenAI caches automatically with `prompt_cache_key`).
 
 **One history table, marked per provider.** Replaces Go's `response_ids`:
 
-`chat_turns (discord_message_id PK, parent_message_id, role, content_json, native_json NULL, provider, model, continuation_id NULL, created_at)`
+`chat_turns (id PK, parent_id, role, author_id, channel_id, content_json, native_json NULL, provider, model, continuation_id NULL, created_at)`
+`chat_messages (message_id PK, turn_id)`
 
-Every user message the bot answers and every bot reply gets a row. `content_json` holds provider-neutral content (text, image references, tool calls and results). `provider` says which provider wrote the row, and `continuation_id` holds OpenAI's response ID when there is one. When someone replies to a bot message, the bot walks `parent_message_id` up the chain. If the newest bot turn was written by the current provider and has a `continuation_id`, it sends that. Otherwise it sends the rebuilt history. This means switching providers in the middle of a conversation works, and it no longer depends on fetching old messages from Discord.
+Every user message the bot answers and every bot answer gets a turn. A turn has its own ID rather than a Discord message ID, because a long answer spans several messages (all of them point at the turn through `chat_messages`, so replying to any part continues the conversation) and a regenerated answer reuses the old answer's messages. `content_json` holds provider-neutral content (text and media links). `provider` says which provider wrote the turn, and `continuation_id` holds OpenAI's response ID when there is one. When someone replies to a message, the bot walks `parent_id` up the chain (at most 40 turns); a replied-to message the bot hasn't seen, such as someone else's message or an old voltgpt answer, becomes a turn first. If the newest bot turn was written by the current provider and has a `continuation_id`, it sends that. Otherwise it sends the rebuilt history. This means switching providers in the middle of a conversation works, and it no longer depends on fetching old messages from Discord.
 
-**Thinking is stored, but only replayed to the model that wrote it.** For bot turns, `native_json` keeps the provider's raw output for that turn exactly as it came back: Claude's thinking blocks (with their signatures), OpenAI's encrypted reasoning items (requested with `include: ["reasoning.encrypted_content"]`), and the tool calls and results in their original order. When the rebuilt history goes to the same provider and model, the bot sends `native_json` unchanged. That keeps the model's earlier reasoning available, keeps the request prefix byte-identical so the prompt cache still hits, and follows Claude's rule that thinking blocks must be passed back unmodified. For any other provider or model, the bot sends only the neutral `content_json`, because thinking blocks are tied to the model that produced them. History is append-only: turns are never edited, and 🔁 regenerate adds a new sibling turn under the same parent instead of overwriting. Thinking is never shown in Discord. Image attachments are stored by URL; Discord CDN links expire, so the rebuild refreshes them through Discord's refresh-urls endpoint before sending.
+**Thinking is stored, but only replayed to the model that wrote it.** For bot turns, `native_json` keeps the provider's raw output for that turn exactly as it came back: Claude's thinking blocks (with their signatures), OpenAI's encrypted reasoning items (requested with `include: ["reasoning.encrypted_content"]`), and the tool calls and results in their original order. When the rebuilt history goes to the same provider and model, the bot sends `native_json` unchanged. That keeps the model's earlier reasoning available, keeps the request prefix byte-identical so the prompt cache still hits, and follows Claude's rule that thinking blocks must be passed back unmodified. For any other provider or model, the bot sends only the neutral `content_json`, because thinking blocks are tied to the model that produced them. (Stage 3 stores `native_json` but doesn't replay it yet: OpenAI continues through `previous_response_id`, which already carries the reasoning. Replaying starts with the Claude provider.) History is append-only: turns are never edited, and 🔁 regenerate adds a new sibling turn under the same parent instead of overwriting. Thinking is never shown in Discord. Image attachments are stored by URL; Discord CDN links expire, so the rebuild refreshes them through Discord's refresh-urls endpoint before sending. Only the newest four turns with media send it again; older ones say an image was there.
 
 ### 2. Reminders
 

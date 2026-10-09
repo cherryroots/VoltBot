@@ -22,6 +22,8 @@ pub struct Config {
     /// voltgpt's database, imported on startup if it exists.
     pub old_database: String,
     pub logging: LoggingConfig,
+    /// Model settings, per provider.
+    pub ai: crate::ai::AiConfig,
     /// The raw `[features.<name>]` tables, read by [`Config::feature`].
     features: HashMap<String, toml::Table>,
     /// The gating keys of every feature section, parsed once at load.
@@ -36,6 +38,7 @@ impl Default for Config {
             database: "voltbot.db".to_string(),
             old_database: "old.db".to_string(),
             logging: LoggingConfig::default(),
+            ai: crate::ai::AiConfig::default(),
             features: HashMap::new(),
             gates: HashMap::new(),
         }

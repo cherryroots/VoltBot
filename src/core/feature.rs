@@ -6,9 +6,13 @@
 //! a feature never registers anything by hand.
 
 use async_trait::async_trait;
-use serenity::all::{ComponentInteraction, Message, ModalInteraction, Reaction};
+use serenity::all::{
+    ChannelId, ComponentInteraction, GuildId, Message, MessageId, ModalInteraction, Reaction,
+    UserId,
+};
 
 use super::{BotCtx, BotEvent, Command, Result};
+use crate::ai::ToolDef;
 
 #[async_trait]
 pub trait Feature: Send + Sync + 'static {
@@ -37,6 +41,25 @@ pub trait Feature: Send + Sync + 'static {
     /// How to import this feature's data from voltgpt's database. See [`crate::core::legacy`].
     fn legacy_import(&self) -> Option<LegacyImport> {
         None
+    }
+
+    /// Functions this feature offers to the chat model, like `create_reminder`. Chat lists
+    /// the tools of every feature that is enabled where the conversation happens.
+    fn tools(&self) -> Vec<ToolDef> {
+        Vec::new()
+    }
+
+    /// Runs one of [`Feature::tools`] for the person who asked. Returns text for the model.
+    /// An error is shown to the model as the result, so it can fix its call and try again;
+    /// use [`crate::core::user_error`] for messages meant for it.
+    async fn run_tool(
+        &self,
+        _ctx: &BotCtx,
+        _asker: &Asker,
+        name: &str,
+        _args: &serde_json::Value,
+    ) -> Result<String> {
+        anyhow::bail!("{} has no tool named {name}", self.name())
     }
 
     /// Numbers for the control panel's status message.
@@ -94,6 +117,17 @@ pub trait Feature: Send + Sync + 'static {
     async fn on_bot_event(&self, _ctx: &BotCtx, _event: &BotEvent) -> Result<()> {
         Ok(())
     }
+}
+
+/// The person a chat tool runs for, and where they asked. Tools act as this person: they only
+/// see what this person can see and only change this person's things.
+#[derive(Debug, Clone)]
+pub struct Asker {
+    pub user: UserId,
+    pub guild: Option<GuildId>,
+    pub channel: ChannelId,
+    /// The message that asked.
+    pub message: MessageId,
 }
 
 /// One line on the control panel, like "Pending: 4".

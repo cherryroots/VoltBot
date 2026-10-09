@@ -16,7 +16,7 @@ VoltBot is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://g
 
 ## Status
 
-Stage 2 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, and the shared helpers chat will use (message splitting, multi-message replies, media and text extraction, GIF and video frames). Chat and the movie wheel come next. See `docs/feature-map.md` for the plan and the order.
+Stage 3 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, the shared helpers (message splitting, multi-message replies, media and text extraction, GIF and video frames), and AI chat with OpenAI, its tools, and the ❌/🔁 reaction controls. The movie wheel comes next. See `docs/feature-map.md` for the plan and the order.
 
 Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorrow at 9am`, `next friday`, `on 2026-12-24 at noon`, and the time at the end (`… in 2h`). `/reminders` lists and deletes them, `/timezone` sets your zone, and delivered reminders have snooze buttons.
 
@@ -53,7 +53,7 @@ sudo chown -R voltbot:voltbot /opt/voltbot
 sudo chmod 600 /opt/voltbot/.env
 ```
 
-Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`; `OPENAI_TOKEN` arrives with chat) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
+Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`, and `OPENAI_TOKEN` for chat) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
 
 **Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders right away and the movie wheel game once that feature is ported, each only once, then renames the file to `old.db.imported`. If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
 
