@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn dumps_a_folder() {
         let folder: Folder = [
-            ("/memories/users/1/about.md", "Rene\n"),
+            ("/memories/users/1/about.md", "Cherry\n"),
             ("/memories/users/1/games.md", "likes chess"),
             ("/memories/users/10/about.md", "Bob"),
         ]
@@ -252,7 +252,7 @@ mod tests {
         .collect();
         assert_eq!(
             dump(&folder, "/memories/users/1"),
-            "# /memories/users/1/about.md\nRene\n\n# /memories/users/1/games.md\nlikes chess"
+            "# /memories/users/1/about.md\nCherry\n\n# /memories/users/1/games.md\nlikes chess"
         );
         assert_eq!(
             dump(&folder, "/memories/users/1/games.md"),

@@ -365,7 +365,7 @@ async fn recent_messages(ctx: &BotCtx, asker: &Asker, count: u64) -> Result<Stri
     Ok(lines.join("\n"))
 }
 
-/// "[2026-10-09 14:02] Rene: text (2 attachments)"
+/// "[2026-10-09 14:02] Cherry: text (2 attachments)"
 pub(super) fn format_message(ctx: &BotCtx, msg: &Message, zone: Tz) -> String {
     let time = DateTime::from_timestamp(msg.timestamp.unix_timestamp(), 0)
         .unwrap_or_default()
@@ -658,7 +658,7 @@ Category Voice:
         assert_eq!(parse_user_id("<@123>"), Some(UserId::new(123)));
         assert_eq!(parse_user_id("<@!123>"), Some(UserId::new(123)));
         assert_eq!(parse_user_id("123"), Some(UserId::new(123)));
-        assert_eq!(parse_user_id("rene"), None);
+        assert_eq!(parse_user_id("cherry"), None);
     }
 
     #[test]
