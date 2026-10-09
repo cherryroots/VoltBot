@@ -23,7 +23,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Deserializer};
 use tracing::warn;
 
-use super::ledger::Bet;
+use super::ledger::{Bet, Rules};
 use super::store;
 use crate::core::config::Config;
 use crate::core::legacy::table_exists;
@@ -121,6 +121,8 @@ fn import_into(old: &Connection, new: &Transaction, guild: u64, now: i64) -> any
     }
     let options: Vec<u64> = game.bet_options.iter().filter_map(OldPlayer::id).collect();
     let season = store::start_season(new, guild, &options, now)?;
+    // voltgpt's game keeps voltgpt's payouts, so the balances stay the same.
+    store::set_rules(new, season, Rules::Classic)?;
     let mut round = store::load_season(new, season)?.rounds[0].id;
 
     for (index, old_round) in game.rounds.iter().enumerate() {
@@ -208,6 +210,7 @@ mod tests {
         let season = store::active_season(&new, GUILD).unwrap().unwrap();
         let season = store::load_season(&new, season).unwrap();
         assert_eq!(season.options, [1, 2, 3]);
+        assert_eq!(season.rules, Rules::Classic);
         assert_eq!(season.rounds.len(), 2);
         assert_eq!(season.rounds[0].winner, Some(2));
         assert_eq!(season.rounds[1].winner, None);

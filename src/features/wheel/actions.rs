@@ -141,6 +141,7 @@ pub async fn on_component(ctx: &BotCtx, i: &ComponentInteraction, action: &str) 
             message,
         }) => picked(ctx, i, guild, kind, round, MessageId::new(message)).await,
         Some(Action::Reset { keep_options }) => reset(ctx, i, guild, keep_options).await,
+        Some(Action::Help { season }) => help(ctx, i, guild, season).await,
         Some(Action::Amount { .. }) | None => bail!("unknown action {action:?}"),
     }
 }
@@ -426,6 +427,28 @@ async fn undo(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId, round: i64
     i.defer(&ctx.http).await?;
     let status = status_message(ctx, guild, &game, game.latest()).await?;
     i.edit_response(&ctx.http, status.update()).await?;
+    Ok(())
+}
+
+/// "Help": the rules of the season this status message shows, privately.
+async fn help(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId, season: i64) -> Result<()> {
+    let rules = ctx
+        .db
+        .call(move |conn| {
+            if !store::seasons(conn, guild.get())?
+                .iter()
+                .any(|s| s.id == season)
+            {
+                return Err(user_error("That season isn't from this server."));
+            }
+            Ok(store::load_season(conn, season)?.rules)
+        })
+        .await?;
+    let response = CreateInteractionResponseMessage::new()
+        .content(ui::help_text(rules))
+        .ephemeral(true);
+    i.create_response(&ctx.http, CreateInteractionResponse::Message(response))
+        .await?;
     Ok(())
 }
 

@@ -6,7 +6,7 @@
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use super::ledger::{Bet, Round, Season};
+use super::ledger::{Bet, Round, Rules, Season};
 
 pub const MIGRATIONS: &[&str] = &[
     // 1
@@ -44,6 +44,8 @@ pub const MIGRATIONS: &[&str] = &[
         amount INTEGER NOT NULL CHECK (amount > 0),
         PRIMARY KEY (round_id, by_id, on_id)
     );",
+    // 2: how a season pays out. Seasons from before pool betting keep voltgpt's rules.
+    "ALTER TABLE wheel_seasons ADD COLUMN rules TEXT NOT NULL DEFAULT 'classic';",
 ];
 
 /// A season's row, without its rounds.
@@ -74,8 +76,8 @@ pub fn ensure_season(conn: &Connection, guild: u64, now: i64) -> rusqlite::Resul
     }
 }
 
-/// Starts a season with these options and round 1. The server must have no active season.
-/// Run it in a transaction, like [`ensure_season`].
+/// Starts a season with these options and round 1, with pool betting. The server must have
+/// no active season. Run it in a transaction, like [`ensure_season`].
 pub fn start_season(
     conn: &Connection,
     guild: u64,
@@ -83,8 +85,8 @@ pub fn start_season(
     now: i64,
 ) -> rusqlite::Result<i64> {
     conn.execute(
-        "INSERT INTO wheel_seasons (guild_id, started_at) VALUES (?1, ?2)",
-        params![guild, now],
+        "INSERT INTO wheel_seasons (guild_id, started_at, rules) VALUES (?1, ?2, ?3)",
+        params![guild, now, Rules::Pool.as_str()],
     )?;
     let season = conn.last_insert_rowid();
     for option in options {
@@ -92,6 +94,15 @@ pub fn start_season(
     }
     add_round(conn, season, 1)?;
     Ok(season)
+}
+
+/// Changes how a season pays out.
+pub fn set_rules(conn: &Connection, season: i64, rules: Rules) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE wheel_seasons SET rules = ?2 WHERE id = ?1",
+        params![season, rules.as_str()],
+    )?;
+    Ok(())
 }
 
 /// Ends a season. Its rounds stay, so it can still be viewed.
@@ -177,9 +188,15 @@ pub fn load_season(conn: &Connection, season: i64) -> rusqlite::Result<Season> {
         [season],
         |row| row.get(0),
     )?;
+    let rules: String = conn.query_row(
+        "SELECT rules FROM wheel_seasons WHERE id = ?1",
+        [season],
+        |row| row.get(0),
+    )?;
     Ok(Season {
         id: season,
         number,
+        rules: Rules::parse(&rules).unwrap_or_default(),
         options,
         rounds,
     })
@@ -312,6 +329,9 @@ mod tests {
         let loaded = load_season(&conn, season).unwrap();
         assert_eq!(loaded.rounds.len(), 1);
         assert_eq!(loaded.rounds[0].number, 1);
+        assert_eq!(loaded.rules, Rules::Pool);
+        set_rules(&conn, season, Rules::Classic).unwrap();
+        assert_eq!(load_season(&conn, season).unwrap().rules, Rules::Classic);
     }
 
     #[test]

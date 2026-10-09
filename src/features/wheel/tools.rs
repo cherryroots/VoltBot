@@ -3,8 +3,8 @@
 use serde_json::{Value, json};
 
 use super::actions::Game;
-use super::ledger::{self, OutcomeKind, Season, outcomes};
-use super::ui::{Names, name};
+use super::ledger::{self, OutcomeKind, Rules, Season, outcomes};
+use super::ui::{Names, help_text, name};
 use super::{names, store};
 use crate::ai::ToolDef;
 use crate::core::{Asker, BotCtx, Result, user_error};
@@ -80,11 +80,18 @@ fn describe(season: &Season, index: usize, names: &Names, asker: u64) -> String 
         round.number,
         season.rounds.len()
     ));
-    lines.push(format!(
-        "Rules: each round a player can claim {}. A player who bets less than {}% of their money loses 3% of it per missing percentage point when the round ends. A winning bet pays amount × (options left − 1); a losing bet loses its amount.",
-        ledger::CLAIM,
-        ledger::TAX_THRESHOLD
-    ));
+    lines.push(help_text(season.rules));
+    if season.rules == Rules::Pool {
+        let carried = if current.carried > 0 {
+            format!(
+                ", {} of it carried over from earlier rounds",
+                current.carried
+            )
+        } else {
+            String::new()
+        };
+        lines.push(format!("The pot is {}{carried}.", current.pot));
+    }
     lines.push(format!(
         "Options left on the wheel ({}): {}. Each player may bet on up to {} of them.",
         current.options_left.len(),
@@ -132,6 +139,13 @@ fn describe(season: &Season, index: usize, names: &Names, asker: u64) -> String 
         for bet in &round.bets {
             lines.push(format!("- {} on {}: {}", n(bet.by), n(bet.on), bet.amount));
         }
+        if round.winner.is_none() {
+            for &option in &current.options_left {
+                if let Some(odds) = current.odds(option) {
+                    lines.push(format!("{} pays ×{odds:.1} right now.", n(option)));
+                }
+            }
+        }
     }
     let results = outcomes(round, current);
     if !results.is_empty() {
@@ -168,6 +182,7 @@ mod tests {
         let season = Season {
             id: 1,
             number: 1,
+            rules: Default::default(),
             options: vec![1, 2, 3],
             rounds: vec![
                 Round {

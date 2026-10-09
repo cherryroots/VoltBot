@@ -1,17 +1,20 @@
 //! The money: who has how much in each round. Pure functions over plain values, no
 //! Discord or database, so every rule is tested here.
 //!
-//! The rules, the same as voltgpt's:
+//! The rules:
 //!
 //! - Every round a player can claim 100.
 //! - When a round is over, a player who bet less than 10% of their money loses 3% of it per
 //!   missing percentage point (up to 30%).
-//! - A winning bet pays `amount × (options − 1)`, where options are the wheel options left
-//!   in that round; a losing bet loses its amount.
+//! - A player can bet on at most half of the options left, rounded up.
+//! - Payouts depend on the season's [`Rules`]. Classic (voltgpt's): a winning bet pays
+//!   `amount × (options − 1)`, where options are the wheel options left in that round.
+//!   Pool: every bet and tax of the round goes into a pot, which the bets on the winner
+//!   share by stake. Either way a losing bet loses its amount.
 //! - Integer division truncates, as in Go.
 //!
 //! Balances are never stored. [`ledger`] folds over the rounds once and returns everything
-//! the status embed, the bet checks and the chat tool need.
+//! the status picture, the bet checks and the chat tool need.
 
 use std::collections::HashMap;
 
@@ -39,12 +42,44 @@ pub struct Round {
     pub bets: Vec<Bet>,
 }
 
+/// How a season pays out winning bets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rules {
+    /// voltgpt's: a winning bet pays `amount × (options − 1)`, however many people picked
+    /// the same option. Seasons from before pool betting keep these.
+    #[default]
+    Classic,
+    /// Every bet and tax of the round goes into a pot, and the bets on the winner share it
+    /// by stake: favourites pay little, long shots a lot. A pot nobody won carries over to
+    /// the next round.
+    Pool,
+}
+
+impl Rules {
+    /// The name stored in the database.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Rules::Classic => "classic",
+            Rules::Pool => "pool",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Rules> {
+        match text {
+            "classic" => Some(Rules::Classic),
+            "pool" => Some(Rules::Pool),
+            _ => None,
+        }
+    }
+}
+
 /// A season: the wheel options and the rounds so far, oldest first.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Season {
     pub id: i64,
     /// Which season of the server this is, counting from 1.
     pub number: i64,
+    pub rules: Rules,
     pub options: Vec<u64>,
     pub rounds: Vec<Round>,
 }
@@ -91,13 +126,44 @@ impl Standing {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoundLedger {
     pub number: i64,
+    pub rules: Rules,
     /// The options that hadn't won before this round, in option order.
     pub options_left: Vec<u64>,
     /// Every player of the season, in the order they first played.
     pub standings: Vec<Standing>,
+    /// The total bet on each option this round.
+    pub totals: HashMap<u64, i64>,
+    /// Pool rules: what earlier rounds left in the pot because nobody won it.
+    pub carried: i64,
+    /// Pool rules: the pot if the round ended now: `carried`, this round's bets and the
+    /// taxes. 0 under classic rules.
+    pub pot: i64,
 }
 
 impl RoundLedger {
+    /// The total bet on `option` this round.
+    pub fn total_on(&self, option: u64) -> i64 {
+        self.totals.get(&option).copied().unwrap_or(0)
+    }
+
+    /// What a bet wins (positive) or loses (negative) if `winner` wins.
+    pub fn result(&self, bet: &Bet, winner: u64) -> i64 {
+        if bet.on != winner {
+            return -bet.amount;
+        }
+        match self.rules {
+            Rules::Classic => bet.amount * (self.options_left.len() as i64 - 1).max(0),
+            Rules::Pool => self.pot * bet.amount / self.total_on(winner) - bet.amount,
+        }
+    }
+
+    /// Pool rules: what a bet on `option` gets back per 1 bet if the round ended now, its
+    /// stake included. `None` under classic rules or when nobody bet on it yet.
+    pub fn odds(&self, option: u64) -> Option<f64> {
+        let total = self.total_on(option);
+        (self.rules == Rules::Pool && total > 0).then(|| self.pot as f64 / total as f64)
+    }
+
     pub fn standing(&self, user: u64) -> Option<&Standing> {
         self.standings.iter().find(|s| s.user == user)
     }
@@ -165,11 +231,25 @@ fn options_left(season: &Season, index: usize) -> Vec<u64> {
 pub fn ledger(season: &Season) -> Vec<RoundLedger> {
     let players = players(season);
     let mut carried: HashMap<u64, i64> = HashMap::new();
+    // Pool rules: what is left in the pot for the next round.
+    let mut carried_pot = 0;
     let mut result = Vec::new();
     for (index, round) in season.rounds.iter().enumerate() {
-        let options_left = options_left(season, index);
-        let options = options_left.len() as i64;
-        let mut standings = Vec::new();
+        let mut totals: HashMap<u64, i64> = HashMap::new();
+        for bet in &round.bets {
+            *totals.entry(bet.on).or_default() += bet.amount;
+        }
+        let mut numbers = RoundLedger {
+            number: round.number,
+            rules: season.rules,
+            options_left: options_left(season, index),
+            standings: Vec::new(),
+            totals,
+            carried: 0,
+            pot: 0,
+        };
+
+        // Money, bets and tax first: under pool rules the payouts depend on everyone's tax.
         for &user in &players {
             let claims = round.claims.iter().filter(|&&c| c == user).count() as i64;
             let money = carried.get(&user).copied().unwrap_or(0) + CLAIM * claims;
@@ -185,38 +265,56 @@ pub fn ledger(season: &Season) -> Vec<RoundLedger> {
             } else {
                 0
             };
-            let payout = match round.winner {
-                Some(winner) => round
-                    .bets
-                    .iter()
-                    .filter(|b| b.by == user)
-                    .map(|b| {
-                        if b.on == winner {
-                            b.amount * (options - 1).max(0)
-                        } else {
-                            -b.amount
-                        }
-                    })
-                    .sum(),
-                None => 0,
-            };
-            let standing = Standing {
+            numbers.standings.push(Standing {
                 user,
                 money,
                 bet,
                 bet_percent,
                 tax,
-                payout,
-            };
-            // Like voltgpt, every round before the latest counts as over.
-            carried.insert(user, standing.after());
-            standings.push(standing);
+                payout: 0,
+            });
         }
-        result.push(RoundLedger {
-            number: round.number,
-            options_left,
-            standings,
-        });
+        if season.rules == Rules::Pool {
+            let bets: i64 = numbers.standings.iter().map(|s| s.bet).sum();
+            let taxes: i64 = numbers.standings.iter().map(|s| s.tax).sum();
+            numbers.carried = carried_pot;
+            numbers.pot = carried_pot + bets + taxes;
+        }
+
+        if let Some(winner) = round.winner {
+            let payouts: Vec<i64> = numbers
+                .standings
+                .iter()
+                .map(|s| {
+                    let mine = round.bets.iter().filter(|b| b.by == s.user);
+                    mine.map(|b| numbers.result(b, winner)).sum()
+                })
+                .collect();
+            for (standing, payout) in numbers.standings.iter_mut().zip(payouts) {
+                standing.payout = payout;
+            }
+        }
+        if season.rules == Rules::Pool {
+            carried_pot = match round.winner {
+                // Nobody on the winner, or rounding: the rest stays in the pot.
+                Some(winner) => {
+                    let on_winner = round.bets.iter().filter(|b| b.on == winner);
+                    numbers.pot
+                        - on_winner
+                            .map(|b| numbers.result(b, winner) + b.amount)
+                            .sum::<i64>()
+                }
+                // A past round without a winner (only in voltgpt's games): the bets stay
+                // with their owners, the taxes in the pot.
+                None => numbers.pot - numbers.standings.iter().map(|s| s.bet).sum::<i64>(),
+            };
+        }
+
+        // Like voltgpt, every round before the latest counts as over.
+        for standing in &numbers.standings {
+            carried.insert(standing.user, standing.after());
+        }
+        result.push(numbers);
     }
     result
 }
@@ -245,7 +343,6 @@ pub fn outcomes(round: &Round, numbers: &RoundLedger) -> Vec<Outcome> {
     let Some(winner) = round.winner else {
         return Vec::new();
     };
-    let options = numbers.options_left.len() as i64;
     let mut balance: HashMap<u64, i64> = numbers
         .standings
         .iter()
@@ -265,11 +362,12 @@ pub fn outcomes(round: &Round, numbers: &RoundLedger) -> Vec<Outcome> {
         });
     };
     for bet in &round.bets {
-        if bet.on == winner {
-            push(OutcomeKind::Won, bet.by, bet.amount * (options - 1).max(0));
+        let kind = if bet.on == winner {
+            OutcomeKind::Won
         } else {
-            push(OutcomeKind::Lost, bet.by, -bet.amount);
-        }
+            OutcomeKind::Lost
+        };
+        push(kind, bet.by, numbers.result(bet, winner));
     }
     for standing in numbers.standings.iter().filter(|s| s.tax > 0) {
         push(OutcomeKind::Taxed, standing.user, -standing.tax);
@@ -357,6 +455,7 @@ mod tests {
         Season {
             id: 1,
             number: 1,
+            rules: Default::default(),
             options: options.to_vec(),
             rounds,
         }
@@ -496,6 +595,100 @@ mod tests {
             ]
         );
         assert!(outcomes(&round(2, None, &[], vec![]), numbers).is_empty());
+    }
+
+    fn pool(options: &[u64], rounds: Vec<Round>) -> Season {
+        Season {
+            rules: Rules::Pool,
+            ..season(options, rounds)
+        }
+    }
+
+    #[test]
+    fn pool_split_by_stake() {
+        // Bets 45 and Charlie's tax 30 make a pot of 75. Alice and Dana bet 20 and 10 on
+        // Bob, so they get 50 and 25 of it back.
+        let r = round(
+            1,
+            Some(BOB),
+            &[ALICE, BOB, CHARLIE, DANA],
+            vec![bet(ALICE, BOB, 20), bet(DANA, BOB, 10), bet(BOB, ALICE, 15)],
+        );
+        let s = pool(&[ALICE, BOB, CHARLIE, DANA], vec![r.clone()]);
+        let numbers = &ledger(&s)[0];
+        assert_eq!(numbers.pot, 75);
+        assert_eq!(numbers.odds(BOB), Some(2.5));
+        assert_eq!(numbers.odds(CHARLIE), None);
+        let after: Vec<i64> = [ALICE, BOB, CHARLIE, DANA]
+            .iter()
+            .map(|&u| numbers.standing(u).unwrap().after())
+            .collect();
+        assert_eq!(after, [130, 85, 70, 115]);
+        let won: Vec<(u64, i64)> = outcomes(&r, numbers)
+            .iter()
+            .filter(|o| o.kind == OutcomeKind::Won)
+            .map(|o| (o.user, o.amount))
+            .collect();
+        assert_eq!(won, [(ALICE, 30), (DANA, 15)]);
+    }
+
+    #[test]
+    fn pool_nobody_won_carries_over() {
+        // Nobody bet on Charlie, so round 2 starts with round 1's pot of 75.
+        let s = pool(
+            &[ALICE, BOB, CHARLIE, DANA],
+            vec![
+                round(
+                    1,
+                    Some(CHARLIE),
+                    &[ALICE, BOB, CHARLIE, DANA],
+                    vec![bet(ALICE, BOB, 20), bet(DANA, BOB, 10), bet(BOB, ALICE, 15)],
+                ),
+                round(2, Some(BOB), &[ALICE], vec![bet(ALICE, BOB, 18)]),
+            ],
+        );
+        let rounds = ledger(&s);
+        assert_eq!(rounds[1].carried, 75);
+        assert_eq!(rounds[1].money(ALICE), 180);
+        // 75 carried, Alice's 18, and the others' taxes: 25 + 27 + 21.
+        assert_eq!(rounds[1].pot, 166);
+        assert_eq!(rounds[1].standing(ALICE).unwrap().payout, 148);
+        // Money only moves between players and the pot.
+        let total = |n: &RoundLedger| n.standings.iter().map(|s| s.after()).sum::<i64>();
+        assert_eq!(total(&rounds[0]) + 75, 400);
+        assert_eq!(total(&rounds[1]), 400 + 100);
+    }
+
+    #[test]
+    fn pool_rounding_stays_in_the_pot() {
+        // A pot of 61 shared 10 : 20 is 20.33 and 40.67, so 1 is left for round 2.
+        let s = pool(
+            &[ALICE, BOB, CHARLIE],
+            vec![
+                round(
+                    1,
+                    Some(BOB),
+                    &[ALICE, BOB, CHARLIE],
+                    vec![
+                        bet(ALICE, BOB, 10),
+                        bet(BOB, BOB, 20),
+                        bet(CHARLIE, ALICE, 31),
+                    ],
+                ),
+                round(2, None, &[], vec![]),
+            ],
+        );
+        let rounds = ledger(&s);
+        assert_eq!(rounds[0].standing(ALICE).unwrap().payout, 10);
+        assert_eq!(rounds[0].standing(BOB).unwrap().payout, 20);
+        assert_eq!(rounds[1].carried, 1);
+    }
+
+    #[test]
+    fn rules_names() {
+        for rules in [Rules::Classic, Rules::Pool] {
+            assert_eq!(Rules::parse(rules.as_str()), Some(rules));
+        }
     }
 
     #[test]

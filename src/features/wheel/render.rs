@@ -20,7 +20,7 @@ use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{self, fontdb};
 use skrifa::MetadataProvider as _;
 
-use super::ledger::{OutcomeKind, Standing, TAX_THRESHOLD, outcomes};
+use super::ledger::{OutcomeKind, Rules, Standing, TAX_THRESHOLD, outcomes};
 use super::ui::View;
 
 /// Width of the picture in SVG units. It's rendered at twice this, for sharp text.
@@ -119,10 +119,16 @@ fn open(svg: &mut Svg, view: &View) {
     } else {
         ("ENDED", DIM)
     };
+    let payouts = match numbers.rules {
+        Rules::Classic => format!("winning bets pay ×{}", left.saturating_sub(1)),
+        Rules::Pool if numbers.carried > 0 => {
+            format!("pot {} ({} carried over)", numbers.pot, numbers.carried)
+        }
+        Rules::Pool => format!("pot {}", numbers.pot),
+    };
     let sub = format!(
-        "{left} options left  ·  bet on up to {}  ·  winning bets pay ×{}",
-        numbers.max_bets(),
-        left.saturating_sub(1)
+        "{left} options left  ·  bet on up to {}  ·  {payouts}",
+        numbers.max_bets()
     );
     header(svg, view, state, color, &sub);
 
@@ -213,9 +219,14 @@ fn open(svg: &mut Svg, view: &View) {
         svg.text(
             24.0,
             svg.y,
-            &format!(
-                "Bet at least {TAX_THRESHOLD}% of your money each round, or lose 3% of it per missing point."
-            ),
+            &match numbers.rules {
+                Rules::Classic => format!(
+                    "Bet at least {TAX_THRESHOLD}% of your money each round, or lose 3% of it per missing point."
+                ),
+                Rules::Pool => format!(
+                    "Bet at least {TAX_THRESHOLD}% of your money each round, or 3% per missing point goes to the pot."
+                ),
+            },
             Style::new(11.0, DIM),
         );
         svg.y += 16.0;
@@ -226,14 +237,7 @@ fn open(svg: &mut Svg, view: &View) {
         svg.note("Nobody is on the wheel yet. Admins add options with /wheel_add.");
     } else {
         svg.y += 4.0;
-        let total = |option: u64| -> i64 {
-            round
-                .bets
-                .iter()
-                .filter(|b| b.on == option)
-                .map(|b| b.amount)
-                .sum()
-        };
+        let total = |option: u64| numbers.total_on(option);
         let mut options = numbers.options_left.clone();
         options.sort_by(|a, b| {
             total(*b)
@@ -259,7 +263,7 @@ fn open(svg: &mut Svg, view: &View) {
                 .filter(|b| b.on == option)
                 .map(|b| format!("{} {}", short(view.name(b.by)), b.amount))
                 .collect();
-            let lines = wrap(&pieces, &plain, WIDTH - 32.0 - 250.0, 13.0);
+            let lines = wrap(&pieces, &plain, WIDTH - 32.0 - 300.0, 13.0);
             let height = 30.0 + 20.0 * (lines.len().max(1) - 1) as f32;
             let y = svg.y;
             if pieces.is_empty() {
@@ -271,12 +275,11 @@ fn open(svg: &mut Svg, view: &View) {
                     &short(view.name(option)),
                     Style::new(14.0, DIM).weight(600),
                 );
-                svg.text(
-                    WIDTH - 32.0,
-                    y + 20.0,
-                    "no bets",
-                    Style::new(13.0, DIM).end(),
-                );
+                let empty = match numbers.rules {
+                    Rules::Classic => "no bets",
+                    Rules::Pool => "no bets: a bet here takes the whole pot",
+                };
+                svg.text(WIDTH - 32.0, y + 20.0, empty, Style::new(13.0, DIM).end());
             } else {
                 svg.rect([16.0, y, WIDTH - 32.0, height], ROW, 6.0, "");
                 svg.text(
@@ -288,7 +291,10 @@ fn open(svg: &mut Svg, view: &View) {
                 svg.text(
                     170.0,
                     y + 20.0,
-                    &format!("{} on it", total(option)),
+                    &match numbers.odds(option) {
+                        Some(odds) => format!("{} on it  ·  ×{odds:.1}", total(option)),
+                        None => format!("{} on it", total(option)),
+                    },
                     Style::new(13.0, MUTED).weight(500),
                 );
                 for (n, line) in lines.iter().enumerate() {
@@ -381,11 +387,20 @@ fn resolved(svg: &mut Svg, view: &View) {
     let round = &view.season.rounds[view.index];
     let numbers = &view.ledger[view.index];
     let winner = round.winner.expect("resolved rounds have a winner");
+    let payouts = match numbers.rules {
+        Rules::Classic => format!(
+            "winning bets paid ×{}",
+            numbers.options_left.len().saturating_sub(1)
+        ),
+        Rules::Pool if numbers.total_on(winner) == 0 => {
+            format!("nobody won the pot of {}, it carries over", numbers.pot)
+        }
+        Rules::Pool => format!("pot {}", numbers.pot),
+    };
     let sub = format!(
-        "{} claims  ·  {} bets  ·  winning bets paid ×{}",
+        "{} claims  ·  {} bets  ·  {payouts}",
         round.claims.len(),
-        round.bets.len(),
-        numbers.options_left.len().saturating_sub(1)
+        round.bets.len()
     );
     header(svg, view, "RESOLVED", RED, &sub);
 
@@ -879,6 +894,7 @@ mod tests {
         Season {
             id: 1,
             number: 2,
+            rules: Default::default(),
             options: vec![1, 2, 3, 4],
             rounds: vec![
                 Round {
@@ -952,6 +968,7 @@ mod tests {
         let season = Season {
             id: 1,
             number: 1,
+            rules: Default::default(),
             options: vec![],
             rounds: vec![Round {
                 id: 1,

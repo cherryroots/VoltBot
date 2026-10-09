@@ -9,7 +9,7 @@ use serenity::all::{
     CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
 
-use super::ledger::{RoundLedger, Season, can_undo};
+use super::ledger::{CLAIM, RoundLedger, Rules, Season, TAX_THRESHOLD, can_undo};
 use crate::util::shorten;
 
 /// Display names by user ID, looked up before rendering.
@@ -87,6 +87,10 @@ pub enum Action {
     Reset {
         keep_options: bool,
     },
+    /// Explains the rules of a season, privately.
+    Help {
+        season: i64,
+    },
 }
 
 impl Action {
@@ -107,6 +111,7 @@ impl Action {
                 format!("wheel:amount:{round}:{on}:{message}")
             }
             Action::Reset { keep_options } => format!("wheel:reset:{}", u8::from(*keep_options)),
+            Action::Help { season } => format!("wheel:help:{season}"),
         }
     }
 
@@ -144,6 +149,9 @@ impl Action {
                 keep_options: false,
             },
             ["reset", "1"] => Action::Reset { keep_options: true },
+            ["help", season] => Action::Help {
+                season: season.parse().ok()?,
+            },
             _ => return None,
         })
     }
@@ -192,6 +200,14 @@ pub fn status_buttons(view: &View) -> Vec<CreateActionRow> {
             .emoji(emoji)
             .style(style)
     };
+    let help = button(
+        Action::Help {
+            season: view.season.id,
+        },
+        "Help",
+        '❓',
+        ButtonStyle::Secondary,
+    );
     let buttons = if view.is_latest() {
         vec![
             button(
@@ -218,6 +234,7 @@ pub fn status_buttons(view: &View) -> Vec<CreateActionRow> {
                 '✨',
                 ButtonStyle::Success,
             ),
+            help,
         ]
     } else {
         let mut buttons = vec![button(
@@ -234,6 +251,7 @@ pub fn status_buttons(view: &View) -> Vec<CreateActionRow> {
                 ButtonStyle::Danger,
             ));
         }
+        buttons.push(help);
         buttons
     };
     vec![CreateActionRow::Buttons(buttons)]
@@ -292,6 +310,30 @@ pub fn amount_modal(
         .components(vec![CreateActionRow::InputText(input)])
 }
 
+/// What the Help button says: how to play, under the season's rules.
+pub fn help_text(rules: Rules) -> String {
+    let payouts = match rules {
+        Rules::Pool => {
+            "- **The pot**: all bets of a round, and the taxes, go into one pot. When an admin sets the winner, everyone who bet on it shares the pot by how much they bet. The fewer people back an option, the more it pays: the picture shows each option's payout right now (×2.5 means a bet of 10 gets 25 back). If nobody bet on the winner, the pot carries over to the next round."
+        }
+        Rules::Classic => {
+            "- **Payouts**: a winning bet pays its amount × (options left − 1). A losing bet is lost."
+        }
+    };
+    let tax = match rules {
+        Rules::Pool => " That tax goes into the pot.",
+        Rules::Classic => "",
+    };
+    format!(
+        "**How the movie wheel works**
+- **Claim!** gives you {CLAIM} once every round.
+- **Place Bet!** on the options you think will win: type an amount like `50` or a share of your money like `25%`. You can bet on up to half of the options left. Betting on the same option again changes that bet, and **Remove Bet!** takes it back while the round is open.
+- **Bet at least {TAX_THRESHOLD}%** of your money every round. Otherwise you lose 3% of your money for every missing percentage point when the round ends, up to 30%.{tax}
+{payouts}
+- An option leaves the wheel once it has won. Admins add options with `/wheel_add` and start a new season with `/reset_wheel`."
+    )
+}
+
 /// The `/reset_wheel` confirmation.
 pub fn reset_confirmation(keep_options: bool) -> (String, Vec<CreateActionRow>) {
     let kept = if keep_options {
@@ -329,6 +371,7 @@ mod tests {
         let mut season = Season {
             id: 1,
             number: 1,
+            rules: Default::default(),
             options: vec![1, 2],
             rounds: vec![
                 Round {
@@ -365,15 +408,24 @@ mod tests {
         };
         assert_eq!(
             labels(&season, 0, true),
-            ["View Current Round", "Undo Winner"]
+            ["View Current Round", "Undo Winner", "Help"]
         );
         assert_eq!(
             labels(&season, 1, true),
-            ["Claim!", "Place Bet!", "Remove Bet!", "Set Winner!"]
+            ["Claim!", "Place Bet!", "Remove Bet!", "Set Winner!", "Help"]
         );
         assert!(labels(&season, 0, false).is_empty());
         season.rounds[1].bets.push(bet(1, 1, 10));
-        assert_eq!(labels(&season, 0, true), ["View Current Round"]);
+        assert_eq!(labels(&season, 0, true), ["View Current Round", "Help"]);
+    }
+
+    #[test]
+    fn help_fits_a_message() {
+        for rules in [Rules::Classic, Rules::Pool] {
+            assert!(help_text(rules).len() < 2000);
+        }
+        assert!(help_text(Rules::Pool).contains("pot"));
+        assert!(!help_text(Rules::Classic).contains("pot"));
     }
 
     #[test]
@@ -399,6 +451,7 @@ mod tests {
             Action::Reset {
                 keep_options: false,
             },
+            Action::Help { season: 4 },
         ] {
             let id = action.custom_id();
             assert!(id.len() <= 100, "{id}");
