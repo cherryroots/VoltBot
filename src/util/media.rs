@@ -87,16 +87,19 @@ pub fn find_media(msg: &Message) -> Vec<Media> {
     let mut seen = HashSet::new();
     // `key` is the file's original link; `url` is where to download it (Discord's proxy for
     // embeds, which also works when the original site blocks bots).
-    let mut add = |key: &str, url: &str, content_type: Option<&str>| {
-        if let Some((kind, mime)) = classify(content_type, key)
-            && seen.insert(dedup_key(key))
-        {
+    // Returns whether the file is media the bot understands (even if it was already added).
+    let mut add = |key: &str, url: &str, content_type: Option<&str>| -> bool {
+        let Some((kind, mime)) = classify(content_type, key) else {
+            return false;
+        };
+        if seen.insert(dedup_key(key)) {
             found.push(Media {
                 url: url.to_string(),
                 kind,
                 mime,
             });
         }
+        true
     };
 
     for attachment in &msg.attachments {
@@ -108,6 +111,16 @@ pub fn find_media(msg: &Message) -> Vec<Media> {
     }
 
     for embed in &msg.embeds {
+        // GIFs from Discord's picker (Klipy, Tenor, Giphy) arrive as a link to the GIF's page
+        // plus a "gifv" embed: an MP4 in `video` and a still of it in `thumbnail`. Discord
+        // documents gifv as a GIF rendered as a video, so its video is an MP4 even when the
+        // link has no file extension.
+        let is_gifv = embed.kind.as_deref() == Some("gifv");
+        let mut has_video = false;
+        if let Some(video) = &embed.video {
+            let url = video.proxy_url.as_ref().unwrap_or(&video.url);
+            has_video = add(&video.url, url, is_gifv.then_some("video/mp4"));
+        }
         if let Some(image) = &embed.image {
             add(
                 &image.url,
@@ -115,24 +128,13 @@ pub fn find_media(msg: &Message) -> Vec<Media> {
                 None,
             );
         }
-        // Tenor's preview image is a still of the GIF, which comes as the video below.
-        let is_tenor = embed
-            .provider
-            .as_ref()
-            .and_then(|p| p.name.as_deref())
-            .is_some_and(|name| name.eq_ignore_ascii_case("tenor"));
+        // A thumbnail next to a video is a still of that video, so it adds nothing. Alone it's
+        // a link preview image (a YouTube thumbnail, an article picture), which is worth seeing.
         if let Some(thumbnail) = &embed.thumbnail
-            && !is_tenor
+            && !has_video
         {
             let url = thumbnail.proxy_url.as_ref().unwrap_or(&thumbnail.url);
             add(&thumbnail.url, url, None);
-        }
-        if let Some(video) = &embed.video {
-            add(
-                &video.url,
-                video.proxy_url.as_ref().unwrap_or(&video.url),
-                None,
-            );
         }
     }
 
@@ -308,10 +310,19 @@ mod tests {
                 "url": "https://site.com/cat.png",
                 "image": {"url": "https://site.com/cat.png", "proxy_url": "https://proxy/cat.png"},
             })),
+            // A GIF from the picker: Klipy's video link has no extension, but gifv means MP4.
             embed(json!({
-                "provider": {"name": "Tenor"},
-                "thumbnail": {"url": "https://media.tenor.com/still.png"},
-                "video": {"url": "https://media.tenor.com/dance.mp4"},
+                "type": "gifv",
+                "url": "https://klipy.com/gifs/dance",
+                "provider": {"name": "KLIPY", "url": "https://klipy.com"},
+                "thumbnail": {"url": "https://static.klipy.com/ii/dance.webp"},
+                "video": {"url": "https://static.klipy.com/ii/dance", "proxy_url": "https://proxy/dance.mp4"},
+            })),
+            // A YouTube link: the video is a player page, so the thumbnail is what's kept.
+            embed(json!({
+                "type": "video",
+                "thumbnail": {"url": "https://i.ytimg.com/vi/x/hqdefault.jpg"},
+                "video": {"url": "https://www.youtube.com/embed/x"},
             })),
         ];
 
@@ -323,10 +334,15 @@ mod tests {
                 "https://cdn.discordapp.com/a/1/pic.png?ex=1",
                 "https://cdn.discordapp.com/a/2/clip.mov",
                 "https://proxy/cat.png",
-                "https://media.tenor.com/dance.mp4",
+                "https://proxy/dance.mp4",
+                "https://i.ytimg.com/vi/x/hqdefault.jpg",
             ]
         );
         assert_eq!(found[1].kind, MediaKind::Video);
+        assert_eq!(
+            (found[3].kind, found[3].mime),
+            (MediaKind::Video, "video/mp4")
+        );
     }
 
     /// Serves `body` once over plain HTTP and returns its URL.

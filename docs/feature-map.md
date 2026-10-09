@@ -182,6 +182,8 @@ Reaction controls: ❌ on a bot reply cancels a running answer (through a cancel
 
 Config: model name, reasoning effort and similar settings come from config, not constants in code.
 
+GIFs from Discord's picker (Klipy since Tenor's API closed, also Giphy) are a link to the GIF's page plus a `gifv` embed with an MP4 `video` and a still `thumbnail`; `util::media` reads the MP4 and skips the still, whatever the provider. Discord can add link previews in a later message update, so if a mention has links but no embeds yet, chat should fetch the message again before reading its media.
+
 Message splitting: one splitter replaces the Go bot's two (`SplitParagraph` and `SplitMessageSlices`). It splits on paragraph, then line, then character boundaries, and re-opens code blocks it cuts. The Go code cuts at byte offsets; Rust panics when a string is sliced inside a multi-byte character such as an emoji, so the Rust version must only cut on `char` boundaries. This is a good function to write tests for first.
 
 #### Chat tools
