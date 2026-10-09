@@ -129,7 +129,7 @@ src/
   main.rs                 # load config, open db, build features, start serenity + poise
   core/                   # ctx, dispatcher, guards, config, db, events, custom_id, errors
   ai/                     # provider trait, Turn types, openai.rs, claude.rs
-  util/                   # message splitting, media download and conversion, text extraction
+  util/                   # split.rs, reply.rs (multi-message replies), media.rs, frames.rs, text.rs
   features/
     mod.rs                # the feature list
     reminders/
@@ -182,6 +182,8 @@ Reaction controls: ❌ on a bot reply cancels a running answer (through a cancel
 
 Config: model name, reasoning effort and similar settings come from config, not constants in code.
 
+GIFs from Discord's picker (Klipy since Tenor's API closed, also Giphy) are a link to the GIF's page plus a `gifv` embed with an MP4 `video` and a still `thumbnail`; `util::media` reads the MP4 and skips the still, whatever the provider. Discord can add link previews in a later message update, so if a mention has links but no embeds yet, chat should fetch the message again before reading its media.
+
 Message splitting: one splitter replaces the Go bot's two (`SplitParagraph` and `SplitMessageSlices`). It splits on paragraph, then line, then character boundaries, and re-opens code blocks it cuts. The Go code cuts at byte offsets; Rust panics when a string is sliced inside a multi-byte character such as an emoji, so the Rust version must only cut on `char` boundaries. This is a good function to write tests for first.
 
 #### Chat tools
@@ -217,10 +219,10 @@ Go helpers and what replaces them. Most come from serenity, poise or a well-know
 | `IsAdmin` | a poise `check` function on admin commands, reading admin IDs from config |
 | Modal plumbing in `handler/modals.go` | poise's `Modal` derive and `execute_modal` (the wheel's bet amount) |
 | `SplitParagraph`, `SplitMessageSlices` | the `text-splitter` crate's `MarkdownSplitter` (char-safe, prefers paragraph and line breaks, keeps code blocks whole when they fit) plus a small hand-written wrapper that closes and reopens a code fence it had to cut |
-| `URLToExt`, `MediaType`, `IsImageURL`, `IsVideoURL` | the attachment's own `content_type` from Discord first, then `url` + `mime_guess` for embed links |
+| `URLToExt`, `MediaType`, `IsImageURL`, `IsVideoURL` | `util::media::classify`: the attachment's own `content_type` from Discord first, then the URL's extension, checked against one small table of supported types |
 | `DownloadBytes` | `reqwest` |
-| `image.go` (decode, GIF frames, PNG grid, base64) | the `image` crate (`GifDecoder::into_frames`, `imageops::overlay` for the grid, PNG encoding) and the `base64` crate |
-| `video.go` (duration, frame at time) | the `ffprobe` and `ffmpeg` command-line tools through `tokio::process::Command`, as in Go; `ffmpeg-next` would need FFmpeg's C libraries at build time |
+| `image.go` (decode, GIF frames, PNG grid, base64) | `util::frames`: one `ffmpeg` run per GIF or video picks about 3 frames per second and tiles them into PNG grids (`fps`, `scale`, `pad`, `tile` filters), so no image code is needed; the `base64` crate for data URLs |
+| `video.go` (duration, frame at time) | the same `util::frames` run, with `ffprobe` for the duration, through `tokio::process::Command`. Go started one ffmpeg process per frame (up to 910); this is one per file. `ffmpeg-next` would need FFmpeg's C libraries at build time |
 | `AttachmentText`, `EmbedText` | hand-written; a few lines each over serenity's types |
 | `strings.go` | the standard library |
 | YouTube and PDF URL handling | dropped, as the Go OpenAI path already ignores them. Claude reads PDFs, so this can return with the Claude provider |
@@ -229,7 +231,7 @@ Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `traci
 
 Storage: `chat_turns` (see "AI providers" below).
 
-Likely crates: `async-openai` (check it supports the Responses API and streaming; fall back to `reqwest` + `serde` + SSE if not), `reqwest`, `base64`, `image`.
+Likely crates: `async-openai` (check it supports the Responses API and streaming; fall back to `reqwest` + `serde` + SSE if not), `reqwest`, `base64`.
 
 #### AI providers
 

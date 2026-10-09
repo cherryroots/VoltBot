@@ -16,7 +16,7 @@ VoltBot is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://g
 
 ## Status
 
-Stage 1 of 4: the core (config, database, event dispatcher, logging), the control panel and reminders. Chat and the movie wheel come next. See `docs/feature-map.md` for the plan and the order.
+Stage 2 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, and the shared helpers chat will use (message splitting, multi-message replies, media and text extraction, GIF and video frames). Chat and the movie wheel come next. See `docs/feature-map.md` for the plan and the order.
 
 Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorrow at 9am`, `next friday`, `on 2026-12-24 at noon`, and the time at the end (`… in 2h`). `/reminders` lists and deletes them, `/timezone` sets your zone, and delivered reminders have snooze buttons.
 
