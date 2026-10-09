@@ -7,8 +7,8 @@
 //! - `tools.rs`: chat's own tools (time, channel, users, messages)
 //! - `prompt.md`: the system prompt
 //!
-//! Reactions on an answer, from the person who asked: ❌ stops it while it's being written,
-//! 🔁 writes it again.
+//! Reactions on an answer, from the person who asked: ❌ stops it while it's being written
+//! and deletes it once it's done, 🔁 writes it again.
 
 mod answer;
 mod history;
@@ -23,7 +23,7 @@ use chrono::Utc;
 use serde_json::Value;
 use serenity::all::{Message, MessageId, Reaction, ReactionType, UserId};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use self::answer::{End, Job};
 use self::store::{NewTurn, StoredPart};
@@ -128,8 +128,12 @@ impl Feature for Chat {
         }
         match emoji.as_str() {
             STOP => {
-                self.stop(reaction.message_id, user);
-                Ok(())
+                if self.is_running(reaction.message_id) {
+                    self.stop(reaction.message_id, user);
+                    Ok(())
+                } else {
+                    self.delete(ctx, reaction, user).await
+                }
             }
             REGENERATE => self.regenerate(ctx, reaction, user).await,
             _ => Ok(()),
@@ -228,45 +232,88 @@ impl Chat {
         if self.is_running(reaction.message_id) {
             return Ok(());
         }
-        let message = reaction.message_id.get();
-        let lookup = ctx
-            .db
-            .call(move |conn| {
-                let Some(answer) = store::turn_for_message(conn, message)? else {
-                    return Ok(None);
-                };
-                let Some(question_id) = answer.parent_id.filter(|_| answer.role == Role::Assistant)
-                else {
-                    return Ok(None);
-                };
-                let question = store::get_turn(conn, question_id)?;
-                let question_messages = store::messages_of(conn, question_id)?;
-                let answer_messages = store::messages_of(conn, answer.id)?;
-                Ok(question.map(|q| (q, question_messages, answer_messages)))
-            })
-            .await?;
-        let Some((question, question_messages, answer_messages)) = lookup else {
+        let Some(found) = find_answer(ctx, reaction.message_id, user).await? else {
             return Ok(());
         };
-        if question.author_id != user.get() {
-            return Ok(());
-        }
         let provider = provider(ctx)?;
         // Take the reaction away again, so it can be used for the next try.
         let _ = reaction.delete(&ctx.http).await;
 
-        let question_message = question_messages.first().map(|id| MessageId::new(*id));
+        let question_message = found.question_messages.first().copied();
         let asker = Asker {
             user,
             guild: reaction.guild_id,
             channel: reaction.channel_id,
             message: question_message.unwrap_or(reaction.message_id),
         };
-        let answer_messages: Vec<MessageId> =
-            answer_messages.into_iter().map(MessageId::new).collect();
-        let reply = LiveReply::resume(reaction.channel_id, question_message, &answer_messages);
+        let reply = LiveReply::resume(
+            reaction.channel_id,
+            question_message,
+            &found.answer_messages,
+        );
         info!("writing an answer again for 🔁");
-        self.answer(ctx, provider.as_ref(), asker, question.id, reply)
+        self.answer(ctx, provider.as_ref(), asker, found.question_id, reply)
             .await
     }
+
+    /// ❌ on a finished answer: deletes its messages, if `user` asked the question.
+    async fn delete(&self, ctx: &BotCtx, reaction: &Reaction, user: UserId) -> Result<()> {
+        let Some(found) = find_answer(ctx, reaction.message_id, user).await? else {
+            return Ok(());
+        };
+        for message in found.answer_messages {
+            // A part someone already deleted is fine.
+            if let Err(err) = reaction.channel_id.delete_message(&ctx.http, message).await {
+                warn!("couldn't delete an answer message: {err}");
+            }
+        }
+        info!("answer deleted with ❌");
+        Ok(())
+    }
+}
+
+/// An answer and the question it answers, found from one of the answer's messages.
+struct FoundAnswer {
+    question_id: i64,
+    question_messages: Vec<MessageId>,
+    answer_messages: Vec<MessageId>,
+}
+
+/// The answer that `message` is part of, if it is an answer and `user` asked the question.
+async fn find_answer(
+    ctx: &BotCtx,
+    message: MessageId,
+    user: UserId,
+) -> Result<Option<FoundAnswer>> {
+    let message = message.get();
+    let found = ctx
+        .db
+        .call(move |conn| {
+            let Some(answer) = store::turn_for_message(conn, message)? else {
+                return Ok(None);
+            };
+            let Some(question_id) = answer.parent_id.filter(|_| answer.role == Role::Assistant)
+            else {
+                return Ok(None);
+            };
+            let Some(question) = store::get_turn(conn, question_id)? else {
+                return Ok(None);
+            };
+            if question.author_id != user.get() {
+                return Ok(None);
+            }
+            let ids = |turn| -> anyhow::Result<Vec<MessageId>> {
+                Ok(store::messages_of(conn, turn)?
+                    .into_iter()
+                    .map(MessageId::new)
+                    .collect())
+            };
+            Ok(Some(FoundAnswer {
+                question_id,
+                question_messages: ids(question_id)?,
+                answer_messages: ids(answer.id)?,
+            }))
+        })
+        .await?;
+    Ok(found)
 }

@@ -180,7 +180,7 @@ Provider trait: the parts that differ per provider are building the input, strea
 
 Prompt caching: the system prompt is fully static. The Go bot appended the current time, channel name and memory context to the instructions, which come first in every request, so the cache broke there and the conversation history after it was never reused. VoltBot drops memory and gives the model tools to look up the time and channel instead. The tool list is also static and in a fixed order, since it is part of the cached prefix.
 
-Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and 🔁 regenerates it from the same input, editing the old answer's messages in place. Only the person who asked can use them. The bot removes the 🔁 again, so it can be used for the next try.
+Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and deletes a finished one, and 🔁 regenerates it from the same input, editing the old answer's messages in place. Only the person who asked can use them. The bot removes the 🔁 again, so it can be used for the next try.
 
 Config: model name, reasoning effort, verbosity and service tier come from `[ai.openai]` in `config.toml`, not constants in code. The key is `OPENAI_TOKEN` in `.env` (with an optional `OPENAI_BASE`); without it chat answers that it is turned off.
 
