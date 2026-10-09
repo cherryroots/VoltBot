@@ -99,12 +99,12 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
 /// One short line per event:
 ///
 /// ```text
-/// 06:44:13  INFO chat::answer message{channel=2 message_id=3 user=4}: ran a chat tool tool="x"
+/// 06:44:13  INFO chat::answer message{channel=2 message_id=3}: ran a chat tool tool="x"
 /// ```
 ///
 /// Shorter than tracing's own format: the time without the date (the journal keeps its
-/// own), our modules without `voltbot::features::`, and the spans without `feature` and
-/// `guild` (see [`CompactFields`]).
+/// own), our modules without `voltbot::features::`, and the spans without `feature`,
+/// `guild` and `user` (see [`CompactFields`]).
 struct Compact;
 
 impl<S, N> FormatEvent<S, N> for Compact
@@ -153,9 +153,9 @@ where
     }
 }
 
-/// Writes fields as `name=value`, skipping `feature` and `guild`: the module already names
-/// the feature, and channel IDs are unique across servers. The Discord log channel reads
-/// the spans itself, so its links still have the server.
+/// Writes fields as `name=value`, skipping `feature`, `guild` and `user`: the module already
+/// names the feature, and the channel and message ID are enough to find the message. The
+/// Discord log channel reads the spans itself, so its links still have the server.
 struct CompactFields;
 
 impl<'w> FormatFields<'w> for CompactFields {
@@ -178,7 +178,7 @@ struct CompactVisitor<'w> {
 
 impl Visit for CompactVisitor<'_> {
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-        if self.result.is_err() || matches!(field.name(), "feature" | "guild") {
+        if self.result.is_err() || matches!(field.name(), "feature" | "guild" | "user") {
             return;
         }
         let space = if self.first { "" } else { " " };
@@ -502,8 +502,13 @@ mod tests {
             .with_writer(move || writer.clone())
             .finish();
         tracing::subscriber::with_default(subscriber, || {
-            let span =
-                tracing::info_span!("message", feature = "chat", guild = 1u64, channel = 2u64);
+            let span = tracing::info_span!(
+                "message",
+                feature = "chat",
+                guild = 1u64,
+                channel = 2u64,
+                user = 4u64
+            );
             let _entered = span.enter();
             tracing::info!(target: "voltbot::features::chat::answer", tool = "x", "ran a tool");
         });
