@@ -99,11 +99,10 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
 /// One short line per event:
 ///
 /// ```text
-/// 06:44:13  INFO chat::answer message{channel=2 message_id=3}: ran a chat tool tool="x"
+/// 2026-10-09T06:44:13Z  INFO chat::answer message{channel=2 message_id=3}: ran a chat tool tool="x"
 /// ```
 ///
-/// Shorter than tracing's own format: the time without the date (the journal keeps its
-/// own), our modules without `voltbot::features::`, and the spans without `feature`,
+/// Shorter than tracing's own format: the time to the second, our modules without `voltbot::features::`, and the spans without `feature`,
 /// `guild` and `user` (see [`CompactFields`]).
 struct Compact;
 
@@ -133,7 +132,7 @@ where
         write!(
             writer,
             "{dim}{}{reset} {colour}{:>5}{reset} {dim}{}{reset}",
-            Utc::now().format("%H:%M:%S"),
+            Utc::now().format("%Y-%m-%dT%H:%M:%SZ"),
             meta.level(),
             short_target(meta.target()),
         )?;
@@ -514,9 +513,9 @@ mod tests {
         });
         let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
         let line = output.strip_suffix('\n').unwrap();
-        // "06:44:13 " in front.
+        // "2026-10-09T06:44:13Z " in front.
         assert_eq!(
-            &line[9..],
+            &line[21..],
             r#" INFO chat::answer message{channel=2}: ran a tool tool="x""#
         );
     }
