@@ -155,7 +155,7 @@ impl SpanFields {
             "feature" => self.feature = Some(value),
             "guild" => self.guild = Some(value),
             "channel" => self.channel = Some(value),
-            "message" => self.message = Some(value),
+            "message_id" => self.message = Some(value),
             _ => {}
         }
     }

@@ -105,7 +105,7 @@ fn on_reaction_add(bot: &BotCtx, reaction: &Reaction) {
             feature = feature.name(),
             guild = reaction.guild_id.map(|g| g.get()),
             channel = reaction.channel_id.get(),
-            message = reaction.message_id.get(),
+            message_id = reaction.message_id.get(),
             user = reaction.user_id.map(|u| u.get()),
         );
         let (bot2, reaction2) = (bot.clone(), reaction.clone());
@@ -131,7 +131,7 @@ async fn on_component(bot: &BotCtx, i: &ComponentInteraction) {
         feature = feature.name(),
         guild = i.guild_id.map(|g| g.get()),
         channel = i.channel_id.get(),
-        message = i.message.id.get(),
+        message_id = i.message.id.get(),
         user = i.user.id.get(),
         custom_id = %i.data.custom_id,
     );
@@ -288,7 +288,7 @@ fn message_span(feature: &'static str, msg: &Message) -> Span {
         feature,
         guild = msg.guild_id.map(|g| g.get()),
         channel = msg.channel_id.get(),
-        message = msg.id.get(),
+        message_id = msg.id.get(),
         user = msg.author.id.get(),
     )
 }
