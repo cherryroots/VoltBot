@@ -253,7 +253,8 @@ fn upload_limit(tier: Option<PremiumTier>) -> u32 {
     match tier {
         Some(PremiumTier::Tier2) => 50 * MIB,
         Some(PremiumTier::Tier3) => 100 * MIB,
-        _ => 10 * MIB,
+        // Raised from 10 MiB for bots in September 2026.
+        _ => 20 * MIB,
     }
 }
 
@@ -289,8 +290,8 @@ mod tests {
     #[test]
     fn upload_limit_follows_boosts() {
         let mib = 1024 * 1024;
-        assert_eq!(upload_limit(None), 10 * mib);
-        assert_eq!(upload_limit(Some(PremiumTier::Tier1)), 10 * mib);
+        assert_eq!(upload_limit(None), 20 * mib);
+        assert_eq!(upload_limit(Some(PremiumTier::Tier1)), 20 * mib);
         assert_eq!(upload_limit(Some(PremiumTier::Tier2)), 50 * mib);
         assert_eq!(upload_limit(Some(PremiumTier::Tier3)), 100 * mib);
     }
