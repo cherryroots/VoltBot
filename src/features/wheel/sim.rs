@@ -53,7 +53,7 @@ fn style(player: u64) -> Style {
 }
 
 /// Plays one game with a uniformly random winner each round.
-fn play(rules: Rules, cap: i64, rng: &mut Rng) -> Season {
+fn play(rules: Rules, rng: &mut Rng) -> Season {
     let options: Vec<u64> = (1..=PLAYERS).collect();
     let mut season = Season {
         id: 1,
@@ -83,7 +83,7 @@ fn play(rules: Rules, cap: i64, rng: &mut Rng) -> Season {
             }
             let numbers = ledger(&season);
             let current = numbers.last().unwrap();
-            let usable = current.standing(player).map_or(0, |s| s.usable());
+            let usable = current.usable(player);
             let money = current.money(player);
             let total = |o: u64| current.total_on(o);
             let random = |rng: &mut Rng| left[rng.below(left.len())];
@@ -121,8 +121,8 @@ fn play(rules: Rules, cap: i64, rng: &mut Rng) -> Season {
                     vec![(random(rng), (money * pct + 99) / 100)]
                 }
             };
-            // The cap: a player's bets in one round add up to at most `cap`% of their money.
-            let mut room = money * cap / 100;
+            // Under pool rules the cap may leave less than planned.
+            let mut room = current.usable(player);
             for (on, amount) in picks {
                 let amount = amount.min(room);
                 room -= amount;
@@ -158,7 +158,7 @@ struct Stats {
     totals: Vec<i64>,
 }
 
-fn run(rules: Rules, cap: i64) -> Stats {
+fn run(rules: Rules) -> Stats {
     let mut rng = Rng(0x9E3779B97F4A7C15);
     let mut stats = Stats {
         finals: vec![Vec::new(); PLAYERS as usize],
@@ -167,7 +167,7 @@ fn run(rules: Rules, cap: i64) -> Stats {
         totals: Vec::new(),
     };
     for _ in 0..GAMES {
-        let season = play(rules, cap, &mut rng);
+        let season = play(rules, &mut rng);
         let numbers = ledger(&season);
         let last = numbers.last().unwrap();
         let mut finals: Vec<(u64, i64)> = (1..=PLAYERS)
@@ -258,7 +258,6 @@ fn report(name: &str, stats: &Stats) {
 #[test]
 #[ignore]
 fn compare_rules() {
-    report("classic", &run(Rules::Classic, 100));
-    report("pool", &run(Rules::Pool, 100));
-    report("pool, bets capped at 50%", &run(Rules::Pool, 50));
+    report("classic", &run(Rules::Classic));
+    report("pool", &run(Rules::Pool));
 }

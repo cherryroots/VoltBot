@@ -9,7 +9,7 @@ use serenity::all::{
     CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
 
-use super::ledger::{CLAIM, RoundLedger, Rules, Season, TAX_THRESHOLD, can_undo};
+use super::ledger::{BET_CAP, CLAIM, RoundLedger, Rules, Season, TAX_THRESHOLD, can_undo};
 use crate::util::shorten;
 
 /// Display names by user ID, looked up before rendering.
@@ -324,10 +324,16 @@ pub fn help_text(rules: Rules) -> String {
         Rules::Pool => " That tax goes into the pot.",
         Rules::Classic => "",
     };
+    let cap = match rules {
+        Rules::Pool => {
+            format!(" Your bets in one round can add up to at most {BET_CAP}% of your money.")
+        }
+        Rules::Classic => String::new(),
+    };
     format!(
         "**How the movie wheel works**
 - **Claim!** gives you {CLAIM} once every round.
-- **Place Bet!** on the options you think will win: type an amount like `50` or a share of your money like `25%`. You can bet on up to half of the options left. Betting on the same option again changes that bet, and **Remove Bet!** takes it back while the round is open.
+- **Place Bet!** on the options you think will win: type an amount like `50` or a share of your money like `25%`. You can bet on up to half of the options left.{cap} Betting on the same option again changes that bet, and **Remove Bet!** takes it back while the round is open.
 - **Bet at least {TAX_THRESHOLD}%** of your money every round. Otherwise you lose 3% of your money for every missing percentage point when the round ends, up to 30%.{tax}
 {payouts}
 - An option leaves the wheel once it has won. Admins add options with `/wheel_add` and start a new season with `/reset_wheel`."

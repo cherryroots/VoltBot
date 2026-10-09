@@ -306,10 +306,7 @@ async fn picked(
                 .call(move |conn| open_round(conn, guild.get(), round))
                 .await?;
             let numbers = ledger(&game.season);
-            let usable = numbers
-                .last()
-                .and_then(|n| n.standing(user))
-                .map_or(0, |s| s.usable());
+            let usable = numbers.last().map_or(0, |n| n.usable(user));
             let existing = game.season.rounds[game.latest()]
                 .bets
                 .iter()

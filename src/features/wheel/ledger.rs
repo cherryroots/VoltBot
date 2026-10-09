@@ -7,6 +7,7 @@
 //! - When a round is over, a player who bet less than 10% of their money loses 3% of it per
 //!   missing percentage point (up to 30%).
 //! - A player can bet on at most half of the options left, rounded up.
+//! - Under pool rules a player's bets in one round add up to at most half of their money.
 //! - Payouts depend on the season's [`Rules`]. Classic (voltgpt's): a winning bet pays
 //!   `amount × (options − 1)`, where options are the wheel options left in that round.
 //!   Pool: every bet and tax of the round goes into a pot, which the bets on the winner
@@ -22,6 +23,9 @@ use std::collections::HashMap;
 pub const CLAIM: i64 = 100;
 /// Players who bet less than this percentage of their money are taxed.
 pub const TAX_THRESHOLD: i64 = 10;
+/// Pool rules: a player's bets in one round add up to at most this percentage of their
+/// money, so one bad round can't knock anyone out.
+pub const BET_CAP: i64 = 50;
 
 /// A bet as stored.
 #[derive(Debug, Clone, PartialEq)]
@@ -110,11 +114,6 @@ impl Standing {
         self.money - self.tax + self.payout
     }
 
-    /// What's left to bet with in an open round.
-    pub fn usable(&self) -> i64 {
-        self.money - self.bet
-    }
-
     /// The smallest total bet that avoids the tax: [`TAX_THRESHOLD`]% of the money, rounded
     /// up.
     pub fn safe_bet(&self) -> i64 {
@@ -171,6 +170,19 @@ impl RoundLedger {
     /// Money at the start of the round; 0 for someone who never played.
     pub fn money(&self, user: u64) -> i64 {
         self.standing(user).map_or(0, |s| s.money)
+    }
+
+    /// What `user` can still bet this round: the rest of their money under classic rules,
+    /// the rest of [`BET_CAP`]% of it under pool rules.
+    pub fn usable(&self, user: u64) -> i64 {
+        let Some(s) = self.standing(user) else {
+            return 0;
+        };
+        let limit = match self.rules {
+            Rules::Classic => s.money,
+            Rules::Pool => s.money * BET_CAP / 100,
+        };
+        (limit - s.bet).max(0)
     }
 
     /// How many options one player may bet on: half of those left, rounded up.
@@ -375,13 +387,13 @@ pub fn outcomes(round: &Round, numbers: &RoundLedger) -> Vec<Outcome> {
     lines
 }
 
-/// Reads a bet amount: "50", or "25%" of `max` rounded up.
-pub fn parse_amount(input: &str, max: i64) -> Option<i64> {
+/// Reads a bet amount: "50", or "25%" of `money` rounded up.
+pub fn parse_amount(input: &str, money: i64) -> Option<i64> {
     let input = input.trim();
     match input.strip_suffix('%') {
         Some(percent) => {
             let percent: i64 = percent.trim().parse().ok()?;
-            Some((max * percent + 99) / 100)
+            Some((money * percent + 99) / 100)
         }
         None => input.parse().ok(),
     }
@@ -404,10 +416,10 @@ pub fn check_bet(season: &Season, by: u64, on: u64, input: &str) -> Result<i64, 
         .iter()
         .find(|b| b.by == by && b.on == on)
         .map_or(0, |b| b.amount);
-    let usable = numbers.standing(by).map_or(0, |s| s.usable());
     // Changing a bet frees its old amount first.
-    let max = usable + existing;
-    let amount = parse_amount(input, max)
+    let max = numbers.usable(by) + existing;
+    // A percentage is of the round's money, so "10%" always avoids the tax.
+    let amount = parse_amount(input, numbers.money(by))
         .ok_or("Type a number like 50, or a percentage like 25%.".to_string())?;
 
     let bets = round.bets.iter().filter(|b| b.by == by).count();
@@ -418,9 +430,12 @@ pub fn check_bet(season: &Season, by: u64, on: u64, input: &str) -> Result<i64, 
         ));
     }
     if amount > max {
-        return Err(format!(
-            "You don't have that much money. You can bet {max}."
-        ));
+        return Err(match season.rules {
+            Rules::Classic => format!("You don't have that much money. You can bet {max}."),
+            Rules::Pool => format!(
+                "You can bet at most {BET_CAP}% of your money each round. You can bet {max}."
+            ),
+        });
     }
     if amount <= 0 {
         return Err("You can't bet 0 or less.".to_string());
@@ -527,7 +542,25 @@ mod tests {
             &[ALICE, BOB, CHARLIE],
             vec![round(1, None, &[ALICE], vec![bet(ALICE, BOB, 30)])],
         );
-        assert_eq!(ledger(&s)[0].standing(ALICE).unwrap().usable(), 70);
+        assert_eq!(ledger(&s)[0].usable(ALICE), 70);
+        assert_eq!(ledger(&s)[0].usable(BOB), 0);
+    }
+
+    #[test]
+    fn pool_bets_are_capped_at_half_the_money() {
+        let mut s = season(
+            &[ALICE, BOB, CHARLIE, DANA],
+            vec![round(1, None, &[ALICE], vec![bet(ALICE, BOB, 30)])],
+        );
+        s.rules = Rules::Pool;
+        assert_eq!(ledger(&s)[0].usable(ALICE), 20);
+        assert_eq!(check_bet(&s, ALICE, CHARLIE, "20"), Ok(20));
+        assert!(check_bet(&s, ALICE, CHARLIE, "21").is_err());
+        // Changing a bet frees its old amount first.
+        assert_eq!(check_bet(&s, ALICE, BOB, "50"), Ok(50));
+        assert!(check_bet(&s, ALICE, BOB, "51").is_err());
+        assert_eq!(check_bet(&s, ALICE, CHARLIE, "10%"), Ok(10));
+        assert!(check_bet(&s, ALICE, CHARLIE, "21%").is_err());
     }
 
     #[test]
@@ -722,7 +755,8 @@ mod tests {
         let one = open(vec![bet(ALICE, BOB, 60)]);
         assert_eq!(check_bet(&one, ALICE, BOB, "100"), Ok(100));
         assert!(check_bet(&one, ALICE, CHARLIE, "41").is_err());
-        assert_eq!(check_bet(&one, ALICE, CHARLIE, "100%"), Ok(40));
+        assert_eq!(check_bet(&one, ALICE, CHARLIE, "40%"), Ok(40));
+        assert!(check_bet(&one, ALICE, CHARLIE, "41%").is_err());
 
         // A third option is too many, but changing one of the two is fine.
         let two = open(vec![bet(ALICE, BOB, 10), bet(ALICE, CHARLIE, 10)]);

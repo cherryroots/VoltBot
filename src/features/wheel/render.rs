@@ -20,7 +20,7 @@ use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{self, fontdb};
 use skrifa::MetadataProvider as _;
 
-use super::ledger::{OutcomeKind, Rules, Standing, TAX_THRESHOLD, outcomes};
+use super::ledger::{BET_CAP, OutcomeKind, Rules, Standing, TAX_THRESHOLD, outcomes};
 use super::ui::View;
 
 /// Width of the picture in SVG units. It's rendered at twice this, for sharp text.
@@ -224,7 +224,7 @@ fn open(svg: &mut Svg, view: &View) {
                     "Bet at least {TAX_THRESHOLD}% of your money each round, or lose 3% of it per missing point."
                 ),
                 Rules::Pool => format!(
-                    "Bet at least {TAX_THRESHOLD}% of your money each round, or 3% per missing point goes to the pot."
+                    "Bet {TAX_THRESHOLD}–{BET_CAP}% of your money each round. Under {TAX_THRESHOLD}%, 3% per missing point goes to the pot."
                 ),
             },
             Style::new(11.0, DIM),
