@@ -142,7 +142,7 @@ src/
       ui.rs               # embeds, buttons, menus
       tools.rs            # create/list/cancel_reminder
       import.rs           # from old.db
-    wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, tools.rs, import.rs
+    wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, render.rs, tools.rs, import.rs
     chat/                 # mod.rs, answer.rs, history.rs, store.rs, tools.rs, prompt.md
 ```
 
@@ -313,7 +313,7 @@ Likely crates: `winnow`, `chrono`, `chrono-tz`.
 
 ### 3. Movie wheel
 
-What it does: a betting game for movie night. Admins add options to the wheel, players claim 100 per round, bet on which option wins, and admins set the winner. Players who bet under 10% of their money get taxed. A status embed shows the round with buttons for claim, bet and winner.
+What it does: a betting game for movie night. Admins add options to the wheel, players claim 100 per round, bet on which option wins, and admins set the winner. Players who bet under 10% of their money get taxed. A status embed shows the round with buttons for claim, bet and winner (in VoltBot, a rendered picture).
 
 Commands: `/wheel_status`, `/wheel_add` (admin), `/insert_bet` (admin), `/reset_wheel` (admin).
 Components: `button_currentround`, `button_claim`, `button_bet`, `button_winner`, `menu_bet` (place, remove, winner). Modal: `modal_bet` (amount). In VoltBot these become actions of one `wheel:` custom ID enum (`wheel:claim:<round>`, `wheel:bet:<round>`, and so on).
@@ -352,6 +352,25 @@ Changes in the port:
 - **Seasons instead of a hard reset.** `/reset_wheel` deletes everything with no confirmation. VoltBot asks for confirmation with a button and archives the old game as a finished season, so past results stay viewable.
 - **One game per server.** Go has a single global game. VoltBot keys the game by guild ID; it costs nothing and avoids surprises.
 - **No lock held during Discord calls.** Go keeps `gamble.Mu` locked while it calls the Discord API. With the tables above, each action is a short database transaction, and the bot only talks to Discord after it commits.
+
+How it was built (stage 4), where it differs from the plan above:
+
+- **Tables** as above, plus `ON DELETE CASCADE` on every child table and a partial unique index on `wheel_seasons (guild_id) WHERE ended_at IS NULL`, so a server can't have two active seasons.
+- **IDs**: buttons `wheel:claim|bet|unbet|winner|undo:<round id>` and `wheel:current`; the menus `wheel:pick:<place|remove|winner>:<round id>:<status message id>`; the bet slip buttons `wheel:stake:<round id>:<option user id>:<status message id>:<percent>` and `wheel:other:<round id>:<option user id>:<status message id>`; the modal `wheel:amount:<round id>:<option user id>:<status message id>`; the reset confirmation `wheel:reset:<0|1>`; Change Name `wheel:rename:<round id>` and its modal `wheel:name:<round id>`. Round IDs are database IDs, so a button on an old message can't change a newer round.
+- **Undo winner** is a button on the resolved round's status message, shown while the round after it has no bets. It deletes that new round (with its claims) and reopens the old one.
+- **Seasons**: `/reset_wheel keep_options` asks for confirmation with a button, ends the season and starts the next one. `/wheel_status season:<n> round:<n>` shows any round of any season; past seasons have no buttons.
+- **Admins** are `admins` in `config.toml`, checked inside each admin command and button (a poise `check` would answer with the "turned off" message).
+- **The bet amount modal** is a plain serenity `CreateModal`, because it opens from the bet slip's button, not from a slash command.
+- **Names** are looked up when a round is shown (nickname, then global name, then username) and remembered for 10 minutes.
+- **The status is a picture**, not an embed: `render.rs` lays the round out as SVG and `resvg` draws it as a PNG, with the Inter font built into the binary (system fonts are the fallback, for emoji in names). An open round shows the standings with each player's tax if the round ended now, the bets grouped by option, and who hasn't claimed or bet yet. A resolved round shows the winner and a table of before, bets, tax, after and change. Resolved rounds are posted as `SPOILER_` files, so the winner is hidden as voltgpt's `||spoiler||` did.
+- **After Claim!** the private reply gives the player's money for the round and the smallest bet that avoids the tax.
+- **Small differences from voltgpt**: the player list is everyone who claimed or bet this season (voltgpt also listed people who only opened the bet menu).
+- **Pool betting** (Rene, 2026-10-09): with fixed `amount × (options − 1)` payouts, early rounds paid ×10 and more and a lost claim cost nothing, so everyone bet everything every round. Seasons now have `rules` (`classic` or `pool`, migration 2). Under pool rules every bet and tax of a round goes into a pot, the bets on the winner share it by stake (integer division; the rounding rest stays in the pot), and a pot nobody won carries over to the next round. The picture shows the pot and each option's current payout. New seasons use pool; seasons from before, including voltgpt's import, stay classic.
+- **Bet cap** (Rene, 2026-10-09): under pool rules a player's bets in one round add up to at most 50% of their money (`BET_CAP`). A simulation of 12-player games (`wheel::sim`, an ignored test) showed half of the all-in players ending broke without it and none with it; taxes stay in the pot. A percentage typed as a bet amount is of the round's money, so `10%` always avoids the tax.
+- **Bet slip** (Rene, 2026-10-09): Discord modals can't update while typing, so picking an option in Place Bet shows a private slip instead: the option's current odds and pot, the player's money, limit and bet, what the bet would return if the round ended now, and buttons for 10/25/50% (classic: also 100%). Buttons over the limit are disabled; each click places the bet and redraws the slip. "Other amount…" opens the old modal, whose label now shows the limit.
+- **Change Name** (Rene, 2026-10-09): a button in a second row with Help opens a modal for the name the wheel shows for you (up to 32 characters, without @, <, > or backticks). Names are kept per server in `wheel_names` (migration 3) and win over the Discord name in `names::lookup`, so the picture, menus, bet slip and chat tool all use them. An empty name deletes the row.
+- **Help button** under the status picture: the season's rules, as a private reply. The chat tool gives the same text.
+- **Import**: voltgpt's game becomes the active season of `main_server` from `config.toml`; without it the import waits. If that server already has a game, the import is filed as an ended season instead.
 
 Ideas for later, not part of the port: a `/wheel_spin` command that picks the winner randomly with an animated embed, and a per-player balance history.
 
@@ -410,7 +429,7 @@ Each feature owns its import function (`reminders::import_legacy`, `wheel::impor
 | Old table | What happens |
 |---|---|
 | `reminders` | Imported. IDs become integers, the base64 image JSON is decoded into the new image storage, and `fire_at`/`created_at` are kept. Reminders that came due while the bot was down fire right after startup, same as Go. |
-| `game_state` | Imported as the first, still active season of the wheel tables: options, rounds, winners, claims and bets, with user objects reduced to IDs. The Go game has no guild, so it goes to the guild in `IMPORT_GUILD_ID` (defaults to voltgpt's main server). A test checks that the imported season shows the same balances as the Go bot. |
+| `game_state` | Imported as the first, still active season of the wheel tables: options, rounds, winners, claims and bets, with user objects reduced to IDs. The Go game has no guild, so it goes to the server in `main_server` in `config.toml`. A test checks that the imported season shows the same balances as the Go bot. |
 | `response_ids` | Skipped. They hold only OpenAI response IDs with no message text, and OpenAI drops stored responses after 30 days, so they would rarely still work. Replying to an old bot message starts a fresh conversation that includes the replied-to message. |
 | `image_hashes` | Skipped for now; kept in `old.db.imported` for when hashing returns. |
 | `users`, memory tables (`guild_user_profiles`, `interaction_notes`, `note_participants`, `channel_buffers`, `memory_job_runs`, `vec_notes`) | Skipped; memory is dropped. |

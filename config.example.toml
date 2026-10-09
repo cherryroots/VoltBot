@@ -4,11 +4,14 @@
 # Users who may run admin commands.
 admins = []
 
+# The server voltgpt ran in. Its movie wheel game is imported into this server.
+# main_server = 122962330165313536
+
 # The SQLite database file.
 database = "voltbot.db"
 
-# voltgpt's database. If this file exists on startup, reminders (and later the movie
-# wheel) are imported once, then the file is renamed to old.db.imported.
+# voltgpt's database. If this file exists on startup, reminders and the movie wheel are
+# imported once, then the file is renamed to old.db.imported.
 old_database = "old.db"
 
 [logging]
@@ -40,6 +43,10 @@ enabled = true
 
 [features.reminders]
 enabled = true
+
+[features.wheel]
+# The movie wheel betting game. Admin actions use `admins` above.
+# guilds = [122962330165313536]
 
 [features.control_panel]
 # Channel with the status message the bot keeps up to date.

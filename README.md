@@ -16,7 +16,9 @@ VoltBot is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://g
 
 ## Status
 
-Stage 3 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, the shared helpers (message splitting, multi-message replies, media and text extraction, GIF and video frames), and AI chat with OpenAI, its tools, and the ❌/🔁 reaction controls. The movie wheel comes next. See `docs/feature-map.md` for the plan and the order.
+Stage 4 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, the shared helpers (message splitting, multi-message replies, media and text extraction, GIF and video frames), AI chat with OpenAI, its tools, and the ❌/🔁 reaction controls, and the movie wheel. Next up are the Claude and Gemini providers and the image hashing redesign. See `docs/feature-map.md` for the plan and the order.
+
+The movie wheel is voltgpt's betting game for movie night. `/wheel_status` shows the round as a picture with Claim, Place Bet, Remove Bet and Set Winner buttons; admins use `/wheel_add`, `/insert_bet` and `/reset_wheel`, and can undo a winner set by mistake. `/reset_wheel` starts a new season and keeps the old one viewable with `/wheel_status season:`. New seasons use pool betting: all bets and taxes of a round go into a pot that the bets on the winner share by stake, so long shots pay more than favourites, and a pot nobody won carries over. A player's bets in one round add up to at most half of their money, so nobody goes broke in one round. Place Bet opens a private bet slip with the option's current payout and buttons for 10%, 25% and 50% of your money, or any amount. voltgpt's imported game keeps voltgpt's fixed payouts until the next `/reset_wheel`. Change Name sets the name the wheel shows for you (empty goes back to your Discord name), and the Help button under the picture explains the rules privately.
 
 Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorrow at 9am`, `next friday`, `on 2026-12-24 at noon`, and the time at the end (`… in 2h`). `/reminders` lists and deletes them, `/timezone` sets your zone, and delivered reminders have snooze buttons.
 
@@ -31,7 +33,7 @@ Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorro
 
 ### 2. Build
 
-You need [Rust](https://rustup.rs) (stable) and `ffmpeg` (used to read video frames).
+You need [Rust](https://rustup.rs) (stable) and `ffmpeg` (used to read video frames). Optionally install `fonts-noto-color-emoji` and `fonts-noto-core` (and `fonts-noto-extra` for rarer scripts), so emoji and fancy letters in names show up in the movie wheel picture; restart the bot after installing fonts. The log warns once about each character no installed font has.
 
 ```bash
 git clone https://github.com/cherryroots/VoltBot.git
@@ -55,7 +57,7 @@ sudo chmod 600 /opt/voltbot/.env
 
 Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`, and `OPENAI_TOKEN` for chat) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
 
-**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders right away and the movie wheel game once that feature is ported, each only once, then renames the file to `old.db.imported`. If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
+**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders and the running movie wheel game, each only once, then renames the file to `old.db.imported`. voltgpt's wheel had no server, so set `main_server` in `config.toml` first: the game is imported into that server, and the import waits until it is set. If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
 
 ### 4. Run with systemd
 
