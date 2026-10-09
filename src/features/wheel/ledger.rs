@@ -43,6 +43,8 @@ pub struct Round {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Season {
     pub id: i64,
+    /// Which season of the server this is, counting from 1.
+    pub number: i64,
     pub options: Vec<u64>,
     pub rounds: Vec<Round>,
 }
@@ -76,6 +78,12 @@ impl Standing {
     /// What's left to bet with in an open round.
     pub fn usable(&self) -> i64 {
         self.money - self.bet
+    }
+
+    /// The smallest total bet that avoids the tax: [`TAX_THRESHOLD`]% of the money, rounded
+    /// up.
+    pub fn safe_bet(&self) -> i64 {
+        (self.money * TAX_THRESHOLD + 99) / 100
     }
 }
 
@@ -348,6 +356,7 @@ mod tests {
     fn season(options: &[u64], rounds: Vec<Round>) -> Season {
         Season {
             id: 1,
+            number: 1,
             options: options.to_vec(),
             rounds,
         }
@@ -395,6 +404,21 @@ mod tests {
                 vec![round(1, None, &[ALICE], vec![bet(ALICE, BOB, amount)])],
             );
             assert_eq!(ledger(&s)[0].standing(ALICE).unwrap().tax, 0);
+        }
+    }
+
+    #[test]
+    fn safe_bet_rounds_up() {
+        let standing = |money| Standing {
+            user: ALICE,
+            money,
+            bet: 0,
+            bet_percent: 0,
+            tax: 0,
+            payout: 0,
+        };
+        for (money, safe) in [(100, 10), (340, 34), (101, 11), (0, 0)] {
+            assert_eq!(standing(money).safe_bet(), safe, "{money}");
         }
     }
 

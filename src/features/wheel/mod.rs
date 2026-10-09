@@ -6,7 +6,8 @@
 //! - `ledger.rs`: the money rules (pure, no Discord or database)
 //! - `store.rs`: the tables and queries
 //! - `actions.rs`: the buttons, menus and bet modal
-//! - `ui.rs`: the status embed, buttons, menus and modal, and their IDs
+//! - `ui.rs`: the status buttons, menus and modal, and their IDs
+//! - `render.rs`: the round as a picture
 //! - `names.rs`: display names for the stored user IDs
 //! - `commands.rs`: `/wheel_status`, `/wheel_add`, `/insert_bet`, `/reset_wheel`
 //! - `import.rs`: the running game from voltgpt's database
@@ -17,6 +18,7 @@ mod commands;
 mod import;
 mod ledger;
 mod names;
+mod render;
 mod store;
 mod tools;
 mod ui;
@@ -67,6 +69,13 @@ impl Feature for Wheel {
         args: &serde_json::Value,
     ) -> Result<String> {
         tools::run(ctx, asker, args).await
+    }
+
+    async fn start(&self, _ctx: &BotCtx) -> Result<()> {
+        // Reading the fonts takes a moment; do it now rather than on the first button press,
+        // which Discord only waits 3 seconds for.
+        tokio::task::spawn_blocking(render::load_fonts);
+        Ok(())
     }
 
     async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {

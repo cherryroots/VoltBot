@@ -18,7 +18,7 @@ VoltBot is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://g
 
 Stage 4 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, the shared helpers (message splitting, multi-message replies, media and text extraction, GIF and video frames), AI chat with OpenAI, its tools, and the ❌/🔁 reaction controls, and the movie wheel. Next up are the Claude and Gemini providers and the image hashing redesign. See `docs/feature-map.md` for the plan and the order.
 
-The movie wheel is voltgpt's betting game for movie night. `/wheel_status` shows the round with Claim, Place Bet, Remove Bet and Set Winner buttons; admins use `/wheel_add`, `/insert_bet` and `/reset_wheel`, and can undo a winner set by mistake. `/reset_wheel` starts a new season and keeps the old one viewable with `/wheel_status season:`.
+The movie wheel is voltgpt's betting game for movie night. `/wheel_status` shows the round as a picture with Claim, Place Bet, Remove Bet and Set Winner buttons; admins use `/wheel_add`, `/insert_bet` and `/reset_wheel`, and can undo a winner set by mistake. `/reset_wheel` starts a new season and keeps the old one viewable with `/wheel_status season:`.
 
 Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorrow at 9am`, `next friday`, `on 2026-12-24 at noon`, and the time at the end (`… in 2h`). `/reminders` lists and deletes them, `/timezone` sets your zone, and delivered reminders have snooze buttons.
 
@@ -33,7 +33,7 @@ Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorro
 
 ### 2. Build
 
-You need [Rust](https://rustup.rs) (stable) and `ffmpeg` (used to read video frames).
+You need [Rust](https://rustup.rs) (stable) and `ffmpeg` (used to read video frames). Optionally install an emoji font such as `fonts-noto-color-emoji`, so emoji in names show up in the movie wheel picture.
 
 ```bash
 git clone https://github.com/cherryroots/VoltBot.git

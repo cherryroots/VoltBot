@@ -1,15 +1,15 @@
-//! What the wheel looks like in Discord: the status embed and its buttons, the menus, the
-//! bet modal, and the button IDs. Everything here takes plain values and builds messages;
+//! The wheel's Discord parts besides the picture: the status buttons, the menus, the bet
+//! modal, and the button IDs. Everything here takes plain values and builds messages;
 //! nothing talks to Discord or the database.
 
 use std::collections::HashMap;
 
 use serenity::all::{
-    ButtonStyle, CreateActionRow, CreateButton, CreateEmbed, CreateEmbedFooter, CreateInputText,
-    CreateModal, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
+    ButtonStyle, CreateActionRow, CreateButton, CreateInputText, CreateModal, CreateSelectMenu,
+    CreateSelectMenuKind, CreateSelectMenuOption, InputTextStyle,
 };
 
-use super::ledger::{CLAIM, Outcome, OutcomeKind, RoundLedger, Season, can_undo, outcomes};
+use super::ledger::{RoundLedger, Season, can_undo};
 use crate::util::shorten;
 
 /// Display names by user ID, looked up before rendering.
@@ -162,7 +162,7 @@ pub struct View<'a> {
 }
 
 impl View<'_> {
-    fn is_latest(&self) -> bool {
+    pub(super) fn is_latest(&self) -> bool {
         self.index + 1 == self.season.rounds.len()
     }
 
@@ -171,124 +171,13 @@ impl View<'_> {
         self.active && can_undo(self.season, self.index)
     }
 
-    fn name(&self, user: u64) -> &str {
+    pub(super) fn name(&self, user: u64) -> &str {
         name(self.names, user)
     }
 }
 
 pub fn name(names: &Names, user: u64) -> &str {
     names.get(&user).map_or("Unknown", String::as_str)
-}
-
-/// The status embed of one round, like voltgpt's.
-pub fn status_embed(view: &View) -> CreateEmbed {
-    let round = &view.season.rounds[view.index];
-    let numbers = &view.ledger[view.index];
-    let resolved = round.winner.is_some();
-
-    let mut title = format!("Round {}", round.number);
-    if !view.active {
-        title.push_str(" (past season)");
-    }
-    let state = match round.winner {
-        Some(winner) => format!("State: Resolved\nWinner: ||<@{winner}>||"),
-        None => "State: Open\nWinner: _Not set_".to_string(),
-    };
-
-    // Richest first; ties by name.
-    let mut standings: Vec<_> = numbers.standings.iter().collect();
-    standings.sort_by(|a, b| {
-        b.money
-            .cmp(&a.money)
-            .then_with(|| view.name(a.user).cmp(view.name(b.user)))
-    });
-    let players = lines(standings.iter().map(|s| view.name(s.user).to_string()));
-    let money = lines(standings.iter().map(|s| s.money.to_string()));
-    let percents = lines(standings.iter().map(|s| {
-        if s.under_threshold() {
-            format!("**{}%**", s.bet_percent)
-        } else {
-            format!("{}%", s.bet_percent)
-        }
-    }));
-
-    let mut claimers: Vec<&str> = round.claims.iter().map(|&u| view.name(u)).collect();
-    claimers.sort();
-    let claims = lines(claimers.chunks(4).map(|chunk| chunk.join(", ")));
-
-    let by = lines(round.bets.iter().map(|b| view.name(b.by).to_string()));
-    let on = lines(round.bets.iter().map(|b| view.name(b.on).to_string()));
-    let amounts = lines(round.bets.iter().map(|b| b.amount.to_string()));
-
-    let mut embed = CreateEmbed::new()
-        .title(title)
-        .color(if resolved { 0xff0000 } else { 0x00ff00 })
-        .field("✨ Round Status ✨", state, false)
-        .field("Players", or(players, "_No players yet_"), true)
-        .field("Money", or(money, "_No balances yet_"), true)
-        .field("Bet%", or(percents, "_No bets yet_"), true)
-        .field(
-            format!("Claims ({CLAIM})"),
-            or(claims, "_No claims yet_"),
-            false,
-        )
-        .field("✨ Round bets ✨", "\u{200b}", false)
-        .field("By", or(by, "_No bets yet_"), true)
-        .field("On", or(on, "_No bets yet_"), true)
-        .field("Amount", or(amounts, "_No bets yet_"), true);
-
-    let outcomes = sorted_outcomes(view, outcomes(round, numbers));
-    if resolved {
-        let label = |o: &Outcome| match o.kind {
-            OutcomeKind::Won => "Won",
-            OutcomeKind::Lost => "Lost",
-            OutcomeKind::Taxed => "Taxed",
-        };
-        let what = lines(
-            outcomes
-                .iter()
-                .map(|o| format!("{}: {}", label(o), view.name(o.user))),
-        );
-        let payout = lines(outcomes.iter().map(|o| signed(o.amount)));
-        let delta = lines(
-            outcomes
-                .iter()
-                .map(|o| format!("{} → {}", o.before, o.after)),
-        );
-        embed = embed
-            .field("Outcome", or(what, "_No outcomes yet_"), true)
-            .field("Payout", or(payout, "_No outcomes yet_"), true)
-            .field("Delta", or(delta, "_No outcomes yet_"), true);
-    } else {
-        embed = embed.field("Outcome", "_No outcomes yet_", true).field(
-            "Amount",
-            "_No outcomes yet_",
-            true,
-        );
-    }
-
-    let mut footer = vec![
-        format!("{} claims", round.claims.len()),
-        format!("{} bets", round.bets.len()),
-    ];
-    if resolved {
-        let count = |kind| outcomes.iter().filter(|o| o.kind == kind).count();
-        footer.push(format!("{} wins", count(OutcomeKind::Won)));
-        footer.push(format!("{} losses", count(OutcomeKind::Lost)));
-    }
-    let taxed = numbers.standings.iter().filter(|s| s.tax > 0).count();
-    footer.push(format!("{taxed} taxed"));
-    embed.footer(CreateEmbedFooter::new(footer.join(" • ")))
-}
-
-/// Biggest gain first; ties by name.
-fn sorted_outcomes(view: &View, mut list: Vec<Outcome>) -> Vec<Outcome> {
-    list.sort_by(|a, b| {
-        b.amount
-            .cmp(&a.amount)
-            .then_with(|| view.name(a.user).cmp(view.name(b.user)))
-    });
-    list
 }
 
 /// The buttons under a status message.
@@ -419,28 +308,6 @@ pub fn reset_confirmation(keep_options: bool) -> (String, Vec<CreateActionRow>) 
     (text, vec![CreateActionRow::Buttons(vec![button])])
 }
 
-/// "+60", "-15", "0".
-fn signed(amount: i64) -> String {
-    if amount > 0 {
-        format!("+{amount}")
-    } else {
-        amount.to_string()
-    }
-}
-
-fn lines(items: impl Iterator<Item = String>) -> String {
-    items.collect::<Vec<_>>().join("\n")
-}
-
-/// `value`, or `empty` when there's nothing to show. Discord allows 1024 characters.
-fn or(value: String, empty: &str) -> String {
-    if value.trim().is_empty() {
-        empty.to_string()
-    } else {
-        shorten(&value, 1024)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,132 +320,15 @@ mod tests {
             .collect()
     }
 
-    fn field(embed: &serde_json::Value, name: &str) -> String {
-        embed["fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["name"] == name)
-            .unwrap_or_else(|| panic!("no field {name}"))["value"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    }
-
-    fn render(season: &Season, index: usize) -> serde_json::Value {
-        let numbers = ledger(season);
-        let names = names();
-        let view = View {
-            season,
-            ledger: &numbers,
-            index,
-            active: true,
-            names: &names,
-        };
-        serde_json::to_value(status_embed(&view)).unwrap()
-    }
-
     fn bet(by: u64, on: u64, amount: i64) -> Bet {
         Bet { by, on, amount }
-    }
-
-    /// voltgpt's TestStatusEmbedSortsPlayersByBankrollAndBoldsThreshold.
-    #[test]
-    fn players_sorted_by_money_and_threshold_bold() {
-        let season = Season {
-            id: 1,
-            options: vec![1, 2, 3],
-            rounds: vec![
-                Round {
-                    id: 1,
-                    number: 1,
-                    winner: Some(2),
-                    claims: vec![1, 2, 3],
-                    bets: vec![bet(1, 2, 20)],
-                },
-                Round {
-                    id: 2,
-                    number: 2,
-                    winner: None,
-                    claims: vec![1],
-                    bets: vec![bet(1, 2, 30)],
-                },
-            ],
-        };
-        let embed = render(&season, 1);
-        assert_eq!(embed["title"], "Round 2");
-        assert_eq!(field(&embed, "Players"), "Alice\nBob\nCharlie");
-        assert_eq!(field(&embed, "Money"), "240\n70\n70");
-        assert_eq!(field(&embed, "Bet%"), "12%\n**0%**\n**0%**");
-        assert_eq!(field(&embed, "Claims (100)"), "Alice");
-        assert_eq!(embed["footer"]["text"], "1 claims • 1 bets • 2 taxed");
-    }
-
-    /// voltgpt's TestResolvedOutcomeColumnsOrderByAmount.
-    #[test]
-    fn resolved_round_lists_outcomes_by_amount() {
-        let season = Season {
-            id: 1,
-            options: vec![1, 2, 3, 4],
-            rounds: vec![Round {
-                id: 1,
-                number: 1,
-                winner: Some(2),
-                claims: vec![1, 2, 3, 4],
-                bets: vec![bet(2, 1, 15), bet(4, 2, 10), bet(1, 2, 20)],
-            }],
-        };
-        let embed = render(&season, 0);
-        assert_eq!(
-            field(&embed, "Outcome"),
-            "Won: Alice\nWon: Dana\nLost: Bob\nTaxed: Charlie"
-        );
-        assert_eq!(field(&embed, "Payout"), "+60\n+30\n-15\n-30");
-        assert_eq!(
-            field(&embed, "Delta"),
-            "100 → 160\n100 → 130\n100 → 85\n100 → 70"
-        );
-        assert_eq!(field(&embed, "Claims (100)"), "Alice, Bob, Charlie, Dana");
-        assert_eq!(
-            embed["footer"]["text"],
-            "4 claims • 3 bets • 2 wins • 1 losses • 1 taxed"
-        );
-        assert!(field(&embed, "✨ Round Status ✨").contains("||<@2>||"));
-    }
-
-    #[test]
-    fn claims_wrap_after_four() {
-        let season = Season {
-            id: 1,
-            options: vec![],
-            rounds: vec![Round {
-                id: 1,
-                number: 1,
-                claims: vec![5, 4, 3, 2, 1],
-                ..Round::default()
-            }],
-        };
-        let mut names = names();
-        names.insert(5, "Eve".to_string());
-        let numbers = ledger(&season);
-        let view = View {
-            season: &season,
-            ledger: &numbers,
-            index: 0,
-            active: true,
-            names: &names,
-        };
-        let embed = serde_json::to_value(status_embed(&view)).unwrap();
-        assert_eq!(
-            field(&embed, "Claims (100)"),
-            "Alice, Bob, Charlie, Dana\nEve"
-        );
     }
 
     #[test]
     fn undo_only_while_the_next_round_has_no_bets() {
         let mut season = Season {
             id: 1,
+            number: 1,
             options: vec![1, 2],
             rounds: vec![
                 Round {

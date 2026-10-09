@@ -57,9 +57,13 @@ pub async fn wheel_status(
             .filter(|&n| n < count)
             .ok_or_else(|| user_error(format!("Pick a round from 1 to {count}.")))?,
     };
-    let (embed, buttons) = status_message(ctx.data(), guild, &game, index).await;
-    ctx.send(CreateReply::default().embed(embed).components(buttons))
-        .await?;
+    let status = status_message(ctx.data(), guild, &game, index).await?;
+    ctx.send(
+        CreateReply::default()
+            .attachment(status.picture)
+            .components(status.buttons),
+    )
+    .await?;
     Ok(())
 }
 

@@ -142,7 +142,7 @@ src/
       ui.rs               # embeds, buttons, menus
       tools.rs            # create/list/cancel_reminder
       import.rs           # from old.db
-    wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, tools.rs, import.rs
+    wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, render.rs, tools.rs, import.rs
     chat/                 # mod.rs, answer.rs, history.rs, store.rs, tools.rs, prompt.md
 ```
 
@@ -313,7 +313,7 @@ Likely crates: `winnow`, `chrono`, `chrono-tz`.
 
 ### 3. Movie wheel
 
-What it does: a betting game for movie night. Admins add options to the wheel, players claim 100 per round, bet on which option wins, and admins set the winner. Players who bet under 10% of their money get taxed. A status embed shows the round with buttons for claim, bet and winner.
+What it does: a betting game for movie night. Admins add options to the wheel, players claim 100 per round, bet on which option wins, and admins set the winner. Players who bet under 10% of their money get taxed. A status embed shows the round with buttons for claim, bet and winner (in VoltBot, a rendered picture).
 
 Commands: `/wheel_status`, `/wheel_add` (admin), `/insert_bet` (admin), `/reset_wheel` (admin).
 Components: `button_currentround`, `button_claim`, `button_bet`, `button_winner`, `menu_bet` (place, remove, winner). Modal: `modal_bet` (amount). In VoltBot these become actions of one `wheel:` custom ID enum (`wheel:claim:<round>`, `wheel:bet:<round>`, and so on).
@@ -362,7 +362,9 @@ How it was built (stage 4), where it differs from the plan above:
 - **Admins** are `admins` in `config.toml`, checked inside each admin command and button (a poise `check` would answer with the "turned off" message).
 - **The bet amount modal** is a plain serenity `CreateModal`, because it opens from a select menu, not from a slash command.
 - **Names** are looked up when a round is shown (nickname, then global name, then username) and remembered for 10 minutes.
-- **Small differences from voltgpt**: the player list is everyone who claimed or bet this season (voltgpt also listed people who only opened the bet menu), a tax of 0 isn't listed as "Taxed", and the Delta column uses →.
+- **The status is a picture**, not an embed: `render.rs` lays the round out as SVG and `resvg` draws it as a PNG, with the Inter font built into the binary (system fonts are the fallback, for emoji in names). An open round shows the standings with each player's tax if the round ended now, the bets grouped by option, and who hasn't claimed or bet yet. A resolved round shows the winner and a table of before, bets, tax, after and change. Resolved rounds are posted as `SPOILER_` files, so the winner is hidden as voltgpt's `||spoiler||` did.
+- **After Claim!** the private reply gives the player's money for the round and the smallest bet that avoids the tax.
+- **Small differences from voltgpt**: the player list is everyone who claimed or bet this season (voltgpt also listed people who only opened the bet menu).
 - **Import**: voltgpt's game becomes the active season of `main_server` from `config.toml`; without it the import waits. If that server already has a game, the import is filed as an ended season instead.
 
 Ideas for later, not part of the port: a `/wheel_spin` command that picks the winner randomly with an animated embed, and a per-player balance history.

@@ -6,19 +6,20 @@ use chrono::Utc;
 use rusqlite::Connection;
 use serenity::all::{
     ActionRowComponent, ChannelId, ComponentInteraction, ComponentInteractionDataKind,
-    CreateActionRow, CreateEmbed, CreateInteractionResponse, CreateInteractionResponseFollowup,
-    CreateInteractionResponseMessage, EditMessage, GuildId, MessageId, ModalInteraction, UserId,
+    CreateActionRow, CreateAttachment, CreateInteractionResponse,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, EditMessage, GuildId,
+    MessageId, ModalInteraction, UserId,
 };
 use tracing::{info, warn};
 
-use super::ledger::{self, CLAIM, Season, check_bet, ledger};
+use super::ledger::{self, CLAIM, Season, TAX_THRESHOLD, check_bet, ledger};
 use super::ui::{self, Action, PickKind, View};
-use super::{names, store};
+use super::{names, render, store};
 use crate::core::{BotCtx, BotEvent, Result, user_error};
 
 const SERVER_ONLY: &str = "The wheel only works in a server.";
 const NO_GAME: &str = "There's no game running. Start one with /wheel_status.";
-const NOT_CURRENT: &str = "Only the current round can be changed from this embed.";
+const NOT_CURRENT: &str = "Only the current round can be changed from this message.";
 
 /// A season as loaded, and whether it's the one being played.
 pub struct Game {
@@ -32,13 +33,41 @@ impl Game {
     }
 }
 
-/// The embed and buttons of round `index` of a game.
+/// A status message: the round as a picture, with its buttons under it.
+pub struct Status {
+    pub picture: CreateAttachment,
+    pub buttons: Vec<CreateActionRow>,
+}
+
+impl Status {
+    /// Replaces the message this status's button was on. Clears the embed that status
+    /// messages from before the picture had.
+    fn update(self) -> CreateInteractionResponse {
+        CreateInteractionResponse::UpdateMessage(
+            CreateInteractionResponseMessage::new()
+                .embeds(Vec::new())
+                .files([self.picture])
+                .components(self.buttons),
+        )
+    }
+
+    /// The same, as an edit of a message by ID.
+    fn edit(self) -> EditMessage {
+        EditMessage::new()
+            .embeds(Vec::new())
+            .remove_all_attachments()
+            .new_attachment(self.picture)
+            .components(self.buttons)
+    }
+}
+
+/// The picture and buttons of round `index` of a game.
 pub async fn status_message(
     ctx: &BotCtx,
     guild: GuildId,
     game: &Game,
     index: usize,
-) -> (CreateEmbed, Vec<CreateActionRow>) {
+) -> Result<Status> {
     let names = names::lookup(ctx, guild, &ledger::users(&game.season)).await;
     let numbers = ledger(&game.season);
     let view = View {
@@ -48,7 +77,21 @@ pub async fn status_message(
         active: game.active,
         names: &names,
     };
-    (ui::status_embed(&view), ui::status_buttons(&view))
+    let svg = render::round_svg(&view);
+    let buttons = ui::status_buttons(&view);
+    // Drawing takes a few milliseconds of CPU, so it runs on tokio's blocking threads.
+    let png = tokio::task::spawn_blocking(move || render::png(&svg)).await??;
+
+    // Discord blurs files named SPOILER_, which hides the winner as voltgpt did.
+    let round = &game.season.rounds[index];
+    let file = match round.winner {
+        Some(_) => format!("SPOILER_round-{}.png", round.number),
+        None => format!("round-{}.png", round.number),
+    };
+    Ok(Status {
+        picture: CreateAttachment::bytes(png, file),
+        buttons,
+    })
 }
 
 /// Loads the server's game. Fails with [`NO_GAME`] if there is none.
@@ -128,11 +171,11 @@ pub async fn on_modal(ctx: &BotCtx, i: &ModalInteraction, action: &str) -> Resul
         .await?;
     info!("bet {amount} on {on}");
 
-    let (embed, buttons) = status_message(ctx, guild, &game, game.latest()).await;
     let on_name = names::lookup(ctx, guild, &[on]).await.remove(&on);
     let text = format!("Bet {amount} on {}.", on_name.unwrap_or_default());
     i.create_response(&ctx.http, update_text(text)).await?;
-    edit_status(ctx, i.channel_id, MessageId::new(message), embed, buttons).await;
+    let message = MessageId::new(message);
+    edit_status(ctx, i.channel_id, message, guild, &game, game.latest()).await;
     Ok(())
 }
 
@@ -142,9 +185,8 @@ async fn current(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId) -> Resu
         .db
         .call(move |conn| active_game(conn, guild.get()))
         .await?;
-    let (embed, buttons) = status_message(ctx, guild, &game, game.latest()).await;
-    i.create_response(&ctx.http, update_status(embed, buttons))
-        .await?;
+    let status = status_message(ctx, guild, &game, game.latest()).await?;
+    i.create_response(&ctx.http, status.update()).await?;
     Ok(())
 }
 
@@ -172,11 +214,10 @@ async fn claim(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId, round: i6
     }
     info!("claimed");
 
-    let (embed, buttons) = status_message(ctx, guild, &game, game.latest()).await;
-    i.create_response(&ctx.http, update_status(embed, buttons))
-        .await?;
+    let status = status_message(ctx, guild, &game, game.latest()).await?;
+    i.create_response(&ctx.http, status.update()).await?;
     let followup = CreateInteractionResponseFollowup::new()
-        .content(format!("Claimed {CLAIM}!"))
+        .content(claimed_text(&game, user))
         .ephemeral(true);
     i.create_followup(&ctx.http, followup).await?;
     Ok(())
@@ -298,11 +339,10 @@ async fn picked(
                 })
                 .await?;
             info!("removed the bet on {on}");
-            let (embed, buttons) = status_message(ctx, guild, &game, game.latest()).await;
             let names = names::lookup(ctx, guild, &[on]).await;
             let text = format!("Removed your bet on {}.", ui::name(&names, on));
             i.create_response(&ctx.http, update_text(text)).await?;
-            edit_status(ctx, i.channel_id, message, embed, buttons).await;
+            edit_status(ctx, i.channel_id, message, guild, &game, game.latest()).await;
         }
         PickKind::Winner => {
             require_admin(ctx, i.user.id, "pick winners")?;
@@ -333,14 +373,13 @@ async fn picked(
                 round: number,
                 winner: UserId::new(on),
             });
-            let (embed, buttons) = status_message(ctx, guild, &game, resolved).await;
             let names = names::lookup(ctx, guild, &[on]).await;
             let text = format!(
                 "Set {} as the winner of round {number}.",
                 ui::name(&names, on)
             );
             i.create_response(&ctx.http, update_text(text)).await?;
-            edit_status(ctx, i.channel_id, message, embed, buttons).await;
+            edit_status(ctx, i.channel_id, message, guild, &game, resolved).await;
         }
     }
     Ok(())
@@ -378,9 +417,8 @@ async fn undo(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId, round: i64
         "undid the winner of round {}",
         game.season.rounds[game.latest()].number
     );
-    let (embed, buttons) = status_message(ctx, guild, &game, game.latest()).await;
-    i.create_response(&ctx.http, update_status(embed, buttons))
-        .await?;
+    let status = status_message(ctx, guild, &game, game.latest()).await?;
+    i.create_response(&ctx.http, status.update()).await?;
     Ok(())
 }
 
@@ -415,13 +453,17 @@ async fn reset(
     Ok(())
 }
 
-/// Replaces a status message's embed and buttons, as the response to its own button.
-fn update_status(embed: CreateEmbed, buttons: Vec<CreateActionRow>) -> CreateInteractionResponse {
-    CreateInteractionResponse::UpdateMessage(
-        CreateInteractionResponseMessage::new()
-            .embed(embed)
-            .components(buttons),
-    )
+/// The private note after Claim!: what the player has now and the bet that avoids the tax.
+fn claimed_text(game: &Game, user: u64) -> String {
+    let numbers = ledger(&game.season);
+    match numbers.last().and_then(|n| n.standing(user)) {
+        Some(s) => format!(
+            "Claimed {CLAIM}! You have {} this round. Bet at least {} ({TAX_THRESHOLD}%) to avoid the tax.",
+            s.money,
+            s.safe_bet()
+        ),
+        None => format!("Claimed {CLAIM}!"),
+    }
 }
 
 /// Replaces a private menu with a line of text.
@@ -433,16 +475,24 @@ fn update_text(text: String) -> CreateInteractionResponse {
     )
 }
 
-/// Updates the public status message after a change made from a private menu. A deleted
-/// message isn't an error: the change is saved either way.
+/// Shows round `index` on the public status message after a change made from a private
+/// menu. Failing isn't an error, for example when the message was deleted: the change is
+/// saved either way.
 async fn edit_status(
     ctx: &BotCtx,
     channel: ChannelId,
     message: MessageId,
-    embed: CreateEmbed,
-    buttons: Vec<CreateActionRow>,
+    guild: GuildId,
+    game: &Game,
+    index: usize,
 ) {
-    let edit = EditMessage::new().embed(embed).components(buttons);
+    let edit = match status_message(ctx, guild, game, index).await {
+        Ok(status) => status.edit(),
+        Err(err) => {
+            warn!("couldn't draw the wheel status: {err:#}");
+            return;
+        }
+    };
     if let Err(err) = channel.edit_message(&ctx.http, message, edit).await {
         warn!("couldn't update the wheel status message: {err}");
     }

@@ -164,8 +164,15 @@ pub fn load_season(conn: &Connection, season: i64) -> rusqlite::Result<Season> {
             })?
             .collect::<rusqlite::Result<_>>()?;
     }
+    let number = conn.query_row(
+        "SELECT count(*) FROM wheel_seasons s, wheel_seasons me
+         WHERE me.id = ?1 AND s.guild_id = me.guild_id AND s.id <= me.id",
+        [season],
+        |row| row.get(0),
+    )?;
     Ok(Season {
         id: season,
+        number,
         options,
         rounds,
     })
@@ -412,7 +419,12 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].ended_at, Some(150));
         assert_eq!(list[1].id, new);
+        // Numbered per server.
+        let other = start_season(&conn, GUILD + 1, &[], 300).unwrap();
+        assert_eq!(load_season(&conn, old).unwrap().number, 1);
+        assert_eq!(load_season(&conn, new).unwrap().number, 2);
+        assert_eq!(load_season(&conn, other).unwrap().number, 1);
         let stats = stats(&conn).unwrap();
-        assert_eq!((stats.games, stats.open_bets), (1, 0));
+        assert_eq!((stats.games, stats.open_bets), (2, 0));
     }
 }

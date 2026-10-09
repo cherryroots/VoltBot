@@ -167,6 +167,7 @@ mod tests {
             .collect();
         let season = Season {
             id: 1,
+            number: 1,
             options: vec![1, 2, 3],
             rounds: vec![
                 Round {
