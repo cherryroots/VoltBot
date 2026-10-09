@@ -8,7 +8,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use tracing::info;
 
-use super::folder::{self, Command, Folder};
+use super::folder::{self, Command, Folder, ROOT};
 use super::store;
 use crate::ai::ToolDef;
 use crate::core::{Asker, BotCtx, Result, user_error};
@@ -21,9 +21,9 @@ pub fn def() -> ToolDef {
         name: "memory",
         description: "Your long-term memory: a folder of text files under /memories that stays between conversations. In a server, everyone in that server shares it; in DMs it is private to that person. \
 Save what will help later: facts people share about themselves, their preferences, running jokes, decisions, and anything someone asks you to remember. Keep notes short and factual, update them when they change, and don't save secrets, passwords or things said in passing. \
-Layout: /memories/server.md for the server, /memories/users/<user id>.md for each person (first line: their name). \
+Layout: one folder per person, /memories/users/<user id>/, with about.md (their name first, then basics) and one file per topic, like games.md or movies.md; things about the whole server go in /memories/server/<topic>.md. View a person's folder before saving about them, and add to the topic file that fits before starting a new one. \
 A person is the authority on themselves: what they say about themselves replaces what others said. When someone tells you about another person, add who said it, like \"likes horror films (per Alice)\". \
-Edit an existing file with str_replace or insert instead of making a new one. \
+Edit files with str_replace or insert instead of rewriting them. \
 Commands: view (a file with line numbers, or a directory), create (write a whole file), str_replace (replace text that appears once), insert (add lines after insert_line; 0 is the top), delete, rename. A file holds at most 8K.",
         parameters: json!({
             "type": "object",
@@ -104,25 +104,50 @@ pub async fn file_list(ctx: &BotCtx, asker: &Asker) -> Result<String> {
         .db
         .call(move |conn| Ok(store::list(conn, &scope)?))
         .await?;
-    Ok(render_list(&files))
+    Ok(render_list(&files, asker.user.get()))
 }
 
-fn render_list(files: &[(String, usize)]) -> String {
+/// The asker's own files and the server's files one by one, and the other people's folders
+/// as one line each, so the list stays short in a big server.
+fn render_list(files: &[(String, usize)], asker: u64) -> String {
     if files.is_empty() {
         return "<memory_files>empty</memory_files>".to_string();
     }
-    let mut lines = vec!["<memory_files>".to_string()];
-    for (path, size) in files.iter().take(MAX_LISTED) {
-        lines.push(format!("{path} ({})", folder::human_size(*size)));
+    let own = format!("{ROOT}/users/{asker}/");
+    let users = format!("{ROOT}/users/");
+    let mut lines = Vec::new();
+    // Other people's folders: path → (files, bytes), in path order.
+    let mut folders: Vec<(String, usize, usize)> = Vec::new();
+    for (path, size) in files {
+        let other = path
+            .strip_prefix(&users)
+            .filter(|_| !path.starts_with(&own))
+            .and_then(|rest| rest.split_once('/'))
+            .map(|(id, _)| format!("{users}{id}/"));
+        match other {
+            Some(dir) => match folders.last_mut() {
+                Some((last, count, bytes)) if *last == dir => {
+                    *count += 1;
+                    *bytes += size;
+                }
+                _ => folders.push((dir, 1, *size)),
+            },
+            None => lines.push(format!("{path} ({})", folder::human_size(*size))),
+        }
     }
-    if files.len() > MAX_LISTED {
+    for (dir, count, bytes) in folders {
+        let files = if count == 1 { "file" } else { "files" };
         lines.push(format!(
-            "…and {} more; view /memories for all of them",
-            files.len() - MAX_LISTED
+            "{dir} ({count} {files}, {})",
+            folder::human_size(bytes)
         ));
     }
-    lines.push("</memory_files>".to_string());
-    lines.join("\n")
+    let extra = lines.len().saturating_sub(MAX_LISTED);
+    lines.truncate(MAX_LISTED);
+    if extra > 0 {
+        lines.push(format!("…and {extra} more; view {ROOT} for the rest"));
+    }
+    format!("<memory_files>\n{}\n</memory_files>", lines.join("\n"))
 }
 
 #[cfg(test)]
@@ -130,18 +155,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lists_files_with_sizes() {
-        assert_eq!(render_list(&[]), "<memory_files>empty</memory_files>");
-        let files = vec![
-            ("/memories/server.md".to_string(), 1229),
-            ("/memories/users/1.md".to_string(), 300),
-        ];
+    fn lists_own_files_and_other_folders() {
+        assert_eq!(render_list(&[], 1), "<memory_files>empty</memory_files>");
+        let files: Vec<(String, usize)> = [
+            ("/memories/server/events.md", 1229),
+            ("/memories/users/1/about.md", 300),
+            ("/memories/users/1/games.md", 100),
+            ("/memories/users/2/about.md", 512),
+            ("/memories/users/2/movies.md", 512),
+            ("/memories/users/3/about.md", 50),
+        ]
+        .iter()
+        .map(|(p, s)| (p.to_string(), *s))
+        .collect();
         assert_eq!(
-            render_list(&files),
-            "<memory_files>\n/memories/server.md (1.2K)\n/memories/users/1.md (0.3K)\n</memory_files>"
+            render_list(&files, 1),
+            "<memory_files>
+/memories/server/events.md (1.2K)
+/memories/users/1/about.md (0.3K)
+/memories/users/1/games.md (0.1K)
+/memories/users/2/ (2 files, 1.0K)
+/memories/users/3/ (1 file, 0.0K)
+</memory_files>"
         );
-        let many: Vec<(String, usize)> = (0..60).map(|n| (format!("/memories/{n}"), 1)).collect();
-        let text = render_list(&many);
+        let many: Vec<(String, usize)> = (0..60)
+            .map(|n| (format!("/memories/users/{n}/about.md"), 1))
+            .collect();
+        let text = render_list(&many, 1000);
         assert_eq!(text.lines().count(), 53);
         assert!(text.contains("…and 10 more"));
     }

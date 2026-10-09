@@ -18,7 +18,7 @@ pub const MAX_FOLDER: usize = 256 * 1024;
 /// The longest path, in characters.
 const MAX_PATH: usize = 200;
 
-/// Files by path, like `/memories/users/123.md`. Directories aren't stored: a directory
+/// Files by path, like `/memories/users/123/games.md`. Directories aren't stored: a directory
 /// exists while a file is in it, and `/memories` always exists.
 pub type Folder = BTreeMap<String, String>;
 

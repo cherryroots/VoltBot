@@ -6,7 +6,7 @@ use poise::CreateReply;
 use serenity::all::{CreateAllowedMentions, CreateAttachment};
 use tracing::info;
 
-use super::folder::{self, Command, Folder, ROOT};
+use super::folder::{self, Folder, ROOT};
 use super::store;
 use crate::core::{Context, Result, user_error};
 
@@ -23,41 +23,29 @@ pub async fn memory(_ctx: Context<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Show a memory file or folder (default: your own file)
+/// Show a memory file or folder (default: what Vivy saved about you)
 #[poise::command(slash_command, ephemeral)]
 async fn show(
     ctx: Context<'_>,
-    #[description = "A path like /memories/server.md, or /memories for the list"] path: Option<
-        String,
-    >,
+    #[description = "A path like /memories/server/events.md, or /memories for everything"]
+    path: Option<String>,
 ) -> Result<()> {
     let path = match path {
         Some(path) => folder::clean_path(&path).map_err(user_error)?,
-        None => own_file(ctx),
+        None => own_folder(ctx),
     };
     let folder = load(ctx).await?;
-    let reply = match folder.get(&path) {
-        Some(content) if content.len() <= MAX_INLINE => CreateReply::default()
-            .content(format!("**{path}**\n```md\n{}\n```", fence_safe(content))),
-        Some(content) => CreateReply::default()
+    let text = dump(&folder, &path);
+    let reply = if text.is_empty() && path == own_folder(ctx) {
+        CreateReply::default().content("Vivy hasn't saved anything about you here.")
+    } else if text.is_empty() {
+        CreateReply::default().content(format!("There's nothing at {path}."))
+    } else if text.len() <= MAX_INLINE {
+        CreateReply::default().content(format!("```md\n{}\n```", fence_safe(&text)))
+    } else {
+        CreateReply::default()
             .content(format!("**{path}**"))
-            .attachment(CreateAttachment::bytes(
-                content.as_bytes(),
-                file_name(&path),
-            )),
-        None if path == own_file(ctx) => {
-            CreateReply::default().content("Vivy hasn't saved anything about you here.")
-        }
-        None => {
-            // A directory gets the same listing the model sees.
-            let mut copy = folder.clone();
-            let view = Command::View {
-                path: path.clone(),
-                view_range: None,
-            };
-            let text = folder::run(&mut copy, view).unwrap_or_else(|err| err);
-            CreateReply::default().content(format!("```\n{}\n```", shorten(&text)))
-        }
+            .attachment(CreateAttachment::bytes(text.into_bytes(), file_name(&path)))
     };
     ctx.send(reply.allowed_mentions(CreateAllowedMentions::new()))
         .await?;
@@ -67,9 +55,9 @@ async fn show(
 /// Delete everything Vivy remembers about you here
 #[poise::command(slash_command, ephemeral)]
 async fn forget(ctx: Context<'_>) -> Result<()> {
-    // In DMs the whole folder is yours; in a server, your own file.
+    // In DMs the whole folder is yours; in a server, your own folder.
     let path = if ctx.guild_id().is_some() {
-        own_file(ctx)
+        own_folder(ctx)
     } else {
         ROOT.to_string()
     };
@@ -85,7 +73,7 @@ async fn forget(ctx: Context<'_>) -> Result<()> {
 #[poise::command(slash_command, ephemeral)]
 async fn delete(
     ctx: Context<'_>,
-    #[description = "A path like /memories/users/123.md"] path: String,
+    #[description = "A path like /memories/users/123/games.md, or a folder"] path: String,
 ) -> Result<()> {
     if !ctx.data().is_admin(ctx.author().id) {
         return Err(user_error("Only admins can delete other memory files."));
@@ -101,9 +89,9 @@ async fn delete(
     Ok(())
 }
 
-/// `/memories/users/<your id>.md`
-fn own_file(ctx: Context<'_>) -> String {
-    format!("{ROOT}/users/{}.md", ctx.author().id)
+/// `/memories/users/<your id>`
+fn own_folder(ctx: Context<'_>) -> String {
+    format!("{ROOT}/users/{}", ctx.author().id)
 }
 
 fn scope(ctx: Context<'_>) -> String {
@@ -147,22 +135,29 @@ async fn remove(ctx: Context<'_>, path: &str) -> Result<usize> {
     Ok(count)
 }
 
+/// A file, or every file in a directory, each under its path as a heading.
+fn dump(folder: &Folder, path: &str) -> String {
+    let prefix = format!("{path}/");
+    folder
+        .iter()
+        .filter(|(p, _)| *p == path || p.starts_with(&prefix) || path == ROOT)
+        .map(|(p, content)| format!("# {p}\n{}", content.trim_end()))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 /// Keeps a file's own ``` from ending the code block early.
 fn fence_safe(text: &str) -> String {
     text.replace("```", "`\u{200b}``")
 }
 
-fn shorten(text: &str) -> String {
-    crate::util::shorten(&fence_safe(text), MAX_INLINE)
-}
-
-/// "/memories/users/1.md" → "1.md"
+/// "/memories/users/1" → "1.md", "/memories/users/1/games.md" → "games.md"
 fn file_name(path: &str) -> String {
     let name = path.rsplit('/').next().unwrap_or("memory");
     if name.contains('.') {
         name.to_string()
     } else {
-        format!("{name}.txt")
+        format!("{name}.md")
     }
 }
 
@@ -172,8 +167,30 @@ mod tests {
 
     #[test]
     fn file_names_and_fences() {
-        assert_eq!(file_name("/memories/users/1.md"), "1.md");
-        assert_eq!(file_name("/memories/notes"), "notes.txt");
+        assert_eq!(file_name("/memories/users/1/games.md"), "games.md");
+        assert_eq!(file_name("/memories/users/1"), "1.md");
         assert_eq!(fence_safe("a ``` b"), "a `\u{200b}`` b");
+    }
+
+    #[test]
+    fn dumps_a_folder() {
+        let folder: Folder = [
+            ("/memories/users/1/about.md", "Rene\n"),
+            ("/memories/users/1/games.md", "likes chess"),
+            ("/memories/users/10/about.md", "Bob"),
+        ]
+        .iter()
+        .map(|(p, c)| (p.to_string(), c.to_string()))
+        .collect();
+        assert_eq!(
+            dump(&folder, "/memories/users/1"),
+            "# /memories/users/1/about.md\nRene\n\n# /memories/users/1/games.md\nlikes chess"
+        );
+        assert_eq!(
+            dump(&folder, "/memories/users/1/games.md"),
+            "# /memories/users/1/games.md\nlikes chess"
+        );
+        assert_eq!(dump(&folder, "/memories").matches("# ").count(), 3);
+        assert_eq!(dump(&folder, "/memories/users/2"), "");
     }
 }

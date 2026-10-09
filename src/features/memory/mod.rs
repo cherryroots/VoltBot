@@ -1,5 +1,5 @@
 //! Memory: a folder of notes the chat model keeps between conversations, like
-//! `/memories/users/123.md`. One folder per server, and a private one per person in DMs.
+//! `/memories/users/123/games.md`. One folder per server, and a private one per person in DMs.
 //!
 //! The model reads and writes it with the `memory` tool, whose commands match Anthropic's
 //! memory tool, so the same folder works with Claude's built-in memory later. Nothing is
