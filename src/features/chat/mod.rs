@@ -38,6 +38,7 @@ use self::answer::{End, Job};
 use self::store::{NewTurn, StoredPart};
 use crate::ai::{ChatProvider, Input, Part, Role, ToolDef};
 use crate::core::{Asker, BotCtx, Feature, Result, user_error};
+use crate::util::media;
 use crate::util::reply::LiveReply;
 
 const STOP: &str = "❌";
@@ -103,7 +104,7 @@ impl Feature for Chat {
 
     async fn on_mention(&self, ctx: &BotCtx, msg: &Message, rest: &str) -> Result<()> {
         let provider = provider(ctx)?;
-        let msg = history::with_previews(ctx, msg).await;
+        let msg = media::with_previews(&ctx.http, msg).await;
 
         // The message this one replies to, if any, is the conversation so far.
         let parent_id = match &msg.referenced_message {

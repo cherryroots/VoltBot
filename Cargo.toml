@@ -11,6 +11,8 @@ chrono = "0.4.45"
 chrono-tz = { version = "0.10.4", features = ["case-insensitive"] }
 dotenvy = "0.15.7"
 fastrand = "2.5.0"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+image_hasher = "3.1"
 log = "0.4"
 poise = "0.7.0"
 reqwest = { version = "0.12.28", default-features = false, features = ["json", "rustls-tls"] }

@@ -61,6 +61,12 @@ enabled = true
 # Channels where Vivy posts a weekly diary entry about her week in that server.
 # diary_channels = [123456789012345678]
 
+[features.snails]
+# Repost detection. New messages' links and pictures are saved as they arrive; right-click a
+# message → Apps → Check Snail lists earlier posts of the same link or picture.
+# Older history is only read when an admin runs `/snail_backfill start`.
+enabled = true
+
 [features.control_panel]
 # Channel with the status message the bot keeps up to date.
 # status_channel = 123456789012345678
