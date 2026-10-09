@@ -28,7 +28,6 @@ use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
 use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::util::SubscriberInitExt as _;
 use tracing_subscriber::{EnvFilter, Layer, filter};
 
 use super::config::LoggingConfig;
@@ -74,10 +73,15 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
             || *meta.level() <= min_level
     }));
 
-    tracing_subscriber::registry()
+    let subscriber = tracing_subscriber::registry()
         .with(stdout.with_filter(env_filter))
-        .with(discord)
-        .try_init()?;
+        .with(discord);
+    tracing::subscriber::set_global_default(subscriber)?;
+    // Lines from crates that use `log` instead of `tracing`. usvg warns about every name
+    // with a character no font has, which isn't worth a log line.
+    tracing_log::LogTracer::builder()
+        .ignore_crate("usvg")
+        .init()?;
 
     // Log panics like errors, with the span they happened in.
     std::panic::set_hook(Box::new(|info| {

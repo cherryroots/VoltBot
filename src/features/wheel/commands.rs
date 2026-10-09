@@ -24,6 +24,8 @@ pub async fn wheel_status(
     season: Option<i64>,
 ) -> Result<()> {
     let guild = guild(ctx)?;
+    // Looking up names and drawing can take longer than Discord waits for an answer.
+    ctx.defer().await?;
     let now = Utc::now().timestamp();
     let game = ctx
         .data()

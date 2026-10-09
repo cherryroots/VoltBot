@@ -7,8 +7,8 @@ use rusqlite::Connection;
 use serenity::all::{
     ActionRowComponent, ChannelId, ComponentInteraction, ComponentInteractionDataKind,
     CreateActionRow, CreateAttachment, CreateInteractionResponse,
-    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, EditMessage, GuildId,
-    MessageId, ModalInteraction, UserId,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, EditInteractionResponse,
+    EditMessage, GuildId, MessageId, ModalInteraction, UserId,
 };
 use tracing::{info, warn};
 
@@ -40,15 +40,14 @@ pub struct Status {
 }
 
 impl Status {
-    /// Replaces the message this status's button was on. Clears the embed that status
-    /// messages from before the picture had.
-    fn update(self) -> CreateInteractionResponse {
-        CreateInteractionResponse::UpdateMessage(
-            CreateInteractionResponseMessage::new()
-                .embeds(Vec::new())
-                .files([self.picture])
-                .components(self.buttons),
-        )
+    /// Replaces the message this status's button was on, after [`ComponentInteraction::defer`].
+    /// Clears the embed that status messages from before the picture had.
+    fn update(self) -> EditInteractionResponse {
+        EditInteractionResponse::new()
+            .embeds(Vec::new())
+            .clear_attachments()
+            .new_attachment(self.picture)
+            .components(self.buttons)
     }
 
     /// The same, as an edit of a message by ID.
@@ -185,8 +184,10 @@ async fn current(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId) -> Resu
         .db
         .call(move |conn| active_game(conn, guild.get()))
         .await?;
+    // Looking up names and drawing can take longer than Discord waits for an answer.
+    i.defer(&ctx.http).await?;
     let status = status_message(ctx, guild, &game, game.latest()).await?;
-    i.create_response(&ctx.http, status.update()).await?;
+    i.edit_response(&ctx.http, status.update()).await?;
     Ok(())
 }
 
@@ -214,8 +215,10 @@ async fn claim(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId, round: i6
     }
     info!("claimed");
 
+    // Looking up names and drawing can take longer than Discord waits for an answer.
+    i.defer(&ctx.http).await?;
     let status = status_message(ctx, guild, &game, game.latest()).await?;
-    i.create_response(&ctx.http, status.update()).await?;
+    i.edit_response(&ctx.http, status.update()).await?;
     let followup = CreateInteractionResponseFollowup::new()
         .content(claimed_text(&game, user))
         .ephemeral(true);
@@ -266,14 +269,13 @@ async fn open_menu(
         }));
     }
 
+    i.defer_ephemeral(&ctx.http).await?;
     let names = names::lookup(ctx, guild, &choices).await;
     let (content, menu) = ui::pick_menu(kind, round, i.message.id.get(), &choices, &names);
-    let response = CreateInteractionResponseMessage::new()
+    let menu = EditInteractionResponse::new()
         .content(content)
-        .components(menu)
-        .ephemeral(true);
-    i.create_response(&ctx.http, CreateInteractionResponse::Message(response))
-        .await?;
+        .components(menu);
+    i.edit_response(&ctx.http, menu).await?;
     Ok(())
 }
 
@@ -417,8 +419,10 @@ async fn undo(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId, round: i64
         "undid the winner of round {}",
         game.season.rounds[game.latest()].number
     );
+    // Looking up names and drawing can take longer than Discord waits for an answer.
+    i.defer(&ctx.http).await?;
     let status = status_message(ctx, guild, &game, game.latest()).await?;
-    i.create_response(&ctx.http, status.update()).await?;
+    i.edit_response(&ctx.http, status.update()).await?;
     Ok(())
 }
 

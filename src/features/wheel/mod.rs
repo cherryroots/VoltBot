@@ -24,7 +24,8 @@ mod tools;
 mod ui;
 
 use async_trait::async_trait;
-use serenity::all::{ComponentInteraction, ModalInteraction};
+use serenity::all::{ComponentInteraction, GuildId, ModalInteraction};
+use tracing::warn;
 
 use crate::ai::ToolDef;
 use crate::core::{Asker, BotCtx, Command, Feature, LegacyImport, Result, Stat};
@@ -71,10 +72,32 @@ impl Feature for Wheel {
         tools::run(ctx, asker, args).await
     }
 
-    async fn start(&self, _ctx: &BotCtx) -> Result<()> {
-        // Reading the fonts takes a moment; do it now rather than on the first button press,
-        // which Discord only waits 3 seconds for.
+    async fn start(&self, ctx: &BotCtx) -> Result<()> {
+        // Reading the fonts and looking up names take a while; do it now rather than on the
+        // first button press, which Discord only waits 3 seconds for.
         tokio::task::spawn_blocking(render::load_fonts);
+        let ctx = ctx.clone();
+        tokio::spawn(async move {
+            let games = ctx
+                .db
+                .call(|conn| {
+                    let mut games = Vec::new();
+                    for (guild, season) in store::active_seasons(conn)? {
+                        let season = store::load_season(conn, season)?;
+                        games.push((GuildId::new(guild), ledger::users(&season)));
+                    }
+                    Ok(games)
+                })
+                .await;
+            match games {
+                Ok(games) => {
+                    for (guild, users) in games {
+                        names::warm(&ctx, guild, users).await;
+                    }
+                }
+                Err(err) => warn!("couldn't look up the wheel players' names: {err:#}"),
+            }
+        });
         Ok(())
     }
 

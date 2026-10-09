@@ -103,6 +103,13 @@ pub fn end_season(conn: &Connection, season: i64, now: i64) -> rusqlite::Result<
     Ok(())
 }
 
+/// The active season of every server, as (server, season).
+pub fn active_seasons(conn: &Connection) -> rusqlite::Result<Vec<(u64, i64)>> {
+    let mut stmt = conn.prepare("SELECT guild_id, id FROM wheel_seasons WHERE ended_at IS NULL")?;
+    stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
+}
+
 /// Every season of the server, oldest first.
 pub fn seasons(conn: &Connection, guild: u64) -> rusqlite::Result<Vec<SeasonInfo>> {
     let mut stmt = conn.prepare(
@@ -424,6 +431,10 @@ mod tests {
         assert_eq!(load_season(&conn, old).unwrap().number, 1);
         assert_eq!(load_season(&conn, new).unwrap().number, 2);
         assert_eq!(load_season(&conn, other).unwrap().number, 1);
+        assert_eq!(
+            active_seasons(&conn).unwrap(),
+            [(GUILD, new), (GUILD + 1, other)]
+        );
         let stats = stats(&conn).unwrap();
         assert_eq!((stats.games, stats.open_bets), (2, 0));
     }
