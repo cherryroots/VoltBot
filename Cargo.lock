@@ -3068,6 +3068,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serenity",
+ "skrifa",
  "sysinfo",
  "tempfile",
  "text-splitter",

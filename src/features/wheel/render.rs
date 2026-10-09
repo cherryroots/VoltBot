@@ -3,16 +3,22 @@
 //!
 //! The Inter font is built into the binary, so the picture looks the same on every server.
 //! The server's own fonts are loaded too, so names with emoji or other scripts still show
-//! when the server has a font for them (for example `fonts-noto-color-emoji`).
+//! when the server has a font for them (for example `fonts-noto-color-emoji`). Characters
+//! Inter doesn't have are given their font here, in a `<tspan>` (see [`markup`]): resvg's
+//! own fallback redraws the whole text in the other font and gives up when the two
+//! drawings don't line up, which leaves those characters blank.
 //!
 //! SVG has no text layout: every position is computed here. Text widths are estimated from
 //! the number of characters, which is close enough for Inter at these sizes.
 
-use std::sync::{Arc, LazyLock};
+use std::cell::Cell;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::Context as _;
 use resvg::tiny_skia::{Pixmap, Transform};
 use resvg::usvg::{self, fontdb};
+use skrifa::MetadataProvider as _;
 
 use super::ledger::{OutcomeKind, Standing, TAX_THRESHOLD, outcomes};
 use super::ui::View;
@@ -51,7 +57,26 @@ pub fn load_fonts() {
     LazyLock::force(&FONTS);
 }
 
-/// Renders SVG text to PNG bytes. Takes a few milliseconds; call it off the async threads.
+thread_local! {
+    /// Set while a round is drawn again without [`markup`]'s fonts.
+    static PLAIN: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The round as a PNG. Call it off the async threads: drawing takes some CPU, and picking
+/// fonts reads font files. resvg can panic on text it can't lay out; the round is then
+/// drawn again with every font choice left to resvg.
+pub fn round_png(view: &View) -> anyhow::Result<Vec<u8>> {
+    let svg = round_svg(view);
+    if let Ok(result) = std::panic::catch_unwind(|| png(&svg)) {
+        return result;
+    }
+    PLAIN.set(true);
+    let svg = round_svg(view);
+    PLAIN.set(false);
+    png(&svg)
+}
+
+/// Renders SVG text to PNG bytes.
 pub fn png(svg: &str) -> anyhow::Result<Vec<u8>> {
     let options = usvg::Options {
         font_family: FONT.to_string(),
@@ -223,7 +248,7 @@ fn open(svg: &mut Svg, view: &View) {
                 .map(|b| {
                     format!(
                         "{} <tspan fill=\"{TEXT}\" font-weight=\"600\">{}</tspan>",
-                        esc(&short(view.name(b.by))),
+                        markup(&short(view.name(b.by))),
                         b.amount
                     )
                 })
@@ -307,7 +332,7 @@ fn open(svg: &mut Svg, view: &View) {
             let mut lines = Vec::new();
             for (label, names) in groups {
                 let names: Vec<String> = names.iter().map(|n| short(n)).collect();
-                let pieces: Vec<String> = names.iter().map(|n| esc(n)).collect();
+                let pieces: Vec<String> = names.iter().map(|n| markup(n)).collect();
                 for (n, line) in wrap(&pieces, &names, WIDTH - 32.0 - 180.0, 13.0)
                     .into_iter()
                     .enumerate()
@@ -544,16 +569,29 @@ fn wrap(pieces: &[String], plain: &[String], width: f32, size: f32) -> Vec<Strin
 
 /// About how wide Inter draws `text` at `size`.
 fn text_width(text: &str, size: f32) -> f32 {
-    text.chars().count() as f32 * size * 0.6
+    text.chars().map(columns).sum::<usize>() as f32 * size * 0.6
 }
 
+/// How many letters wide a character is drawn, about: emoji take two.
+fn columns(c: char) -> usize {
+    if is_emoji(c) { 2 } else { 1 }
+}
+
+/// The name cut to [`MAX_NAME`] letters' width.
 fn short(name: &str) -> String {
-    if name.chars().count() <= MAX_NAME {
-        name.to_string()
-    } else {
-        let cut: String = name.chars().take(MAX_NAME - 1).collect();
-        format!("{cut}…")
+    if name.chars().map(columns).sum::<usize>() <= MAX_NAME {
+        return name.to_string();
     }
+    let mut cut = String::new();
+    let mut width = 0;
+    for c in name.chars() {
+        width += columns(c);
+        if width > MAX_NAME - 1 {
+            break;
+        }
+        cut.push(c);
+    }
+    format!("{cut}…")
 }
 
 /// "+60", "−15" (a real minus sign), or "–" for nothing.
@@ -571,6 +609,134 @@ fn sign_color(n: i64, positive: &'static str) -> &'static str {
         n if n > 0 => positive,
         _ => RED,
     }
+}
+
+/// Text as SVG: simplified (see [`simplify`]), escaped, and with characters Inter doesn't
+/// have in a `<tspan>` with a font that has them.
+fn markup(text: &str) -> String {
+    let text = simplify(text);
+    if PLAIN.get() {
+        esc(&text)
+    } else {
+        font_runs(&text, fallback_font)
+    }
+}
+
+/// Emoji sequences resvg can't draw: skin tones, variation selectors and joiners are left
+/// out, and flags become their country's letters (🇳🇱 is drawn as NL). The emoji themselves
+/// stay.
+fn simplify(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| match c {
+            '\u{1F1E6}'..='\u{1F1FF}' => char::from_u32(c as u32 - 0x1F1E6 + 'A' as u32),
+            '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{1F3FB}'..='\u{1F3FF}' | '\u{20E3}' => None,
+            '\u{E0020}'..='\u{E007F}' => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// A font for some characters: its family, and the weight of its face that has them.
+type Font = (String, u16);
+
+/// Wraps runs of characters that `font_for` gives a font in a `<tspan>` with that font.
+///
+/// A letter with a combining mark after it is left to resvg's own fallback, which can draw
+/// it: resvg panics on such a pair inside a `<tspan>` with its own font.
+fn font_runs(text: &str, font_for: impl Fn(char) -> Option<Font>) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    // The font of the open `<tspan>`, if one is open.
+    let mut current: Option<Font> = None;
+    for (i, &c) in chars.iter().enumerate() {
+        let combined = is_mark(c) || chars.get(i + 1).is_some_and(|&next| is_mark(next));
+        let font = if combined { None } else { font_for(c) };
+        if font != current {
+            if current.is_some() {
+                out.push_str("</tspan>");
+            }
+            if let Some((family, weight)) = &font {
+                out.push_str(&format!(
+                    "<tspan font-family=\"{}\" font-weight=\"{weight}\">",
+                    esc(family)
+                ));
+            }
+            current = font;
+        }
+        out.push_str(&esc(c.encode_utf8(&mut [0; 4])));
+    }
+    if current.is_some() {
+        out.push_str("</tspan>");
+    }
+    out
+}
+
+/// Combining marks, drawn on the character before them.
+fn is_mark(c: char) -> bool {
+    matches!(c,
+        '\u{0300}'..='\u{036F}' | '\u{1AB0}'..='\u{1AFF}' | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}' | '\u{FE20}'..='\u{FE2F}')
+}
+
+/// Symbols and pictographs, which look best in an emoji font.
+fn is_emoji(c: char) -> bool {
+    matches!(c, '\u{2600}'..='\u{27BF}' | '\u{2B00}'..='\u{2BFF}' | '\u{1F000}'..='\u{1FAFF}')
+}
+
+/// The font to draw `c` with when Inter doesn't have it: an emoji font for emoji, otherwise
+/// preferably a sans-serif one, in the weight closest to the semibold names. `None` when
+/// Inter has it, or no font does. Remembered per character, since looking through the
+/// fonts reads their files.
+///
+/// The weight matters: a family's bold face often lacks characters its regular face has,
+/// and resvg would pick the bold face for bold text.
+fn fallback_font(c: char) -> Option<Font> {
+    static KNOWN: LazyLock<Mutex<HashMap<char, Option<Font>>>> = LazyLock::new(Default::default);
+    if c.is_ascii() {
+        return None;
+    }
+    if let Some(font) = KNOWN.lock().expect("font cache poisoned").get(&c) {
+        return font.clone();
+    }
+
+    let db = &**FONTS;
+    let family = |face: &fontdb::FaceInfo| {
+        let (name, _) = face.families.first()?;
+        Some((name.clone(), face.weight.0))
+    };
+    let font = if db
+        .faces()
+        .any(|face| family(face).is_some_and(|(name, _)| name == FONT) && has_char(db, face.id, c))
+    {
+        None
+    } else {
+        db.faces()
+            .filter(|face| has_char(db, face.id, c))
+            .filter_map(family)
+            .min_by_key(|(name, weight)| {
+                let kind = match name {
+                    n if is_emoji(c) && n.contains("Emoji") => 0,
+                    n if n.starts_with("Noto Sans") => 1,
+                    n if n.contains("Sans") => 2,
+                    _ => 3,
+                };
+                (kind, weight.abs_diff(600))
+            })
+    };
+    KNOWN
+        .lock()
+        .expect("font cache poisoned")
+        .insert(c, font.clone());
+    font
+}
+
+fn has_char(db: &fontdb::Database, face: fontdb::ID, c: char) -> bool {
+    db.with_face_data(face, |data, index| {
+        let font = skrifa::FontRef::from_index(data, index).ok()?;
+        font.charmap().map(c)
+    })
+    .flatten()
+    .is_some()
 }
 
 /// Escapes text for SVG.
@@ -632,7 +798,7 @@ struct Svg {
 impl Svg {
     /// Text that is escaped here.
     fn text(&mut self, x: f32, y: f32, text: &str, style: Style) {
-        self.raw_text(x, y, &esc(text), style);
+        self.raw_text(x, y, &markup(text), style);
     }
 
     /// Text that may hold `<tspan>` markup; the caller escapes it.
@@ -798,10 +964,52 @@ mod tests {
         assert!(svg.contains("Nobody is on the wheel yet"));
     }
 
+    /// Names resvg can't lay out in a `<tspan>` of their own, and names that need other fonts.
+    #[test]
+    fn unusual_names() {
+        let mut names = names();
+        names.insert(1, "Eve 🎬👍🏽 👨‍👩‍👧 🇳🇱 1️⃣".into());
+        names.insert(2, "𝗓𝗈𝖾 ✨ ᰁ 𐰁 ａｂ é".into());
+        let season = season();
+        let numbers = ledger(&season);
+        let view = View {
+            season: &season,
+            ledger: &numbers,
+            index: 1,
+            active: true,
+            names: &names,
+        };
+        assert!(round_png(&view).unwrap().starts_with(b"\x89PNG"));
+    }
+
     #[test]
     fn renders_a_png() {
         let png = png(&render(&season(), 1)).unwrap();
         assert!(png.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn fonts_per_character() {
+        let font_for = |c: char| match c {
+            '𝗓' => Some(("Math".to_string(), 400)),
+            '😀' | '👍' => Some(("Emoji".to_string(), 400)),
+            _ => None,
+        };
+        assert_eq!(font_runs("Bob <3", font_for), "Bob &lt;3");
+        assert_eq!(
+            font_runs("𝗓𝗓oe", font_for),
+            "<tspan font-family=\"Math\" font-weight=\"400\">𝗓𝗓</tspan>oe"
+        );
+        // A combining mark stays with its letter, outside the `<tspan>`.
+        assert_eq!(
+            font_runs("𝗓\u{301}𝗓", font_for),
+            "𝗓\u{301}<tspan font-family=\"Math\" font-weight=\"400\">𝗓</tspan>"
+        );
+        assert_eq!(simplify("a👍🏽 👨‍👩‍👧 🇳🇱 1️⃣ ❤️"), "a👍 👨👩👧 NL 1 ❤");
+        assert_eq!(fallback_font('a'), None);
+        // Inter has these.
+        assert_eq!(fallback_font('é'), None);
+        assert_eq!(fallback_font('−'), None);
     }
 
     #[test]
@@ -818,6 +1026,7 @@ mod tests {
             ["Alice 10 · Bob 20", "Charlie 30"]
         );
         assert_eq!(short("Bartholomew the Third"), "Bartholomew t…");
+        assert_eq!(short(&"🎬".repeat(8)), format!("{}…", "🎬".repeat(6)));
         assert_eq!(signed(5), "+5");
         assert_eq!(signed(-5), "−5");
         assert_eq!(signed(0), "–");

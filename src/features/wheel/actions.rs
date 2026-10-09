@@ -68,18 +68,21 @@ pub async fn status_message(
     index: usize,
 ) -> Result<Status> {
     let names = names::lookup(ctx, guild, &ledger::users(&game.season)).await;
-    let numbers = ledger(&game.season);
-    let view = View {
-        season: &game.season,
-        ledger: &numbers,
-        index,
-        active: game.active,
-        names: &names,
-    };
-    let svg = render::round_svg(&view);
-    let buttons = ui::status_buttons(&view);
-    // Drawing takes a few milliseconds of CPU, so it runs on tokio's blocking threads.
-    let png = tokio::task::spawn_blocking(move || render::png(&svg)).await??;
+    let (season, active) = (game.season.clone(), game.active);
+    // Drawing takes some CPU and can read font files, so it runs on tokio's blocking threads.
+    let (png, buttons) = tokio::task::spawn_blocking(move || {
+        let numbers = ledger(&season);
+        let view = View {
+            season: &season,
+            ledger: &numbers,
+            index,
+            active,
+            names: &names,
+        };
+        let png = render::round_png(&view)?;
+        anyhow::Ok((png, ui::status_buttons(&view)))
+    })
+    .await??;
 
     // Discord blurs files named SPOILER_, which hides the winner as voltgpt did.
     let round = &game.season.rounds[index];
