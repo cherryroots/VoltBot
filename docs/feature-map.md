@@ -179,7 +179,9 @@ Progress feedback: Go adds a ⏳ reaction while the model works and swaps it for
 
 When an answer spans several messages, only the last one carries the line. This also saves two reaction API calls per message part.
 
-Events and guards: `on_mention` as the fallback for mentions no other feature claimed (bot authors are filtered out by the dispatcher); `on_reaction_add` for ❌/🔁.
+Events and guards: `on_mention` as the fallback for mentions no other feature claimed (bot authors are filtered out by the dispatcher); `on_reaction_add` for ❌/🔁; `on_message` for chiming in.
+
+Chiming in (`chat/chime.rs`, Rene's idea, 2026-10-09): after a message in a server, a roll with `chime_chance` (default 0.03) and a per-channel cooldown (`chime_cooldown_minutes`, default 60) decides whether Vivy reads along. Messages that mention her or reply to her are skipped, since they get a real answer. She reads the last 25 messages, gets the same system prompt and tools as an answer (so the cache is shared) plus her self notes and the memory file list, and answers `PASS`, `REACT <emoji>` or one short line. The instructions go in the question, not the system prompt. A posted line is stored as a question (the transcript) and an answer, so replying to it continues the conversation. The tool loop without Discord output is `ai::complete`, shared with memory's reflection.
 
 Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, and returning generated files. Those go behind a trait (see "AI providers" below). Discord streaming, message splitting, media extraction, the tool loop and the bot's own tools stay outside it so every provider reuses them.
 
@@ -455,6 +457,7 @@ voltgpt's memory captured every message, summarized it into notes and profiles, 
 - **Who decides.** Anyone can add notes about anyone (Rene's choice, 2026-10-09). A person's own word about themselves replaces what others said, and notes from others name who said them.
 - **Caching.** The `chat_context` hook adds `<vivy_self>` (her own notes, at most 3000 characters, only when a conversation starts fresh, since a continued one still has them) and `<memory_files>` after the newest question: the asker's and the server's files with sizes, and one line per other person's folder (at most 50 lines), for that request only. The instructions, tool list and earlier turns stay the same.
 - **Limits and safety.** 8 KB per file and 256 KB per folder, paths must stay under `/memories` (no `..`), each command runs in one transaction, and every change is written to `memory_changes` with who asked, the old text and the new text.
+- **Daily reflection** (`memory/reflect.rs`). An hourly check finds server folders that changed since their last reflection, at most once a day each (`memory_reflections`, migration 2). Vivy gets the folder listing, her self notes and the list of changed files, with only the memory tool and its own small system prompt, and tidies the folder and updates `/memories/vivy/`. Her changes are logged under the bot's user ID. DMs don't reflect.
 - **Control.** `/memory show [path]` shows all of your files by default, `/memory forget [file]` deletes one of your files (autocompleted) or your whole folder (in DMs, everything), and admins can `/memory delete` any file or folder.
 
 Tables: `memory_files (scope, path, content, updated_at, updated_by)` and `memory_changes (scope, path, at, user_id, before, after)`. `folder.rs` holds the commands as pure functions on a `BTreeMap` of paths, tested without a database.

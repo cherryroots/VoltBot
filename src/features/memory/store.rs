@@ -29,6 +29,11 @@ pub const MIGRATIONS: &[&str] = &[
         after TEXT                        -- NULL for a deleted file
     );
     CREATE INDEX memory_changes_by_scope ON memory_changes (scope, at);",
+    // 2: when Vivy last reflected on each server's folder.
+    "CREATE TABLE memory_reflections (
+        scope TEXT PRIMARY KEY,
+        at INTEGER NOT NULL               -- unix seconds
+    );",
 ];
 
 /// The folder of a server, or of a person's DMs.
@@ -107,6 +112,43 @@ pub fn files_under(
     rows.collect()
 }
 
+/// Server folders due for a reflection: changed since the last one, which was at least
+/// `every` seconds ago.
+pub fn due_reflections(conn: &Connection, now: i64, every: i64) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT c.scope FROM memory_changes c
+         LEFT JOIN memory_reflections r ON r.scope = c.scope
+         WHERE c.scope LIKE 'server:%' AND (r.at IS NULL OR r.at <= ?1)
+         GROUP BY c.scope
+         HAVING max(c.at) > coalesce(max(r.at), 0)",
+    )?;
+    let rows = stmt.query_map([now - every], |row| row.get(0))?;
+    rows.collect()
+}
+
+/// The files changed since the last reflection, with who changed them and how often.
+pub fn changes_since_reflection(
+    conn: &Connection,
+    scope: &str,
+) -> rusqlite::Result<Vec<(String, u64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT path, user_id, count(*) FROM memory_changes
+         WHERE scope = ?1 AND at > coalesce((SELECT at FROM memory_reflections WHERE scope = ?1), 0)
+         GROUP BY path, user_id ORDER BY path",
+    )?;
+    let rows = stmt.query_map([scope], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+    rows.collect()
+}
+
+pub fn set_reflected(conn: &Connection, scope: &str, at: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO memory_reflections (scope, at) VALUES (?1, ?2)
+         ON CONFLICT (scope) DO UPDATE SET at = excluded.at",
+        params![scope, at],
+    )?;
+    Ok(())
+}
+
 /// Files and folders in use, for the control panel.
 pub fn stats(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
@@ -168,6 +210,40 @@ mod tests {
             files_under(&conn, "server:1", "/memories/b.md")
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn reflections_are_due_after_changes_once_a_day() {
+        let conn = db();
+        let day = 24 * 60 * 60;
+        let mut one = Folder::new();
+        one.insert("/memories/a.md".into(), "x".into());
+        save(&conn, "server:1", &Folder::new(), &one, 7, 100).unwrap();
+        save(&conn, "dm:9", &Folder::new(), &one, 9, 100).unwrap();
+        // DMs never reflect; the server does, since it changed.
+        assert_eq!(due_reflections(&conn, 200, day).unwrap(), vec!["server:1"]);
+        assert_eq!(
+            changes_since_reflection(&conn, "server:1").unwrap(),
+            vec![("/memories/a.md".to_string(), 7, 1)]
+        );
+
+        set_reflected(&conn, "server:1", 200).unwrap();
+        assert!(
+            changes_since_reflection(&conn, "server:1")
+                .unwrap()
+                .is_empty()
+        );
+        // No changes since: not due, even a day later.
+        assert!(due_reflections(&conn, 200 + day, day).unwrap().is_empty());
+        // A change, but less than a day after the last reflection: not yet.
+        let mut two = one.clone();
+        two.insert("/memories/b.md".into(), "y".into());
+        save(&conn, "server:1", &one, &two, 7, 300).unwrap();
+        assert!(due_reflections(&conn, 400, day).unwrap().is_empty());
+        assert_eq!(
+            due_reflections(&conn, 200 + day, day).unwrap(),
+            vec!["server:1"]
         );
     }
 

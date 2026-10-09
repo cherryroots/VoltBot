@@ -6,12 +6,14 @@
 //! - `store.rs`: the `chat_turns` and `chat_messages` tables
 //! - `tools.rs`: chat's own tools (time, channel, users, messages, pins, events)
 //! - `search.rs`: the `search_messages` tool
+//! - `chime.rs`: chiming in now and then without being mentioned
 //! - `prompt.md`: the system prompt
 //!
 //! Reactions on an answer, from the person who asked: ❌ stops it while it's being written
 //! and deletes it once it's done, 🔁 writes it again.
 
 mod answer;
+mod chime;
 mod history;
 mod search;
 mod store;
@@ -40,6 +42,7 @@ const REGENERATE: &str = "🔁";
 pub struct Chat {
     /// Answers being written right now, so ❌ can stop them.
     running: Mutex<Vec<Running>>,
+    chime: chime::Chime,
 }
 
 struct Running {
@@ -112,6 +115,11 @@ impl Feature for Chat {
         let reply = LiveReply::new(msg.channel_id, Some(msg.id));
         self.answer(ctx, provider.as_ref(), asker, question_id, reply)
             .await
+    }
+
+    /// Every message might make her chime in.
+    async fn on_message(&self, ctx: &BotCtx, msg: &Message) -> Result<()> {
+        self.chime.on_message(ctx, msg).await
     }
 
     async fn on_reaction_add(&self, ctx: &BotCtx, reaction: &Reaction) -> Result<()> {

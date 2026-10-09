@@ -16,7 +16,7 @@ use crate::core::{Asker, BotCtx, Result, user_error};
 /// The most files listed next to a question. The model can view the folder for the rest.
 const MAX_LISTED: usize = 50;
 /// Vivy's notes about herself, shown at the start of each conversation.
-const SELF_DIR: &str = "/memories/vivy";
+pub const SELF_DIR: &str = "/memories/vivy";
 /// The most characters of those notes shown; she can view the rest.
 const MAX_SELF: usize = 3000;
 
@@ -61,6 +61,12 @@ Commands: view (a file with line numbers, or a directory), create (write a whole
 /// Runs one memory command for the asker. Mistakes in the command (a missing file, text
 /// that appears twice) come back as text in the same words Claude's memory tool uses.
 pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
+    let scope = store::scope(asker.guild.map(|g| g.get()), asker.user.get());
+    run_in(ctx, scope, asker.user.get(), args).await
+}
+
+/// Runs one memory command in the folder `scope`, for `user` (who the change log names).
+pub async fn run_in(ctx: &BotCtx, scope: String, user: u64, args: &Value) -> Result<String> {
     // Models sometimes fill unused arguments with null or []; leave those out.
     let mut args = args.clone();
     if let Some(fields) = args.as_object_mut() {
@@ -68,8 +74,6 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
     }
     let command: Command = serde_json::from_value(args)
         .map_err(|err| user_error(format!("not a valid memory command: {err}")))?;
-    let scope = store::scope(asker.guild.map(|g| g.get()), asker.user.get());
-    let user = asker.user.get();
     let writes = command.writes();
     let log_scope = scope.clone();
 
@@ -107,6 +111,10 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
 /// when she hasn't written any yet.
 pub async fn self_notes(ctx: &BotCtx, asker: &Asker) -> Result<Option<String>> {
     let scope = store::scope(asker.guild.map(|g| g.get()), asker.user.get());
+    self_notes_in(ctx, scope).await
+}
+
+pub async fn self_notes_in(ctx: &BotCtx, scope: String) -> Result<Option<String>> {
     let files = ctx
         .db
         .call(move |conn| Ok(store::files_under(conn, &scope, SELF_DIR)?))

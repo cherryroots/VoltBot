@@ -9,9 +9,11 @@
 //! - `store.rs`: the tables and queries, and the log of every change
 //! - `tool.rs`: the chat tool and the file list
 //! - `commands.rs`: `/memory show`, `forget` and `delete`
+//! - `reflect.rs`: the daily reflection, where Vivy tidies her memory and updates her own notes
 
 mod commands;
 mod folder;
+mod reflect;
 mod store;
 mod tool;
 
@@ -64,6 +66,11 @@ impl Feature for Memory {
             text = format!("{notes}\n{text}");
         }
         Ok(Some(text))
+    }
+
+    async fn start(&self, ctx: &BotCtx) -> Result<()> {
+        reflect::spawn(ctx);
+        Ok(())
     }
 
     async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {
