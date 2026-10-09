@@ -3,7 +3,9 @@
 
 use chrono::Utc;
 use poise::CreateReply;
-use serenity::all::{CreateAllowedMentions, CreateAttachment};
+use serenity::all::{
+    AutocompleteChoice, CreateAllowedMentions, CreateAttachment, CreateAutocompleteResponse,
+};
 use tracing::info;
 
 use super::folder::{self, Folder, ROOT};
@@ -27,7 +29,8 @@ pub async fn memory(_ctx: Context<'_>) -> Result<()> {
 #[poise::command(slash_command, ephemeral)]
 async fn show(
     ctx: Context<'_>,
-    #[description = "A path like /memories/server/events.md, or /memories for everything"]
+    #[description = "A path like /memories/server/culture.md, or /memories for everything"]
+    #[autocomplete = "any_file"]
     path: Option<String>,
 ) -> Result<()> {
     let path = match path {
@@ -52,18 +55,32 @@ async fn show(
     Ok(())
 }
 
-/// Delete everything Vivy remembers about you here
+/// Delete one of your memory files, or everything Vivy remembers about you here
 #[poise::command(slash_command, ephemeral)]
-async fn forget(ctx: Context<'_>) -> Result<()> {
-    // In DMs the whole folder is yours; in a server, your own folder.
-    let path = if ctx.guild_id().is_some() {
-        own_folder(ctx)
-    } else {
-        ROOT.to_string()
+async fn forget(
+    ctx: Context<'_>,
+    #[description = "The file to delete (default: all of them)"]
+    #[autocomplete = "own_file"]
+    file: Option<String>,
+) -> Result<()> {
+    let path = match file {
+        Some(file) => {
+            let path = folder::clean_path(&file).map_err(user_error)?;
+            if !is_own(ctx, &path) {
+                return Err(user_error(
+                    "You can only forget your own files. Pick one from the list.",
+                ));
+            }
+            path
+        }
+        None => own_area(ctx),
     };
     let text = match remove(ctx, &path).await? {
-        0 => "There was nothing to forget.",
-        _ => "Done. Vivy has forgotten what it saved about you here.",
+        0 => "There was nothing to forget.".to_string(),
+        _ if path == own_area(ctx) => {
+            "Done. Vivy has forgotten what it saved about you here.".to_string()
+        }
+        _ => format!("Done. Vivy has forgotten {path}."),
     };
     ctx.say(text).await?;
     Ok(())
@@ -73,7 +90,9 @@ async fn forget(ctx: Context<'_>) -> Result<()> {
 #[poise::command(slash_command, ephemeral)]
 async fn delete(
     ctx: Context<'_>,
-    #[description = "A path like /memories/users/123/games.md, or a folder"] path: String,
+    #[description = "A path like /memories/users/123/games.md, or a folder"]
+    #[autocomplete = "any_file"]
+    path: String,
 ) -> Result<()> {
     if !ctx.data().is_admin(ctx.author().id) {
         return Err(user_error("Only admins can delete other memory files."));
@@ -92,6 +111,55 @@ async fn delete(
 /// `/memories/users/<your id>`
 fn own_folder(ctx: Context<'_>) -> String {
     format!("{ROOT}/users/{}", ctx.author().id)
+}
+
+/// What `/memory forget` may delete: your folder, or in DMs the whole private folder.
+fn own_area(ctx: Context<'_>) -> String {
+    if ctx.guild_id().is_some() {
+        own_folder(ctx)
+    } else {
+        ROOT.to_string()
+    }
+}
+
+fn is_own(ctx: Context<'_>, path: &str) -> bool {
+    let area = own_area(ctx);
+    path == area || path.starts_with(&format!("{area}/"))
+}
+
+/// Your own files that contain what you typed.
+async fn own_file(ctx: Context<'_>, partial: &str) -> CreateAutocompleteResponse {
+    let area = own_area(ctx);
+    suggest(ctx, partial, |path| path.starts_with(&format!("{area}/"))).await
+}
+
+/// Every file here that contains what you typed.
+async fn any_file(ctx: Context<'_>, partial: &str) -> CreateAutocompleteResponse {
+    suggest(ctx, partial, |_| true).await
+}
+
+async fn suggest(
+    ctx: Context<'_>,
+    partial: &str,
+    keep: impl Fn(&str) -> bool,
+) -> CreateAutocompleteResponse {
+    let scope = scope(ctx);
+    let files = ctx
+        .data()
+        .db
+        .call(move |conn| Ok(store::list(conn, &scope)?))
+        .await
+        .unwrap_or_default();
+    let partial = partial.to_lowercase();
+    let choices = files
+        .into_iter()
+        .map(|(path, _)| path)
+        // Discord allows 100 characters per choice.
+        .filter(|path| path.len() <= 100 && keep(path) && path.to_lowercase().contains(&partial))
+        .take(25)
+        .map(|path| AutocompleteChoice::new(path.clone(), path))
+        .collect();
+    CreateAutocompleteResponse::new().set_choices(choices)
 }
 
 fn scope(ctx: Context<'_>) -> String {

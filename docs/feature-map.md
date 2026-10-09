@@ -202,6 +202,7 @@ Each feature can contribute tools, the same way it subscribes to events, so remi
 |---|---|---|
 | `get_current_time` | Chat | Current date and time in the asker's timezone (or one the model passes) |
 | `get_channel_info` | Chat | Channel name, topic, and parent channel for threads |
+| `list_channels` | Chat | Every channel the asker can see, by category, with topics |
 | `get_user_info` | Chat | A member's display name, timezone, roles and join date |
 | `read_recent_messages` | Chat | The last N messages in the current channel, as text with author names |
 | `get_message` | Chat | One message from a Discord message link |
@@ -212,6 +213,7 @@ Each feature can contribute tools, the same way it subscribes to events, so remi
 | `list_reminders` | Reminders | The asker's pending reminders |
 | `cancel_reminder` | Reminders | Deletes one of the asker's reminders |
 | `get_wheel_status` | Movie wheel | Current round, options, bets and balances (read only) |
+| `memory` | Memory | View, create, edit, delete and rename notes under `/memories` (same commands as Anthropic's memory tool) |
 
 The tool loop: when the model asks for a tool, the bot runs it, sends the result back, and keeps streaming. The status line under the reply shows which tool is running.
 
@@ -448,11 +450,11 @@ The Go bot hashes every image and video in the main server after 3 seconds (to l
 voltgpt's memory captured every message, summarized it into notes and profiles, and pasted the matches into the instructions of every request. That bloated the prompt and broke the cache. VoltBot's memory is a folder of text files the model manages itself through one chat tool, `memory`, and nothing is pasted into the instructions.
 
 - **Compatible with Claude.** The tool's commands (`view`, `create`, `str_replace`, `insert`, `delete`, `rename`), arguments and reply texts follow Anthropic's memory tool (`memory_20250818`). On OpenAI it is a normal function tool. The Claude provider will send `{"type": "memory_20250818", "name": "memory"}` instead of the function definition and route the calls to the same code.
-- **Folders.** One `/memories` folder per server, shared by everyone in it, and a private one per person in DMs (scope `server:<id>` or `dm:<id>`). The tool suggests a folder per person, `/memories/users/<user id>/`, with `about.md` (name first) and one file per topic (`games.md`, `movies.md`), and `/memories/server/<topic>.md` for the server (Rene's idea, 2026-10-09). Small topic files let the model open only what the conversation needs. Chat's `<user>` tags carry the user ID for this.
+- **Folders.** One `/memories` folder per server, shared by everyone in it, and a private one per person in DMs (scope `server:<id>` or `dm:<id>`). The tool suggests a folder per person, `/memories/users/<user id>/`, with `about.md` (name first) and one file per topic (`games.md`, `movies.md`), and a server folder with one file per topic: `/memories/server/channels.md`, `culture.md`, and more as needed (Rene's idea, 2026-10-09). The model fills the server files from conversations, `search_messages` and `list_channels`, so it learns the environment it's in. Small topic files let the model open only what the conversation needs. Chat's `<user>` tags carry the user ID for this.
 - **Who decides.** Anyone can add notes about anyone (Rene's choice, 2026-10-09). A person's own word about themselves replaces what others said, and notes from others name who said them.
 - **Caching.** The `chat_context` hook adds `<memory_files>` after the newest question: the asker's and the server's files with sizes, and one line per other person's folder (at most 50 lines), for that request only. The instructions, tool list and earlier turns stay the same.
 - **Limits and safety.** 8 KB per file and 256 KB per folder, paths must stay under `/memories` (no `..`), each command runs in one transaction, and every change is written to `memory_changes` with who asked, the old text and the new text.
-- **Control.** `/memory show [path]` shows all of your files by default, `/memory forget` deletes your folder (in DMs, everything), and admins can `/memory delete` any file or folder.
+- **Control.** `/memory show [path]` shows all of your files by default, `/memory forget [file]` deletes one of your files (autocompleted) or your whole folder (in DMs, everything), and admins can `/memory delete` any file or folder.
 
 Tables: `memory_files (scope, path, content, updated_at, updated_by)` and `memory_changes (scope, path, at, user_id, before, after)`. `folder.rs` holds the commands as pure functions on a `BTreeMap` of paths, tested without a database.
 

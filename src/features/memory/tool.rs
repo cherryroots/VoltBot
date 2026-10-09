@@ -20,8 +20,10 @@ pub fn def() -> ToolDef {
     ToolDef {
         name: "memory",
         description: "Your long-term memory: a folder of text files under /memories that stays between conversations. In a server, everyone in that server shares it; in DMs it is private to that person. \
-Save what will help later: facts people share about themselves, their preferences, running jokes, decisions, and anything someone asks you to remember. Keep notes short and factual, update them when they change, and don't save secrets, passwords or things said in passing. \
-Layout: one folder per person, /memories/users/<user id>/, with about.md (their name first, then basics) and one file per topic, like games.md or movies.md; things about the whole server go in /memories/server/<topic>.md. View a person's folder before saving about them, and add to the topic file that fits before starting a new one. \
+Save what will help later: facts people share about themselves, their preferences, decisions, anything someone asks you to remember, and what you learn about the server itself. Keep notes short and factual, update them when they change, and don't save secrets, passwords or things said in passing. \
+People: one folder per person, /memories/users/<user id>/, with about.md (their name first, then basics) and one file per topic, like games.md or movies.md. \
+The server: one folder, /memories/server/, with one file per topic: channels.md (what each channel is for and how people use it), culture.md (in-jokes, running gags, norms, how people talk), and others as they come up, like events.md or games.md. Learn about the server as you go: when a conversation, search_messages or list_channels shows you something lasting about the server, its channels or its culture, save it there. \
+View a folder before saving into it, and add to the topic file that fits before starting a new one. \
 A person is the authority on themselves: what they say about themselves replaces what others said. When someone tells you about another person, add who said it, like \"likes horror films (per Alice)\". \
 Edit files with str_replace or insert instead of rewriting them. \
 Commands: view (a file with line numbers, or a directory), create (write a whole file), str_replace (replace text that appears once), insert (add lines after insert_line; 0 is the top), delete, rename. A file holds at most 8K.",
