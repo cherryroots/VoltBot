@@ -102,8 +102,9 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
 /// 2026-10-09T06:44:13Z  INFO chat::answer message{channel=2 message_id=3}: ran a chat tool tool="x"
 /// ```
 ///
-/// Shorter than tracing's own format: the time to the second, our modules without `voltbot::features::`, and the spans without `feature`,
-/// `guild` and `user` (see [`CompactFields`]).
+/// Shorter than tracing's own format: the time to the second, our modules without
+/// `voltbot::features::`, and the spans without `feature`, `guild` and `user` (see
+/// [`CompactFields`]).
 struct Compact;
 
 impl<S, N> FormatEvent<S, N> for Compact
