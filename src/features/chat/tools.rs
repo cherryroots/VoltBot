@@ -9,7 +9,7 @@ use chrono_tz::Tz;
 use serde_json::{Value, json};
 use serenity::all::{
     ChannelId, ChannelType, ContentSafeOptions, GetMessages, GuildChannel, GuildId, Member,
-    Message, MessageId, ScheduledEventStatus, UserId, content_safe,
+    Message, MessageId, ReactionType, ScheduledEventStatus, UserId, content_safe,
 };
 
 use super::search;
@@ -39,6 +39,11 @@ pub fn defs() -> Vec<ToolDef> {
         ToolDef {
             name: "get_channel_info",
             description: "The current channel's name, topic and type, its parent channel or category, and the server name.",
+            parameters: json!({"type": "object", "properties": {}}),
+        },
+        ToolDef {
+            name: "list_channels",
+            description: "Every channel in this server the asker can see, by category, with each channel's topic. Use it to learn what the channels are for.",
             parameters: json!({"type": "object", "properties": {}}),
         },
         ToolDef {
@@ -89,6 +94,7 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, name: &str, args: &Value) -> Resul
     match name {
         "get_current_time" => current_time(ctx, asker, text("timezone")).await,
         "get_channel_info" => channel_info(ctx, asker).await,
+        "list_channels" => list_channels(ctx, asker).await,
         "get_user_info" => user_info(ctx, asker, text("user")).await,
         "read_recent_messages" => {
             let count = args["count"].as_u64().unwrap_or(20).clamp(1, MAX_RECENT);
@@ -162,6 +168,86 @@ async fn channel_info(ctx: &BotCtx, asker: &Asker) -> Result<String> {
         lines.push(format!("Server: {}", guild.name));
     }
     Ok(lines.join("\n"))
+}
+
+/// One channel in [`list_channels`], with only what the list shows.
+struct ChannelEntry {
+    id: u64,
+    name: String,
+    kind: ChannelType,
+    topic: Option<String>,
+    parent: Option<u64>,
+    position: u16,
+}
+
+async fn list_channels(ctx: &BotCtx, asker: &Asker) -> Result<String> {
+    let Some(guild_id) = asker.guild else {
+        return Ok("A direct message conversation has no channels.".to_string());
+    };
+    let member = guild_id.member(&ctx.http, asker.user).await?;
+    let guild = ctx
+        .cache
+        .guild(guild_id)
+        .ok_or_else(|| user_error("I don't know this server yet."))?;
+    let entries: Vec<ChannelEntry> = guild
+        .channels
+        .values()
+        .filter(|c| {
+            c.kind == ChannelType::Category || guild.user_permissions_in(c, &member).view_channel()
+        })
+        .map(|c| ChannelEntry {
+            id: c.id.get(),
+            name: c.name.clone(),
+            kind: c.kind,
+            topic: c.topic.clone().filter(|t| !t.trim().is_empty()),
+            parent: c.parent_id.map(|p| p.get()),
+            position: c.position,
+        })
+        .collect();
+    Ok(format!(
+        "Server: {}\n{}",
+        guild.name,
+        render_channels(&entries, asker.channel.get())
+    ))
+}
+
+/// Channels without a category first, then each category with its channels, in Discord's
+/// order. Categories the asker sees nothing in are left out.
+fn render_channels(entries: &[ChannelEntry], here: u64) -> String {
+    let by_position = |list: &mut Vec<&ChannelEntry>| list.sort_by_key(|c| (c.position, c.id));
+    let line = |c: &ChannelEntry| {
+        let mut text = format!("#{} ({})", c.name, kind_name(c.kind));
+        if c.id == here {
+            text.push_str(" [you are here]");
+        }
+        if let Some(topic) = &c.topic {
+            text.push_str(&format!(": {}", shorten(&topic.replace('\n', " "), 200)));
+        }
+        text
+    };
+    let in_category = |parent: Option<u64>| {
+        let mut list: Vec<&ChannelEntry> = entries
+            .iter()
+            .filter(|c| c.kind != ChannelType::Category && c.parent == parent)
+            .collect();
+        by_position(&mut list);
+        list
+    };
+    let mut lines: Vec<String> = in_category(None).into_iter().map(line).collect();
+    let mut categories: Vec<&ChannelEntry> = entries
+        .iter()
+        .filter(|c| c.kind == ChannelType::Category)
+        .collect();
+    by_position(&mut categories);
+    for category in categories {
+        let channels = in_category(Some(category.id));
+        if channels.is_empty() {
+            continue;
+        }
+        lines.push(format!("Category {}:", category.name));
+        lines.extend(channels.into_iter().map(|c| format!("  {}", line(c))));
+    }
+    lines.join("\n")
 }
 
 fn kind_name(kind: ChannelType) -> &'static str {
@@ -305,7 +391,33 @@ pub(super) fn format_message(ctx: &BotCtx, msg: &Message, zone: Tz) -> String {
             line.push_str(&format!(" [embed: {}]", shorten(title, 100)));
         }
     }
+    let reactions: Vec<(String, u64)> = msg
+        .reactions
+        .iter()
+        .map(|r| {
+            let emoji = match &r.reaction_type {
+                ReactionType::Custom {
+                    name: Some(name), ..
+                } => format!(":{name}:"),
+                other => other.to_string(),
+            };
+            (emoji, r.count)
+        })
+        .collect();
+    line.push_str(&reaction_text(&reactions));
     line
+}
+
+/// " [reactions: 😂 3, :pog: 1]", or nothing without reactions.
+fn reaction_text(reactions: &[(String, u64)]) -> String {
+    if reactions.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = reactions
+        .iter()
+        .map(|(emoji, count)| format!("{emoji} {count}"))
+        .collect();
+    format!(" [reactions: {}]", list.join(", "))
 }
 
 /// The link that opens a message in Discord.
@@ -471,6 +583,50 @@ async fn server_events(ctx: &BotCtx, asker: &Asker) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reactions_after_the_message() {
+        assert_eq!(reaction_text(&[]), "");
+        let list = [("😂".to_string(), 3), (":pog:".to_string(), 1)];
+        assert_eq!(reaction_text(&list), " [reactions: 😂 3, :pog: 1]");
+    }
+
+    #[test]
+    fn channels_by_category() {
+        let entry = |id, name: &str, kind, topic: Option<&str>, parent, position| ChannelEntry {
+            id,
+            name: name.to_string(),
+            kind,
+            topic: topic.map(str::to_string),
+            parent,
+            position,
+        };
+        let entries = vec![
+            entry(1, "Voice", ChannelType::Category, None, None, 2),
+            entry(2, "Text", ChannelType::Category, None, None, 1),
+            entry(3, "Empty", ChannelType::Category, None, None, 3),
+            entry(4, "lounge", ChannelType::Voice, None, Some(1), 0),
+            entry(
+                5,
+                "memes",
+                ChannelType::Text,
+                Some("only\nmemes"),
+                Some(2),
+                1,
+            ),
+            entry(6, "general", ChannelType::Text, None, Some(2), 0),
+            entry(7, "rules", ChannelType::Text, Some("read me"), None, 0),
+        ];
+        assert_eq!(
+            render_channels(&entries, 6),
+            "#rules (text channel): read me
+Category Text:
+  #general (text channel) [you are here]
+  #memes (text channel): only memes
+Category Voice:
+  #lounge (voice channel)"
+        );
+    }
 
     #[test]
     fn message_links() {

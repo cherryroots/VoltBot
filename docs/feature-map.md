@@ -21,7 +21,7 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 | Movie wheel betting game | `gamble/`, `handler/gamble_status.go`, wheel commands, buttons, modal | **Port** |
 | Image hashing and duplicate detection (`/hash_server`) | `hasher/` | **TODO** (redesign later) |
 | Image and video generation (`/draw`, `/video`, Wavespeed) | `apis/wavespeed/` | Dropped |
-| Long-term memory (notes, profiles, vector search, digest, admin commands) | `memory/`, `memory_*` commands | Dropped (see "Future memory" below) |
+| Long-term memory (notes, profiles, vector search, digest, admin commands) | `memory/`, `memory_*` commands | Replaced by a new design (see "Memory" below) |
 
 ## Architecture
 
@@ -64,6 +64,9 @@ pub trait Feature: Send + Sync {
     async fn run_tool(&self, ctx: &BotCtx, asker: &Asker, name: &str, args: &Value) -> Result<String> {
         Err(anyhow!("unknown tool {name}"))
     }
+    // Text added after the asker's question for one answer, like memory's file list.
+    // `fresh`: the model reads the conversation from the start, not continuing an answer.
+    async fn chat_context(&self, ctx: &BotCtx, asker: &Asker, fresh: bool) -> Result<Option<String>> { Ok(None) }
 }
 ```
 
@@ -75,6 +78,7 @@ pub fn all() -> Vec<Arc<dyn Feature>> {
         Arc::new(reminders::Reminders::default()),
         Arc::new(wheel::Wheel::default()),
         Arc::new(control_panel::ControlPanel::default()),
+        Arc::new(memory::Memory),
         Arc::new(chat::Chat::default()),  // last: answers mentions nobody else claimed
     ]
 }
@@ -144,6 +148,7 @@ src/
       import.rs           # from old.db
     wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, render.rs, tools.rs, import.rs
     chat/                 # mod.rs, answer.rs, history.rs, store.rs, tools.rs, prompt.md
+    memory/               # folder.rs (pure), store.rs, tool.rs, commands.rs
 ```
 
 Plain modules in one crate. A Cargo workspace with a crate per feature would let the compiler enforce rule 1, but it adds build setup that isn't worth it yet.
@@ -155,7 +160,7 @@ Plain modules in one crate. A Cargo workspace with a crate per feature would let
 3. Add one line to `features::all()`.
 4. Add a `[features.<name>]` section to `config.toml` if it needs settings.
 
-Nothing else changes. A future skill-based memory, for example, is a feature that declares its tables and offers chat tools such as `remember` and `recall`.
+Nothing else changes. Memory, for example, is a feature that declares its tables, offers the `memory` chat tool, and adds the list of its files to each question through `chat_context`.
 
 ## Feature details
 
@@ -174,7 +179,13 @@ Progress feedback: Go adds a ⏳ reaction while the model works and swaps it for
 
 When an answer spans several messages, only the last one carries the line. This also saves two reaction API calls per message part.
 
-Events and guards: `on_mention` as the fallback for mentions no other feature claimed (bot authors are filtered out by the dispatcher); `on_reaction_add` for ❌/🔁.
+Events and guards: `on_mention` as the fallback for mentions no other feature claimed (bot authors are filtered out by the dispatcher); `on_reaction_add` for ❌/🔁; `on_message` for chiming in.
+
+Chiming in (`chat/chime.rs`, Rene's idea, 2026-10-09): after a message in a server, a roll with `chime_chance` (default 0.03) and a per-channel cooldown (`chime_cooldown_minutes`, default 60) decides whether Vivy reads along. Messages that mention her or reply to her are skipped, since they get a real answer. She reads the last 25 messages, gets the same system prompt and tools as an answer (so the cache is shared) plus her self notes and the memory file list, and answers `PASS`, `REACT <emoji>` or one short line. The instructions go in the question, not the system prompt. A posted line is stored as a question (the transcript) and an answer, so replying to it continues the conversation. The tool loop without Discord output is `ai::complete`, shared with memory's reflection. She may also ask a short question about what people are talking about when she doesn't know it (Rene, 2026-10-09), and save the answer when it comes.
+
+Follow-ups (`chat/follow_up.rs`, 2026-10-09): the `schedule_follow_up` tool (0.1 to 1440 hours, at most 5 pending per person) stores a row in `chat_follow_ups` (chat migration 2). One task sleeps until the next one is due (at most an hour; a new one wakes it), takes the due rows, and runs `chime::speak` in that channel with instructions to `PASS` if it was already discussed, otherwise to write one warm message starting with the person's mention (the only mention allowed). Each is tried once.
+
+Server emoji (`chat/emoji.rs`, Rene's design, 2026-10-09): a task waits 30 seconds after start, then once a day describes each custom emoji that has no row in `chat_emoji` yet: it downloads the picture from Discord's CDN (frames for an animated one) and asks the model for one line. So every emoji is described on the first start, and later only new ones. `list_server_emoji` returns the server's emoji codes with their descriptions.
 
 Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, and returning generated files. Those go behind a trait (see "AI providers" below). Discord streaming, message splitting, media extraction, the tool loop and the bot's own tools stay outside it so every provider reuses them.
 
@@ -198,6 +209,7 @@ Each feature can contribute tools, the same way it subscribes to events, so remi
 |---|---|---|
 | `get_current_time` | Chat | Current date and time in the asker's timezone (or one the model passes) |
 | `get_channel_info` | Chat | Channel name, topic, and parent channel for threads |
+| `list_channels` | Chat | Every channel the asker can see, by category, with topics |
 | `get_user_info` | Chat | A member's display name, timezone, roles and join date |
 | `read_recent_messages` | Chat | The last N messages in the current channel, as text with author names |
 | `get_message` | Chat | One message from a Discord message link |
@@ -207,7 +219,10 @@ Each feature can contribute tools, the same way it subscribes to events, so remi
 | `create_reminder` | Reminders | Creates a reminder; `when` is text like "in 2h" or "friday 3pm", parsed by the same parser as typed reminders, and a parse error is returned so the model can retry |
 | `list_reminders` | Reminders | The asker's pending reminders |
 | `cancel_reminder` | Reminders | Deletes one of the asker's reminders |
+| `list_server_emoji` | Chat | The server's custom emoji, with a description of each picture |
+| `schedule_follow_up` | Chat | Plans a check-in with someone after something they mentioned |
 | `get_wheel_status` | Movie wheel | Current round, options, bets and balances (read only) |
+| `memory` | Memory | View, create, edit, delete and rename notes under `/memories` (same commands as Anthropic's memory tool) |
 
 The tool loop: when the model asks for a tool, the bot runs it, sends the result back, and keeps streaming. The status line under the reply shows which tool is running.
 
@@ -417,6 +432,7 @@ Crates: `sysinfo` (memory use) and a small `build.rs` (git commit in the binary)
 | 2 | Shared helpers: message splitting, sending and editing, media extraction, downloads | Chat needs them and they are easy to test on their own |
 | 3 | AI chat behind the provider trait, OpenAI implementation, tool loop and chat tools, reaction controls | The main feature; builds on stages 1 and 2, and reminder tools reuse the stage 1 parser |
 | 4 | Movie wheel (ledger, tables, import), plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
+| 5 | Memory: a folder of notes per server (and per person in DMs) behind a `memory` tool that matches Anthropic's memory tool | Asked for after stage 4; built on chat's tools |
 | Later | Claude provider (Messages API over `reqwest`), then Gemini | When credits arrive |
 | Later | Image hashing redesign | TODO |
 
@@ -432,16 +448,27 @@ Each feature owns its import function (`reminders::import_legacy`, `wheel::impor
 | `game_state` | Imported as the first, still active season of the wheel tables: options, rounds, winners, claims and bets, with user objects reduced to IDs. The Go game has no guild, so it goes to the server in `main_server` in `config.toml`. A test checks that the imported season shows the same balances as the Go bot. |
 | `response_ids` | Skipped. They hold only OpenAI response IDs with no message text, and OpenAI drops stored responses after 30 days, so they would rarely still work. Replying to an old bot message starts a fresh conversation that includes the replied-to message. |
 | `image_hashes` | Skipped for now; kept in `old.db.imported` for when hashing returns. |
-| `users`, memory tables (`guild_user_profiles`, `interaction_notes`, `note_participants`, `channel_buffers`, `memory_job_runs`, `vec_notes`) | Skipped; memory is dropped. |
+| `users`, memory tables (`guild_user_profiles`, `interaction_notes`, `note_participants`, `channel_buffers`, `memory_job_runs`, `vec_notes`) | Skipped; the new memory starts empty. |
 
 ## TODO: image hashing
 
 The Go bot hashes every image and video in the main server after 3 seconds (to let embeds load), stores perceptual hashes, and replies when a near-duplicate is posted. `/hash_server` back-fills a whole server. Revisit once the design is decided; the `img_hash` or `image_hasher` crates are the Rust equivalents of `goimagehash`.
 
-## Future memory
+## Memory
 
-Not ported. If it comes back, the idea is skill-based: per-user folders or tables that the model queries through a tool when it needs them, so nothing is injected into every prompt and the cache hit rate stays high.
+voltgpt's memory captured every message, summarized it into notes and profiles, and pasted the matches into the instructions of every request. That bloated the prompt and broke the cache. VoltBot's memory is a folder of text files the model manages itself through one chat tool, `memory`, and nothing is pasted into the instructions.
+
+- **Compatible with Claude.** The tool's commands (`view`, `create`, `str_replace`, `insert`, `delete`, `rename`), arguments and reply texts follow Anthropic's memory tool (`memory_20250818`). On OpenAI it is a normal function tool. The Claude provider will send `{"type": "memory_20250818", "name": "memory"}` instead of the function definition and route the calls to the same code.
+- **Folders.** One `/memories` folder per server, shared by everyone in it, and a private one per person in DMs (scope `server:<id>` or `dm:<id>`). The tool suggests a folder per person, `/memories/users/<user id>/`, with `about.md` (name first) and one file per topic (`games.md`, `movies.md`), and a server folder with one file per topic: `/memories/server/channels.md`, `culture.md`, and more as needed (Rene's idea, 2026-10-09). The model fills the server files from conversations, `search_messages` and `list_channels`, so it learns the environment it's in. `/memories/vivy/` holds Vivy's notes about herself in that server (`personality.md`, `interests.md`, under 2K together), so each server grows its own Vivy; the system prompt tells her to be the Vivy those notes describe (Rene's idea, 2026-10-09). Small topic files let the model open only what the conversation needs. Chat's `<user>` tags carry the user ID for this.
+- **Who decides.** Anyone can add notes about anyone (Rene's choice, 2026-10-09). A person's own word about themselves replaces what others said, and notes from others name who said them.
+- **Caching.** The `chat_context` hook adds `<vivy_self>` (her own notes, at most 3000 characters, only when a conversation starts fresh, since a continued one still has them) and `<memory_files>` after the newest question: the asker's and the server's files with sizes, and one line per other person's folder (at most 50 lines), for that request only. The instructions, tool list and earlier turns stay the same.
+- **Limits and safety.** 8 KB per file and 256 KB per folder, paths must stay under `/memories` (no `..`), each command runs in one transaction, and every change is written to `memory_changes` with who asked, the old text and the new text.
+- **Daily reflection** (`memory/reflect.rs`). An hourly check finds server folders that changed since their last reflection, at most once a day each (`memory_reflections`, migration 2). Vivy gets the folder listing, her self notes and the list of changed files, with only the memory tool and its own small system prompt, and tidies the folder and updates `/memories/vivy/`. Her changes are logged under the bot's user ID. DMs don't reflect. She also rewrites `/memories/vivy/mood.md` (`mood:` and `status:` lines); its `status:` line becomes her Discord custom status (at most 128 characters). Presence is the same in every server, so the server that reflected last sets it, and on start the newest `mood.md` is used.
+- **Weekly diary** (`memory/diary.rs`, 2026-10-09). The same hourly loop posts a diary entry in each channel of `diary_channels` (`[features.memory]`) once a week (`memory_diaries`, migration 3). She gets her self notes, the folder listing and the text of the files changed that week (at most 12K characters), may edit her own notes, and writes a short first-person entry, posted with no pings. A week where nothing changed has no entry.
+- **Control.** `/memory show [path]` shows all of your files by default, `/memory forget [file]` deletes one of your files (autocompleted) or your whole folder (in DMs, everything), and admins can `/memory delete` any file or folder.
+
+Tables: `memory_files (scope, path, content, updated_at, updated_by)` and `memory_changes (scope, path, at, user_id, before, after)`. `folder.rs` holds the commands as pure functions on a `BTreeMap` of paths, tested without a database.
 
 ## Go code that is not needed
 
-Everything under `memory/`, `apis/wavespeed/`, `hasher/` (for now), `handler/memory_digest.go`, the `memory_*`, `draw`, `video` and `hash_server` commands, the `users` table, and the memory tables in `db/db.go`.
+Everything under `memory/` (replaced by the new design), `apis/wavespeed/`, `hasher/` (for now), `handler/memory_digest.go`, the `memory_*`, `draw`, `video` and `hash_server` commands, the `users` table, and the memory tables in `db/db.go`.

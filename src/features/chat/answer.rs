@@ -27,7 +27,7 @@ use crate::util::split::{DISCORD_LIMIT, split_message};
 use super::store::Written;
 
 /// The fixed instructions. Static, so every request starts the same and hits the cache.
-const SYSTEM_PROMPT: &str = include_str!("prompt.md");
+pub(super) const SYSTEM_PROMPT: &str = include_str!("prompt.md");
 /// Room kept in the last message for the status line.
 const STATUS_ROOM: usize = 100;
 /// Most rounds of tool calls in one answer, so a confused model can't loop forever.
@@ -274,7 +274,7 @@ async fn stream_answer(
 }
 
 /// The tools of every feature enabled where the asker is, and which feature owns each.
-fn tools_for(
+pub(super) fn tools_for(
     ctx: &BotCtx,
     asker: &Asker,
 ) -> (Vec<ToolDef>, HashMap<&'static str, Arc<dyn Feature>>) {
@@ -292,8 +292,28 @@ fn tools_for(
     (tools, owners)
 }
 
+/// What the features enabled where the asker is add to the question (see
+/// [`Feature::chat_context`]). A feature that fails is left out.
+pub async fn context_for(ctx: &BotCtx, asker: &Asker, fresh: bool) -> Vec<String> {
+    let mut texts = Vec::new();
+    for feature in ctx.features.iter() {
+        if !ctx.gate(feature.name()).allows(asker.guild, asker.channel) {
+            continue;
+        }
+        match feature.chat_context(ctx, asker, fresh).await {
+            Ok(Some(text)) => texts.push(text),
+            Ok(None) => {}
+            Err(err) => warn!(
+                feature = feature.name(),
+                "couldn't add chat context: {err:#}"
+            ),
+        }
+    }
+    texts
+}
+
 /// Runs one tool call. Whatever happens, the model gets text back: the result or the error.
-async fn run_tool(
+pub(super) async fn run_tool(
     ctx: &BotCtx,
     asker: &Asker,
     owners: &HashMap<&'static str, Arc<dyn Feature>>,

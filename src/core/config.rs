@@ -95,6 +95,14 @@ impl Default for Gate {
 }
 
 impl Gate {
+    /// Whether the feature may run in this server at all, for work that isn't tied to a
+    /// channel, like a daily task.
+    pub fn allows_guild(&self, guild: GuildId) -> bool {
+        self.enabled
+            && (self.guilds.is_empty() || self.guilds.contains(&guild.get()))
+            && !self.deny_guilds.contains(&guild.get())
+    }
+
     /// Whether the feature may handle an event from this server (`None` in DMs) and channel.
     pub fn allows(&self, guild: Option<GuildId>, channel: ChannelId) -> bool {
         let guild = guild.map(|g| g.get());

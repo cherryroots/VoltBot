@@ -5,6 +5,7 @@
 //! arrives as a stream of [`ChatEvent`]s. Discord, message splitting, the tool loop and the
 //! bot's own tools live outside, so every provider reuses them.
 
+mod complete;
 pub mod openai;
 mod sse;
 
@@ -16,6 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::util::media::ModelImage;
 
+pub use complete::{ToolRunner, complete};
 pub use openai::{OpenAi, OpenAiConfig};
 
 /// Who said something.

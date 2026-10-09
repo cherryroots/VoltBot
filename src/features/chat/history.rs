@@ -69,8 +69,9 @@ pub async fn read_message(
         text
     } else {
         format!(
-            "<user name=\"{}\">{}{}{}</user>",
+            "<user name=\"{}\" id=\"{}\">{}{}{}</user>",
             author_name(msg),
+            msg.author.id,
             attachment_text(&ctx.web, msg).await,
             embed_text(msg),
             text.trim()
