@@ -12,14 +12,15 @@
 //! }
 //! ```
 //!
-//! Users are whole Discord user objects; only their IDs are kept. voltgpt has one game for
+//! Users are whole Discord user objects; only their IDs are kept. Go writes an empty list as
+//! `null`, so every field reads `null` as empty. voltgpt has one game for
 //! the whole bot, so it goes to `main_server` from config.toml. It becomes that server's
 //! active season, or an ended one if the server already has a game.
 
 use anyhow::Context as _;
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Transaction};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use tracing::warn;
 
 use super::ledger::Bet;
@@ -38,16 +39,30 @@ pub fn import(old: &Connection, new: &Transaction, config: &Config) -> anyhow::R
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct OldGame {
+    #[serde(deserialize_with = "or_empty")]
     rounds: Vec<OldRound>,
+    #[serde(deserialize_with = "or_empty")]
     bet_options: Vec<OldPlayer>,
 }
 
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct OldRound {
+    #[serde(deserialize_with = "or_empty")]
     winner: OldPlayer,
+    #[serde(deserialize_with = "or_empty")]
     claims: Vec<OldPlayer>,
+    #[serde(deserialize_with = "or_empty")]
     bets: Vec<OldBet>,
+}
+
+/// Reads `null` as the empty value.
+fn or_empty<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Deserialize, Default)]
@@ -64,7 +79,9 @@ struct OldUser {
 #[derive(Deserialize)]
 struct OldBet {
     amount: i64,
+    #[serde(default, deserialize_with = "or_empty")]
     by: OldPlayer,
+    #[serde(default, deserialize_with = "or_empty")]
     on: OldPlayer,
 }
 
@@ -211,6 +228,33 @@ mod tests {
         let config = Config::parse("main_server = 5").unwrap();
         assert_eq!(import(&old, &tx, &config).unwrap(), 2);
         assert!(store::active_season(&tx, GUILD).unwrap().is_some());
+    }
+
+    /// Go writes empty lists as `null`.
+    #[test]
+    fn nulls_are_empty() {
+        let old = old_db(&format!(
+            r#"{{
+                "rounds": [
+                    {{"id": 0, "winner": {b}, "claims": null, "bets": null}},
+                    {{"id": 1, "winner": null, "claims": [{a}], "bets": null}}
+                ],
+                "bet_options": [{a}, {b}],
+                "players": null
+            }}"#,
+            a = user(1),
+            b = user(2)
+        ));
+        let mut new = test_connection("wheel", store::MIGRATIONS);
+        let tx = new.transaction().unwrap();
+        assert_eq!(import_into(&old, &tx, GUILD, 100).unwrap(), 2);
+        let season = store::active_season(&tx, GUILD).unwrap().unwrap();
+        let season = store::load_season(&tx, season).unwrap();
+        assert_eq!(season.rounds[0].winner, Some(2));
+        assert_eq!(season.rounds[1].claims, [1]);
+
+        let old = old_db(r#"{"rounds": null, "bet_options": null, "players": null}"#);
+        assert_eq!(import_into(&old, &tx, GUILD + 1, 100).unwrap(), 0);
     }
 
     #[test]
