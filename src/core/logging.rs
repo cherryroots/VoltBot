@@ -30,6 +30,8 @@ use tracing_subscriber::layer::{Context, SubscriberExt as _};
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Layer, filter};
 
+use tracing_log::AsLog as _;
+
 use super::config::LoggingConfig;
 
 /// A log line on its way to the Discord log channel.
@@ -77,11 +79,8 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
         .with(stdout.with_filter(env_filter))
         .with(discord);
     tracing::subscriber::set_global_default(subscriber)?;
-    // Lines from crates that use `log` instead of `tracing`. usvg warns about every name
-    // with a character no font has, which isn't worth a log line.
-    tracing_log::LogTracer::builder()
-        .ignore_crate("usvg")
-        .init()?;
+    log::set_boxed_logger(Box::new(LogBridge::default()))?;
+    log::set_max_level(tracing::level_filters::LevelFilter::current().as_log());
 
     // Log panics like errors, with the span they happened in.
     std::panic::set_hook(Box::new(|info| {
@@ -94,6 +93,37 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
     }));
 
     Ok(receiver)
+}
+
+/// Passes lines from crates that use `log` instead of `tracing` on to `tracing`. usvg, which
+/// draws the wheel picture, says which characters no font has on every picture; that's
+/// worth knowing (it says which font to install), but only once per character. Its other
+/// lines, like "Fallback from Inter to DejaVu Sans", are left out.
+#[derive(Default)]
+struct LogBridge {
+    seen: std::sync::Mutex<std::collections::HashSet<String>>,
+}
+
+impl log::Log for LogBridge {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::max_level()
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if record.target().starts_with("usvg") {
+            let text = record.args().to_string();
+            if !text.starts_with("No fonts with") {
+                return;
+            }
+            let mut seen = self.seen.lock().expect("log bridge poisoned");
+            if !seen.insert(text) {
+                return;
+            }
+        }
+        let _ = tracing_log::format_trace(record);
+    }
+
+    fn flush(&self) {}
 }
 
 // ---------------------------------------------------------------------------------------
@@ -480,6 +510,26 @@ fn truncate(text: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usvg_lines_once_per_character() {
+        use log::Log as _;
+        let bridge = LogBridge::default();
+        let line = |text: std::fmt::Arguments| {
+            bridge.log(
+                &log::Record::builder()
+                    .target("usvg::text::layout")
+                    .level(log::Level::Warn)
+                    .args(text)
+                    .build(),
+            )
+        };
+        line(format_args!("No fonts with a 𝗓/U+1D5D3 character were found."));
+        line(format_args!("No fonts with a 𝗓/U+1D5D3 character were found."));
+        line(format_args!("Fallback from Inter to DejaVu Sans."));
+        line(format_args!("No fonts with a ᰁ/U+10C01 character were found."));
+        assert_eq!(bridge.seen.lock().unwrap().len(), 2);
+    }
 
     /// A writer that keeps what the formatter wrote, for the test below.
     #[derive(Clone, Default)]

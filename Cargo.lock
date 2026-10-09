@@ -3060,6 +3060,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "dotenvy",
+ "log",
  "poise",
  "reqwest",
  "resvg",
