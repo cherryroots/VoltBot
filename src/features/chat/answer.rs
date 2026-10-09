@@ -292,6 +292,26 @@ fn tools_for(
     (tools, owners)
 }
 
+/// What the features enabled where the asker is add to the question (see
+/// [`Feature::chat_context`]). A feature that fails is left out.
+pub async fn context_for(ctx: &BotCtx, asker: &Asker) -> Vec<String> {
+    let mut texts = Vec::new();
+    for feature in ctx.features.iter() {
+        if !ctx.gate(feature.name()).allows(asker.guild, asker.channel) {
+            continue;
+        }
+        match feature.chat_context(ctx, asker).await {
+            Ok(Some(text)) => texts.push(text),
+            Ok(None) => {}
+            Err(err) => warn!(
+                feature = feature.name(),
+                "couldn't add chat context: {err:#}"
+            ),
+        }
+    }
+    texts
+}
+
 /// Runs one tool call. Whatever happens, the model gets text back: the result or the error.
 async fn run_tool(
     ctx: &BotCtx,

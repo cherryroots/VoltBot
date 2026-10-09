@@ -29,7 +29,7 @@ use tracing::{error, info, warn};
 
 use self::answer::{End, Job};
 use self::store::{NewTurn, StoredPart};
-use crate::ai::{ChatProvider, Role, ToolDef};
+use crate::ai::{ChatProvider, Input, Part, Role, ToolDef};
 use crate::core::{Asker, BotCtx, Feature, Result, user_error};
 use crate::util::reply::LiveReply;
 
@@ -164,7 +164,8 @@ impl Chat {
             .db
             .call(move |conn| store::chain(conn, question_id, history::MAX_TURNS))
             .await?;
-        let input = history::build_input(ctx, provider, &chain).await;
+        let mut input = history::build_input(ctx, provider, &chain).await;
+        add_context(&mut input, answer::context_for(ctx, &asker).await);
 
         let cancel = CancellationToken::new();
         let message_ids = Arc::new(Mutex::new(Vec::new()));
@@ -271,6 +272,18 @@ impl Chat {
         }
         info!("answer deleted with ❌");
         Ok(())
+    }
+}
+
+/// Adds the features' context to the question, the last turn of the input. It isn't
+/// stored, so later requests only carry the newest context.
+fn add_context(input: &mut Input, texts: Vec<String>) {
+    let turns = match input {
+        Input::Full(turns) => turns,
+        Input::After { new, .. } => new,
+    };
+    if let Some(question) = turns.last_mut() {
+        question.parts.extend(texts.into_iter().map(Part::Text));
     }
 }
 

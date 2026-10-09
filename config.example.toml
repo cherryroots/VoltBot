@@ -48,6 +48,10 @@ enabled = true
 # The movie wheel betting game. Admin actions use `admins` above.
 # guilds = [122962330165313536]
 
+[features.memory]
+# Notes Vivy keeps between conversations, through chat's `memory` tool and /memory.
+enabled = true
+
 [features.control_panel]
 # Channel with the status message the bot keeps up to date.
 # status_channel = 123456789012345678

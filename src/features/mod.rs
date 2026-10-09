@@ -5,6 +5,7 @@
 
 mod chat;
 mod control_panel;
+mod memory;
 mod reminders;
 mod wheel;
 
@@ -17,6 +18,7 @@ pub fn all() -> Vec<Arc<dyn Feature>> {
         Arc::new(reminders::Reminders::default()),
         Arc::new(wheel::Wheel),
         Arc::new(control_panel::ControlPanel),
+        Arc::new(memory::Memory),
         Arc::new(chat::Chat::default()),
     ]
 }

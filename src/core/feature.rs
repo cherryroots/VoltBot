@@ -63,6 +63,13 @@ pub trait Feature: Send + Sync + 'static {
         anyhow::bail!("{} has no tool named {name}", self.name())
     }
 
+    /// Text chat adds to the asker's question, for this answer only: what the model should
+    /// know right now without calling a tool, like the names of the memory files. It goes
+    /// after the question, so the system prompt and earlier turns stay the same and cached.
+    async fn chat_context(&self, _ctx: &BotCtx, _asker: &Asker) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Numbers for the control panel's status message.
     async fn stats(&self, _ctx: &BotCtx) -> Result<Vec<Stat>> {
         Ok(Vec::new())
