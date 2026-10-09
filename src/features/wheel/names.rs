@@ -4,6 +4,8 @@
 //! interaction waits. So names are kept: a name older than a few minutes is still shown,
 //! and refreshed in the background for next time. [`warm`] looks up the players of every
 //! game when the bot starts.
+//!
+//! A name a player chose with the Change Name button wins over their Discord name.
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -11,7 +13,9 @@ use std::time::{Duration, Instant};
 
 use serenity::all::{GuildId, UserId};
 use tokio::task::JoinSet;
+use tracing::warn;
 
+use super::store;
 use super::ui::Names;
 use crate::core::BotCtx;
 
@@ -24,15 +28,27 @@ type Known = HashMap<(GuildId, u64), (String, Instant)>;
 /// Names looked up so far.
 static KNOWN: LazyLock<Mutex<Known>> = LazyLock::new(Default::default);
 
-/// The server nickname (or global name, or username) of each user. Only users never seen
-/// before are waited for.
+/// The name each user chose for the wheel, or else their server nickname (or global name,
+/// or username). Only users never seen before are waited for.
 pub async fn lookup(ctx: &BotCtx, guild: GuildId, users: &[u64]) -> Names {
+    let chosen = ctx
+        .db
+        .call(move |conn| Ok(store::chosen_names(conn, guild.get())?))
+        .await
+        .unwrap_or_else(|e| {
+            warn!("couldn't read the chosen names: {e:#}");
+            Names::new()
+        });
     let mut names = Names::new();
     let mut missing = Vec::new();
     let mut stale = Vec::new();
     {
         let known = KNOWN.lock().expect("name cache poisoned");
         for &user in users {
+            if let Some(name) = chosen.get(&user) {
+                names.insert(user, name.clone());
+                continue;
+            }
             match known.get(&(guild, user)) {
                 Some((name, at)) => {
                     names.insert(user, name.clone());

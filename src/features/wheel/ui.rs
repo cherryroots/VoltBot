@@ -106,6 +106,15 @@ pub enum Action {
     Help {
         season: i64,
     },
+    /// Opens the modal to change your name on the wheel. `round` is the round the status
+    /// message shows, to redraw it after.
+    Rename {
+        round: i64,
+    },
+    /// The name modal.
+    Name {
+        round: i64,
+    },
 }
 
 impl Action {
@@ -134,6 +143,8 @@ impl Action {
             }
             Action::Reset { keep_options } => format!("wheel:reset:{}", u8::from(*keep_options)),
             Action::Help { season } => format!("wheel:help:{season}"),
+            Action::Rename { round } => format!("wheel:rename:{round}"),
+            Action::Name { round } => format!("wheel:name:{round}"),
         }
     }
 
@@ -185,6 +196,12 @@ impl Action {
             ["help", season] => Action::Help {
                 season: season.parse().ok()?,
             },
+            ["rename", round] => Action::Rename {
+                round: round.parse().ok()?,
+            },
+            ["name", round] => Action::Name {
+                round: round.parse().ok()?,
+            },
             _ => return None,
         })
     }
@@ -233,14 +250,6 @@ pub fn status_buttons(view: &View) -> Vec<CreateActionRow> {
             .emoji(emoji)
             .style(style)
     };
-    let help = button(
-        Action::Help {
-            season: view.season.id,
-        },
-        "Help",
-        '❓',
-        ButtonStyle::Secondary,
-    );
     let buttons = if view.is_latest() {
         vec![
             button(
@@ -267,7 +276,6 @@ pub fn status_buttons(view: &View) -> Vec<CreateActionRow> {
                 '✨',
                 ButtonStyle::Success,
             ),
-            help,
         ]
     } else {
         let mut buttons = vec![button(
@@ -284,10 +292,29 @@ pub fn status_buttons(view: &View) -> Vec<CreateActionRow> {
                 ButtonStyle::Danger,
             ));
         }
-        buttons.push(help);
         buttons
     };
-    vec![CreateActionRow::Buttons(buttons)]
+    // Discord allows 5 buttons in a row.
+    let more = vec![
+        button(
+            Action::Rename { round },
+            "Change Name",
+            '🏷',
+            ButtonStyle::Secondary,
+        ),
+        button(
+            Action::Help {
+                season: view.season.id,
+            },
+            "Help",
+            '❓',
+            ButtonStyle::Secondary,
+        ),
+    ];
+    vec![
+        CreateActionRow::Buttons(buttons),
+        CreateActionRow::Buttons(more),
+    ]
 }
 
 /// The menu after Place Bet, Remove Bet or Set Winner. `users` are the choices; Discord
@@ -445,6 +472,40 @@ pub fn amount_modal(
         .components(vec![CreateActionRow::InputText(input)])
 }
 
+/// The longest name a player can choose, in characters.
+pub const MAX_CHOSEN_NAME: usize = 32;
+
+/// The modal to change your name on the wheel. `current` is the name you chose before.
+pub fn name_modal(round: i64, current: Option<&str>) -> CreateModal {
+    let mut input = CreateInputText::new(InputTextStyle::Short, "Name on the wheel", "name")
+        .placeholder("Leave empty to use your Discord name")
+        .max_length(MAX_CHOSEN_NAME as u16)
+        .required(false);
+    if let Some(current) = current {
+        input = input.value(current);
+    }
+    CreateModal::new(Action::Name { round }.custom_id(), "Change your name")
+        .components(vec![CreateActionRow::InputText(input)])
+}
+
+/// Checks a name typed in the name modal. `None` means back to the Discord name.
+pub fn clean_name(input: &str) -> Result<Option<String>, String> {
+    let name = input.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return Ok(None);
+    }
+    if name.chars().count() > MAX_CHOSEN_NAME {
+        return Err(format!(
+            "That name is too long: {MAX_CHOSEN_NAME} characters at most."
+        ));
+    }
+    // Names are also used in messages, where these would make mentions or code.
+    if name.contains(['@', '<', '>', '`']) || name.chars().any(char::is_control) {
+        return Err("Names can't contain @, <, > or `.".to_string());
+    }
+    Ok(Some(name))
+}
+
 /// What the Help button says: how to play, under the season's rules.
 pub fn help_text(rules: Rules) -> String {
     let payouts = match rules {
@@ -471,6 +532,7 @@ pub fn help_text(rules: Rules) -> String {
 - **Place Bet!** on the options you think will win: pick an option, then a share of your money, or type an amount like `50` under Other amount. The bet slip shows what the option pays right now. You can bet on up to half of the options left.{cap} Betting on the same option again changes that bet, and **Remove Bet!** takes it back while the round is open.
 - **Bet at least {TAX_THRESHOLD}%** of your money every round. Otherwise you lose 3% of your money for every missing percentage point when the round ends, up to 30%.{tax}
 {payouts}
+- **Change Name** sets the name the wheel shows for you; leave it empty to go back to your Discord name.
 - An option leaves the wheel once it has won. Admins add options with `/wheel_add` and start a new season with `/reset_wheel`."
     )
 }
@@ -549,15 +611,25 @@ mod tests {
         };
         assert_eq!(
             labels(&season, 0, true),
-            ["View Current Round", "Undo Winner", "Help"]
+            ["View Current Round", "Undo Winner", "Change Name", "Help"]
         );
         assert_eq!(
             labels(&season, 1, true),
-            ["Claim!", "Place Bet!", "Remove Bet!", "Set Winner!", "Help"]
+            [
+                "Claim!",
+                "Place Bet!",
+                "Remove Bet!",
+                "Set Winner!",
+                "Change Name",
+                "Help"
+            ]
         );
         assert!(labels(&season, 0, false).is_empty());
         season.rounds[1].bets.push(bet(1, 1, 10));
-        assert_eq!(labels(&season, 0, true), ["View Current Round", "Help"]);
+        assert_eq!(
+            labels(&season, 0, true),
+            ["View Current Round", "Change Name", "Help"]
+        );
     }
 
     #[test]
@@ -593,6 +665,8 @@ mod tests {
                 keep_options: false,
             },
             Action::Help { season: 4 },
+            Action::Rename { round: 3 },
+            Action::Name { round: 3 },
             Action::Stake {
                 round: 3,
                 on: u64::MAX,
@@ -677,5 +751,19 @@ mod tests {
             text.contains("a bet here would take the whole pot of 100"),
             "{text}"
         );
+    }
+
+    #[test]
+    fn chosen_names_are_checked() {
+        assert_eq!(
+            clean_name("  Movie   Buff "),
+            Ok(Some("Movie Buff".to_string()))
+        );
+        assert_eq!(clean_name("   "), Ok(None));
+        assert_eq!(clean_name("🎬 Ünïcødé"), Ok(Some("🎬 Ünïcødé".to_string())));
+        assert!(clean_name(&"x".repeat(MAX_CHOSEN_NAME + 1)).is_err());
+        assert!(clean_name(&"é".repeat(MAX_CHOSEN_NAME)).is_ok());
+        assert!(clean_name("@everyone").is_err());
+        assert!(clean_name("<@123>").is_err());
     }
 }

@@ -4,6 +4,8 @@
 //! Balances are never stored. [`load_season`] reads a season into the plain structs of
 //! [`super::ledger`], which computes the money.
 
+use std::collections::HashMap;
+
 use rusqlite::{Connection, OptionalExtension, params};
 
 use super::ledger::{Bet, Round, Rules, Season};
@@ -46,6 +48,13 @@ pub const MIGRATIONS: &[&str] = &[
     );",
     // 2: how a season pays out. Seasons from before pool betting keep voltgpt's rules.
     "ALTER TABLE wheel_seasons ADD COLUMN rules TEXT NOT NULL DEFAULT 'classic';",
+    // 3: names players chose for the wheel, shown instead of their Discord name.
+    "CREATE TABLE wheel_names (
+        guild_id INTEGER NOT NULL,
+        user_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        PRIMARY KEY (guild_id, user_id)
+    );",
 ];
 
 /// A season's row, without its rounds.
@@ -247,6 +256,34 @@ pub fn place_bet(conn: &Connection, round: i64, bet: &Bet) -> rusqlite::Result<(
     Ok(())
 }
 
+/// Sets the name a player chose for the wheel; `None` goes back to their Discord name.
+pub fn set_name(
+    conn: &Connection,
+    guild: u64,
+    user: u64,
+    name: Option<&str>,
+) -> rusqlite::Result<()> {
+    match name {
+        Some(name) => conn.execute(
+            "INSERT INTO wheel_names (guild_id, user_id, name) VALUES (?1, ?2, ?3)
+             ON CONFLICT (guild_id, user_id) DO UPDATE SET name = excluded.name",
+            params![guild, user, name],
+        )?,
+        None => conn.execute(
+            "DELETE FROM wheel_names WHERE guild_id = ?1 AND user_id = ?2",
+            params![guild, user],
+        )?,
+    };
+    Ok(())
+}
+
+/// The names players of the server chose, by user.
+pub fn chosen_names(conn: &Connection, guild: u64) -> rusqlite::Result<HashMap<u64, String>> {
+    let mut stmt = conn.prepare("SELECT user_id, name FROM wheel_names WHERE guild_id = ?1")?;
+    stmt.query_map([guild], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect()
+}
+
 /// Returns false if there was no such bet.
 pub fn remove_bet(conn: &Connection, round: i64, by: u64, on: u64) -> rusqlite::Result<bool> {
     let removed = conn.execute(
@@ -332,6 +369,18 @@ mod tests {
         assert_eq!(loaded.rules, Rules::Pool);
         set_rules(&conn, season, Rules::Classic).unwrap();
         assert_eq!(load_season(&conn, season).unwrap().rules, Rules::Classic);
+    }
+
+    #[test]
+    fn chosen_names_per_server() {
+        let conn = db();
+        set_name(&conn, GUILD, 1, Some("Old")).unwrap();
+        set_name(&conn, GUILD, 1, Some("Captain")).unwrap();
+        set_name(&conn, GUILD + 1, 2, Some("Elsewhere")).unwrap();
+        let names = chosen_names(&conn, GUILD).unwrap();
+        assert_eq!(names, HashMap::from([(1, "Captain".to_string())]));
+        set_name(&conn, GUILD, 1, None).unwrap();
+        assert!(chosen_names(&conn, GUILD).unwrap().is_empty());
     }
 
     #[test]

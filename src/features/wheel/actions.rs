@@ -142,6 +142,7 @@ pub async fn on_component(ctx: &BotCtx, i: &ComponentInteraction, action: &str) 
         }) => picked(ctx, i, guild, kind, round, MessageId::new(message)).await,
         Some(Action::Reset { keep_options }) => reset(ctx, i, guild, keep_options).await,
         Some(Action::Help { season }) => help(ctx, i, guild, season).await,
+        Some(Action::Rename { round }) => rename(ctx, i, guild, round).await,
         Some(Action::Stake {
             round,
             on,
@@ -151,15 +152,32 @@ pub async fn on_component(ctx: &BotCtx, i: &ComponentInteraction, action: &str) 
         Some(Action::Other { round, on, message }) => {
             other_amount(ctx, i, guild, round, on, message).await
         }
-        Some(Action::Amount { .. }) | None => bail!("unknown action {action:?}"),
+        Some(Action::Amount { .. } | Action::Name { .. }) | None => {
+            bail!("unknown action {action:?}")
+        }
     }
 }
 
 pub async fn on_modal(ctx: &BotCtx, i: &ModalInteraction, action: &str) -> Result<()> {
-    let Some(Action::Amount { round, on, message }) = Action::parse(action) else {
-        bail!("unknown modal {action:?}");
-    };
     let guild = i.guild_id.ok_or_else(|| user_error(SERVER_ONLY))?;
+    match Action::parse(action) {
+        Some(Action::Amount { round, on, message }) => {
+            amount_entered(ctx, i, guild, round, on, message).await
+        }
+        Some(Action::Name { round }) => name_entered(ctx, i, guild, round).await,
+        _ => bail!("unknown modal {action:?}"),
+    }
+}
+
+/// The amount modal of a bet slip was sent.
+async fn amount_entered(
+    ctx: &BotCtx,
+    i: &ModalInteraction,
+    guild: GuildId,
+    round: i64,
+    on: u64,
+    message: u64,
+) -> Result<()> {
     let input = modal_value(i).unwrap_or_default();
     let (game, amount) = place_bet(ctx, guild, round, i.user.id.get(), on, input).await?;
     // The modal came from a bet slip, which is updated in place.
@@ -549,6 +567,59 @@ async fn help(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId, season: i6
         .ephemeral(true);
     i.create_response(&ctx.http, CreateInteractionResponse::Message(response))
         .await?;
+    Ok(())
+}
+
+/// "Change Name": the modal to type a name.
+async fn rename(ctx: &BotCtx, i: &ComponentInteraction, guild: GuildId, round: i64) -> Result<()> {
+    let user = i.user.id.get();
+    let current = ctx
+        .db
+        .call(move |conn| Ok(store::chosen_names(conn, guild.get())?.remove(&user)))
+        .await?;
+    let modal = ui::name_modal(round, current.as_deref());
+    i.create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+        .await?;
+    Ok(())
+}
+
+/// The name modal was sent: saves the name and redraws the status message it came from.
+async fn name_entered(
+    ctx: &BotCtx,
+    i: &ModalInteraction,
+    guild: GuildId,
+    round: i64,
+) -> Result<()> {
+    let input = modal_value(i).unwrap_or_default();
+    let name = ui::clean_name(&input).map_err(user_error)?;
+    let user = i.user.id.get();
+    let saved = name.clone();
+    let game = ctx
+        .db
+        .call(move |conn| {
+            store::set_name(conn, guild.get(), user, saved.as_deref())?;
+            Ok(active_game(conn, guild.get()).ok())
+        })
+        .await?;
+    info!("changed a wheel name");
+
+    let text = match &name {
+        Some(name) => format!("The wheel now calls you **{name}**."),
+        None => "The wheel shows your Discord name again.".to_string(),
+    };
+    let response = CreateInteractionResponseMessage::new()
+        .content(text)
+        .ephemeral(true);
+    i.create_response(&ctx.http, CreateInteractionResponse::Message(response))
+        .await?;
+
+    // Redraw the round the status message shows, if it's from the game being played.
+    let index = game
+        .as_ref()
+        .and_then(|g| g.season.rounds.iter().position(|r| r.id == round));
+    if let (Some(game), Some(index), Some(message)) = (game, index, &i.message) {
+        edit_status(ctx, i.channel_id, message.id, guild, &game, index).await;
+    }
     Ok(())
 }
 
