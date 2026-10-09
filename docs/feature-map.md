@@ -363,7 +363,7 @@ How it was built (stage 4), where it differs from the plan above:
 - **The bet amount modal** is a plain serenity `CreateModal`, because it opens from a select menu, not from a slash command.
 - **Names** are looked up when a round is shown (nickname, then global name, then username) and remembered for 10 minutes.
 - **Small differences from voltgpt**: the player list is everyone who claimed or bet this season (voltgpt also listed people who only opened the bet menu), a tax of 0 isn't listed as "Taxed", and the Delta column uses →.
-- **Import**: voltgpt's game becomes the active season of `IMPORT_GUILD_ID`. If that server already has a game, the import is filed as an ended season instead.
+- **Import**: voltgpt's game becomes the active season of `main_server` from `config.toml`; without it the import waits. If that server already has a game, the import is filed as an ended season instead.
 
 Ideas for later, not part of the port: a `/wheel_spin` command that picks the winner randomly with an animated embed, and a per-player balance history.
 
@@ -422,7 +422,7 @@ Each feature owns its import function (`reminders::import_legacy`, `wheel::impor
 | Old table | What happens |
 |---|---|
 | `reminders` | Imported. IDs become integers, the base64 image JSON is decoded into the new image storage, and `fire_at`/`created_at` are kept. Reminders that came due while the bot was down fire right after startup, same as Go. |
-| `game_state` | Imported as the first, still active season of the wheel tables: options, rounds, winners, claims and bets, with user objects reduced to IDs. The Go game has no guild, so it goes to the guild in `IMPORT_GUILD_ID` (defaults to voltgpt's main server). A test checks that the imported season shows the same balances as the Go bot. |
+| `game_state` | Imported as the first, still active season of the wheel tables: options, rounds, winners, claims and bets, with user objects reduced to IDs. The Go game has no guild, so it goes to the server in `main_server` in `config.toml`. A test checks that the imported season shows the same balances as the Go bot. |
 | `response_ids` | Skipped. They hold only OpenAI response IDs with no message text, and OpenAI drops stored responses after 30 days, so they would rarely still work. Replying to an old bot message starts a fresh conversation that includes the replied-to message. |
 | `image_hashes` | Skipped for now; kept in `old.db.imported` for when hashing returns. |
 | `users`, memory tables (`guild_user_profiles`, `interaction_notes`, `note_participants`, `channel_buffers`, `memory_job_runs`, `vec_notes`) | Skipped; memory is dropped. |

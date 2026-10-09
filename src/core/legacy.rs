@@ -12,6 +12,7 @@ use anyhow::Context as _;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use super::Feature;
+use super::config::Config;
 use super::db::Db;
 
 /// Every part VoltBot will import. A part whose feature isn't ported yet stays pending, and
@@ -30,6 +31,7 @@ pub async fn import(
     db: &Db,
     features: &[Arc<dyn Feature>],
     path: &Path,
+    config: Arc<Config>,
 ) -> anyhow::Result<Option<Vec<Outcome>>> {
     if !path.exists() {
         return Ok(None);
@@ -37,7 +39,7 @@ pub async fn import(
     let features = features.to_vec();
     let path = path.to_path_buf();
     let outcomes = db
-        .call(move |conn| import_sync(conn, &features, &path))
+        .call(move |conn| import_sync(conn, &features, &path, &config))
         .await?;
     Ok(Some(outcomes))
 }
@@ -46,6 +48,7 @@ fn import_sync(
     conn: &mut Connection,
     features: &[Arc<dyn Feature>],
     path: &Path,
+    config: &Config,
 ) -> anyhow::Result<Vec<Outcome>> {
     let old = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("opening {}", path.display()))?;
@@ -56,7 +59,7 @@ fn import_sync(
             continue;
         }
         let tx = conn.transaction()?;
-        match (import.run)(&old, &tx) {
+        match (import.run)(&old, &tx, config) {
             Ok(rows) => {
                 tx.execute(
                     "INSERT INTO legacy_imports (part, imported_at, rows) VALUES (?1, unixepoch(), ?2)",
@@ -130,7 +133,9 @@ mod tests {
         fn legacy_import(&self) -> Option<LegacyImport> {
             Some(LegacyImport {
                 part: self.0,
-                run: |old, _new| Ok(old.query_row("SELECT count(*) FROM things", [], |r| r.get(0))?),
+                run: |old, _new, _config| {
+                    Ok(old.query_row("SELECT count(*) FROM things", [], |r| r.get(0))?)
+                },
             })
         }
     }
@@ -153,7 +158,7 @@ mod tests {
         let (mut conn, path) = setup();
         let reminders: Vec<Arc<dyn Feature>> = vec![Arc::new(Importer("reminders"))];
 
-        let outcomes = import_sync(&mut conn, &reminders, &path).unwrap();
+        let outcomes = import_sync(&mut conn, &reminders, &path, &Config::default()).unwrap();
         assert!(matches!(
             outcomes[..],
             [Outcome::Imported {
@@ -164,14 +169,14 @@ mod tests {
         // "wheel" isn't done yet, so the file stays.
         assert!(path.exists());
         assert!(
-            import_sync(&mut conn, &reminders, &path)
+            import_sync(&mut conn, &reminders, &path, &Config::default())
                 .unwrap()
                 .is_empty()
         );
 
         let both: Vec<Arc<dyn Feature>> =
             vec![Arc::new(Importer("reminders")), Arc::new(Importer("wheel"))];
-        let outcomes = import_sync(&mut conn, &both, &path).unwrap();
+        let outcomes = import_sync(&mut conn, &both, &path, &Config::default()).unwrap();
         assert!(matches!(
             outcomes[..],
             [Outcome::Imported { part: "wheel", .. }]

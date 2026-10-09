@@ -13,9 +13,8 @@
 //! ```
 //!
 //! Users are whole Discord user objects; only their IDs are kept. voltgpt has one game for
-//! the whole bot, so it goes to the server in `IMPORT_GUILD_ID` (voltgpt's main server by
-//! default). It becomes that server's active season, or an ended one if the server already
-//! has a game.
+//! the whole bot, so it goes to `main_server` from config.toml. It becomes that server's
+//! active season, or an ended one if the server already has a game.
 
 use anyhow::Context as _;
 use chrono::Utc;
@@ -25,16 +24,14 @@ use tracing::warn;
 
 use super::ledger::Bet;
 use super::store;
+use crate::core::config::Config;
 use crate::core::legacy::table_exists;
 
-/// voltgpt's main server.
-const DEFAULT_GUILD: u64 = 122962330165313536;
-
-pub fn import(old: &Connection, new: &Transaction) -> anyhow::Result<usize> {
-    let guild = match std::env::var("IMPORT_GUILD_ID") {
-        Ok(id) => id.trim().parse().context("IMPORT_GUILD_ID is not an ID")?,
-        Err(_) => DEFAULT_GUILD,
-    };
+pub fn import(old: &Connection, new: &Transaction, config: &Config) -> anyhow::Result<usize> {
+    // Without it the import fails, so old.db is kept and the next start tries again.
+    let guild = config
+        .main_server
+        .context("set main_server in config.toml to the server voltgpt's wheel belongs to")?;
     import_into(old, new, guild, Utc::now().timestamp())
 }
 
@@ -203,6 +200,17 @@ mod tests {
         assert_eq!(current.money(2), 70);
         assert_eq!(current.money(3), 70);
         assert_eq!(current.standing(1).unwrap().bet_percent, 12);
+    }
+
+    #[test]
+    fn needs_main_server() {
+        let old = old_db(&voltgpt_game());
+        let mut new = test_connection("wheel", store::MIGRATIONS);
+        let tx = new.transaction().unwrap();
+        assert!(import(&old, &tx, &Config::default()).is_err());
+        let config = Config::parse("main_server = 5").unwrap();
+        assert_eq!(import(&old, &tx, &config).unwrap(), 2);
+        assert!(store::active_season(&tx, GUILD).unwrap().is_some());
     }
 
     #[test]

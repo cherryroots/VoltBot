@@ -11,6 +11,7 @@ use serenity::all::{
     UserId,
 };
 
+use super::config::Config;
 use super::{BotCtx, BotEvent, Command, Result};
 use crate::ai::ToolDef;
 
@@ -154,5 +155,9 @@ pub struct LegacyImport {
     /// Reads from voltgpt's database (`old`) and writes into ours (`new`). Runs inside one
     /// transaction: if it fails, nothing is written and the next start tries again.
     /// Returns the number of rows imported.
-    pub run: fn(old: &rusqlite::Connection, new: &rusqlite::Transaction) -> anyhow::Result<usize>,
+    pub run: fn(
+        old: &rusqlite::Connection,
+        new: &rusqlite::Transaction,
+        config: &Config,
+    ) -> anyhow::Result<usize>,
 }

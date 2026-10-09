@@ -231,9 +231,9 @@ fn ai_from_env(config: &Config, web: &reqwest::Client) -> ai::Ai {
 }
 
 /// Imports voltgpt's `old.db` if it's there. Returns a summary for the start notice.
-async fn import_legacy(db: &Db, features: &[Arc<dyn Feature>], config: &Config) -> String {
+async fn import_legacy(db: &Db, features: &[Arc<dyn Feature>], config: &Arc<Config>) -> String {
     let path = Path::new(&config.old_database);
-    match legacy::import(db, features, path).await {
+    match legacy::import(db, features, path, config.clone()).await {
         Ok(None) => String::new(),
         Ok(Some(outcomes)) if outcomes.is_empty() => String::new(),
         Ok(Some(outcomes)) => {

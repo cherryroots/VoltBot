@@ -57,7 +57,7 @@ sudo chmod 600 /opt/voltbot/.env
 
 Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`, and `OPENAI_TOKEN` for chat) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
 
-**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders and the running movie wheel game, each only once, then renames the file to `old.db.imported`. voltgpt's wheel had no server, so it goes to the server in `IMPORT_GUILD_ID` in `.env` (voltgpt's main server if unset). If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
+**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders and the running movie wheel game, each only once, then renames the file to `old.db.imported`. voltgpt's wheel had no server, so set `main_server` in `config.toml` first: the game is imported into that server, and the import waits until it is set. If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
 
 ### 4. Run with systemd
 

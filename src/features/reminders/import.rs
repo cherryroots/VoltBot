@@ -20,9 +20,10 @@ use serde::Deserialize;
 use tracing::warn;
 
 use super::store::{self, Image, NewReminder};
+use crate::core::config::Config;
 use crate::core::legacy::table_exists;
 
-pub fn import(old: &Connection, new: &Transaction) -> anyhow::Result<usize> {
+pub fn import(old: &Connection, new: &Transaction, _config: &Config) -> anyhow::Result<usize> {
     if !table_exists(old, "reminders")? {
         return Ok(0);
     }
@@ -149,7 +150,7 @@ mod tests {
 
         let mut new = test_connection("reminders", store::MIGRATIONS);
         let tx = new.transaction().unwrap();
-        assert_eq!(import(&old, &tx).unwrap(), 2);
+        assert_eq!(import(&old, &tx, &Config::default()).unwrap(), 2);
         tx.commit().unwrap();
 
         let due = store::due(&new, 5000).unwrap();
@@ -174,6 +175,6 @@ mod tests {
         let old = Connection::open_in_memory().unwrap();
         let mut new = test_connection("reminders", store::MIGRATIONS);
         let tx = new.transaction().unwrap();
-        assert_eq!(import(&old, &tx).unwrap(), 0);
+        assert_eq!(import(&old, &tx, &Config::default()).unwrap(), 0);
     }
 }
