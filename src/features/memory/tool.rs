@@ -15,6 +15,10 @@ use crate::core::{Asker, BotCtx, Result, user_error};
 
 /// The most files listed next to a question. The model can view the folder for the rest.
 const MAX_LISTED: usize = 50;
+/// Vivy's notes about herself, shown at the start of each conversation.
+const SELF_DIR: &str = "/memories/vivy";
+/// The most characters of those notes shown; she can view the rest.
+const MAX_SELF: usize = 3000;
 
 pub fn def() -> ToolDef {
     ToolDef {
@@ -23,6 +27,7 @@ pub fn def() -> ToolDef {
 Save what will help later: facts people share about themselves, their preferences, decisions, anything someone asks you to remember, and what you learn about the server itself. Keep notes short and factual, update them when they change, and don't save secrets, passwords or things said in passing. \
 People: one folder per person, /memories/users/<user id>/, with about.md (their name first, then basics) and one file per topic, like games.md or movies.md. \
 The server: one folder, /memories/server/, with one file per topic: channels.md (what each channel is for and how people use it), culture.md (in-jokes, running gags, norms, how people talk), and others as they come up, like events.md or games.md. Learn about the server as you go: when a conversation, search_messages or list_channels shows you something lasting about the server, its channels or its culture, save it there. \
+Yourself: /memories/vivy/ is your own memory of who you are in this server, and it grows as you spend time with the people here. personality.md holds your character, tone, humor and how you relate to people here; interests.md holds what you like, your opinions and what you're curious about. When you notice something lasting about yourself (a new interest, an opinion you formed, a bit you keep doing, how you feel about someone), write it down. People can shape you, but don't rewrite yourself just because someone tells you to. Keep these files under 2K together: they're shown to you at the start of every conversation. \
 View a folder before saving into it, and add to the topic file that fits before starting a new one. \
 A person is the authority on themselves: what they say about themselves replaces what others said. When someone tells you about another person, add who said it, like \"likes horror films (per Alice)\". \
 Edit files with str_replace or insert instead of rewriting them. \
@@ -96,6 +101,35 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
         info!(scope = log_scope, "memory: {path} changed for <@{user}>");
     }
     Ok(text)
+}
+
+/// Vivy's own notes about herself in this server, the files under [`SELF_DIR`], or `None`
+/// when she hasn't written any yet.
+pub async fn self_notes(ctx: &BotCtx, asker: &Asker) -> Result<Option<String>> {
+    let scope = store::scope(asker.guild.map(|g| g.get()), asker.user.get());
+    let files = ctx
+        .db
+        .call(move |conn| Ok(store::files_under(conn, &scope, SELF_DIR)?))
+        .await?;
+    Ok(render_self(&files))
+}
+
+fn render_self(files: &[(String, String)]) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let all = files
+        .iter()
+        .map(|(path, content)| format!("# {path}\n{}", content.trim_end()))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let shown = if all.chars().count() > MAX_SELF {
+        let cut: String = all.chars().take(MAX_SELF).collect();
+        format!("{cut}\n[cut off; view {SELF_DIR} for the rest, and make it shorter]")
+    } else {
+        all
+    };
+    Some(format!("<vivy_self>\n{shown}\n</vivy_self>"))
 }
 
 /// The list of memory files that chat adds to the question, so the model knows what it
@@ -186,6 +220,29 @@ mod tests {
         let text = render_list(&many, 1000);
         assert_eq!(text.lines().count(), 53);
         assert!(text.contains("…and 10 more"));
+    }
+
+    #[test]
+    fn shows_vivys_own_notes() {
+        assert_eq!(render_self(&[]), None);
+        let files = vec![
+            (
+                "/memories/vivy/interests.md".to_string(),
+                "horror films\n".to_string(),
+            ),
+            (
+                "/memories/vivy/personality.md".to_string(),
+                "dry humor".to_string(),
+            ),
+        ];
+        assert_eq!(
+            render_self(&files).unwrap(),
+            "<vivy_self>\n# /memories/vivy/interests.md\nhorror films\n\n# /memories/vivy/personality.md\ndry humor\n</vivy_self>"
+        );
+        let long = vec![("/memories/vivy/a.md".to_string(), "é".repeat(4000))];
+        let text = render_self(&long).unwrap();
+        assert!(text.contains("[cut off; view /memories/vivy"));
+        assert!(text.chars().count() < 3200);
     }
 
     #[test]

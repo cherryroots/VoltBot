@@ -51,8 +51,19 @@ impl Feature for Memory {
         tool::run(ctx, asker, args).await
     }
 
-    async fn chat_context(&self, ctx: &BotCtx, asker: &Asker) -> Result<Option<String>> {
-        Ok(Some(tool::file_list(ctx, asker).await?))
+    /// The file list every time, and Vivy's own notes about herself at the start of a
+    /// conversation (a continued one still has them from its first answer).
+    async fn chat_context(
+        &self,
+        ctx: &BotCtx,
+        asker: &Asker,
+        fresh: bool,
+    ) -> Result<Option<String>> {
+        let mut text = tool::file_list(ctx, asker).await?;
+        if fresh && let Some(notes) = tool::self_notes(ctx, asker).await? {
+            text = format!("{notes}\n{text}");
+        }
+        Ok(Some(text))
     }
 
     async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {

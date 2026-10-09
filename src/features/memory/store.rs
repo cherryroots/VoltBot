@@ -91,6 +91,22 @@ pub fn list(conn: &Connection, scope: &str) -> rusqlite::Result<Vec<(String, usi
     rows.collect()
 }
 
+/// The files inside directory `dir`, at any depth, in path order.
+pub fn files_under(
+    conn: &Connection,
+    scope: &str,
+    dir: &str,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    // substr instead of LIKE, so a _ or % in a path is just a character.
+    let prefix = format!("{dir}/");
+    let mut stmt = conn.prepare(
+        "SELECT path, content FROM memory_files
+         WHERE scope = ?1 AND substr(path, 1, length(?2)) = ?2 ORDER BY path",
+    )?;
+    let rows = stmt.query_map(params![scope, prefix], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
 /// Files and folders in use, for the control panel.
 pub fn stats(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
     conn.query_row(
@@ -144,6 +160,15 @@ mod tests {
             ("/memories/a.md".into(), 8, Some("hello".into()), None)
         );
         assert_eq!(stats(&conn).unwrap(), (1, 1));
+        assert_eq!(
+            files_under(&conn, "server:1", "/memories").unwrap(),
+            vec![("/memories/b.md".to_string(), "héllo".to_string())]
+        );
+        assert!(
+            files_under(&conn, "server:1", "/memories/b.md")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

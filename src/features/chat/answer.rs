@@ -294,13 +294,13 @@ fn tools_for(
 
 /// What the features enabled where the asker is add to the question (see
 /// [`Feature::chat_context`]). A feature that fails is left out.
-pub async fn context_for(ctx: &BotCtx, asker: &Asker) -> Vec<String> {
+pub async fn context_for(ctx: &BotCtx, asker: &Asker, fresh: bool) -> Vec<String> {
     let mut texts = Vec::new();
     for feature in ctx.features.iter() {
         if !ctx.gate(feature.name()).allows(asker.guild, asker.channel) {
             continue;
         }
-        match feature.chat_context(ctx, asker).await {
+        match feature.chat_context(ctx, asker, fresh).await {
             Ok(Some(text)) => texts.push(text),
             Ok(None) => {}
             Err(err) => warn!(

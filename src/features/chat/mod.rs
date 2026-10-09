@@ -165,7 +165,8 @@ impl Chat {
             .call(move |conn| store::chain(conn, question_id, history::MAX_TURNS))
             .await?;
         let mut input = history::build_input(ctx, provider, &chain).await;
-        add_context(&mut input, answer::context_for(ctx, &asker).await);
+        let fresh = matches!(input, Input::Full(_));
+        add_context(&mut input, answer::context_for(ctx, &asker, fresh).await);
 
         let cancel = CancellationToken::new();
         let message_ids = Arc::new(Mutex::new(Vec::new()));

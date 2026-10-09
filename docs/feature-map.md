@@ -65,7 +65,8 @@ pub trait Feature: Send + Sync {
         Err(anyhow!("unknown tool {name}"))
     }
     // Text added after the asker's question for one answer, like memory's file list.
-    async fn chat_context(&self, ctx: &BotCtx, asker: &Asker) -> Result<Option<String>> { Ok(None) }
+    // `fresh`: the model reads the conversation from the start, not continuing an answer.
+    async fn chat_context(&self, ctx: &BotCtx, asker: &Asker, fresh: bool) -> Result<Option<String>> { Ok(None) }
 }
 ```
 
@@ -450,9 +451,9 @@ The Go bot hashes every image and video in the main server after 3 seconds (to l
 voltgpt's memory captured every message, summarized it into notes and profiles, and pasted the matches into the instructions of every request. That bloated the prompt and broke the cache. VoltBot's memory is a folder of text files the model manages itself through one chat tool, `memory`, and nothing is pasted into the instructions.
 
 - **Compatible with Claude.** The tool's commands (`view`, `create`, `str_replace`, `insert`, `delete`, `rename`), arguments and reply texts follow Anthropic's memory tool (`memory_20250818`). On OpenAI it is a normal function tool. The Claude provider will send `{"type": "memory_20250818", "name": "memory"}` instead of the function definition and route the calls to the same code.
-- **Folders.** One `/memories` folder per server, shared by everyone in it, and a private one per person in DMs (scope `server:<id>` or `dm:<id>`). The tool suggests a folder per person, `/memories/users/<user id>/`, with `about.md` (name first) and one file per topic (`games.md`, `movies.md`), and a server folder with one file per topic: `/memories/server/channels.md`, `culture.md`, and more as needed (Rene's idea, 2026-10-09). The model fills the server files from conversations, `search_messages` and `list_channels`, so it learns the environment it's in. Small topic files let the model open only what the conversation needs. Chat's `<user>` tags carry the user ID for this.
+- **Folders.** One `/memories` folder per server, shared by everyone in it, and a private one per person in DMs (scope `server:<id>` or `dm:<id>`). The tool suggests a folder per person, `/memories/users/<user id>/`, with `about.md` (name first) and one file per topic (`games.md`, `movies.md`), and a server folder with one file per topic: `/memories/server/channels.md`, `culture.md`, and more as needed (Rene's idea, 2026-10-09). The model fills the server files from conversations, `search_messages` and `list_channels`, so it learns the environment it's in. `/memories/vivy/` holds Vivy's notes about herself in that server (`personality.md`, `interests.md`, under 2K together), so each server grows its own Vivy; the system prompt tells her to be the Vivy those notes describe (Rene's idea, 2026-10-09). Small topic files let the model open only what the conversation needs. Chat's `<user>` tags carry the user ID for this.
 - **Who decides.** Anyone can add notes about anyone (Rene's choice, 2026-10-09). A person's own word about themselves replaces what others said, and notes from others name who said them.
-- **Caching.** The `chat_context` hook adds `<memory_files>` after the newest question: the asker's and the server's files with sizes, and one line per other person's folder (at most 50 lines), for that request only. The instructions, tool list and earlier turns stay the same.
+- **Caching.** The `chat_context` hook adds `<vivy_self>` (her own notes, at most 3000 characters, only when a conversation starts fresh, since a continued one still has them) and `<memory_files>` after the newest question: the asker's and the server's files with sizes, and one line per other person's folder (at most 50 lines), for that request only. The instructions, tool list and earlier turns stay the same.
 - **Limits and safety.** 8 KB per file and 256 KB per folder, paths must stay under `/memories` (no `..`), each command runs in one transaction, and every change is written to `memory_changes` with who asked, the old text and the new text.
 - **Control.** `/memory show [path]` shows all of your files by default, `/memory forget [file]` deletes one of your files (autocompleted) or your whole folder (in DMs, everything), and admins can `/memory delete` any file or folder.
 
