@@ -10,8 +10,6 @@
 //! }).await?;
 //! ```
 
-use std::path::Path;
-
 use anyhow::anyhow;
 use rusqlite::Connection;
 
@@ -139,30 +137,6 @@ pub const CORE_MIGRATIONS: &[&str] = &[
     );",
 ];
 
-/// The bot was called VoltBot before it became Vivy, and its database `voltbot.db`. When
-/// the database is the new default `vivy.db` and doesn't exist yet, but `voltbot.db` sits
-/// next to it, renames the old file (with its WAL files) so no data is lost. Returns true
-/// when it renamed something.
-pub fn adopt_old_name(path: &Path) -> std::io::Result<bool> {
-    if path.file_name() != Some("vivy.db".as_ref()) || path.exists() {
-        return Ok(false);
-    }
-    let old = path.with_file_name("voltbot.db");
-    if !old.exists() {
-        return Ok(false);
-    }
-    // The WAL files go first, so a crash halfway leaves the main file under its old name
-    // and the next start tries again.
-    for suffix in ["-wal", "-shm"] {
-        let old_extra = path.with_file_name(format!("voltbot.db{suffix}"));
-        if old_extra.exists() {
-            std::fs::rename(&old_extra, path.with_file_name(format!("vivy.db{suffix}")))?;
-        }
-    }
-    std::fs::rename(&old, path)?;
-    Ok(true)
-}
-
 /// An in-memory database with the core tables and the given migrations, for tests.
 #[cfg(test)]
 pub fn test_connection(owner: &str, migrations: &[&str]) -> Connection {
@@ -176,28 +150,6 @@ pub fn test_connection(owner: &str, migrations: &[&str]) -> Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn adopts_the_old_database_name() {
-        let dir = std::env::temp_dir().join(format!("vivy-adopt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("voltbot.db"), "data").unwrap();
-        std::fs::write(dir.join("voltbot.db-wal"), "wal").unwrap();
-        let path = dir.join("vivy.db");
-
-        assert!(adopt_old_name(&path).unwrap());
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "data");
-        assert_eq!(
-            std::fs::read_to_string(dir.join("vivy.db-wal")).unwrap(),
-            "wal"
-        );
-        assert!(!dir.join("voltbot.db").exists());
-        // Once it exists, nothing happens; another name is never touched.
-        assert!(!adopt_old_name(&path).unwrap());
-        std::fs::write(dir.join("voltbot.db"), "x").unwrap();
-        assert!(!adopt_old_name(&dir.join("other.db")).unwrap());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
 
     #[test]
     fn migrations_run_once() {

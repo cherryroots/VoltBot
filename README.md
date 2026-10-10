@@ -44,8 +44,8 @@ Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorro
 You need [Rust](https://rustup.rs) (stable) and `ffmpeg` (used to read video frames). Optionally install `fonts-noto-color-emoji` and `fonts-noto-core` (and `fonts-noto-extra` for rarer scripts), so emoji and fancy letters in names show up in the movie wheel picture; restart the bot after installing fonts. The log warns once about each character no installed font has.
 
 ```bash
-git clone https://github.com/cherryroots/VoltBot.git
-cd VoltBot
+git clone https://github.com/cherryroots/Vivy.git
+cd Vivy
 cargo build --release
 ```
 
@@ -91,5 +91,3 @@ sudo systemctl restart vivy
 ```
 
 Database migrations run automatically on start.
-
-**Coming from the VoltBot name:** the bot used to be called VoltBot. On start, a missing `vivy.db` is filled by renaming `voltbot.db` next to it (a config that still says `database = "voltbot.db"` keeps using that file), and the old `VOLTBOT_CONFIG` variable still works. The binary, service and folder are now `vivy`, so switch the service over once with the steps in the pull request that renamed it.
