@@ -409,7 +409,8 @@ What it does: gives admins two channels to watch the bot without logging in to t
 - tiles for gateway latency, memory use and database size, each with a graph of the last day, and errors per hour over the last day
 - the AI provider and model chat uses, and the fallback with when it retries
 - Claude's spend this month: a bar against `monthly_budget`, a graph of the month so far with the pace to the month's end and the budget line, whether it's the bill or the estimate, the admin key's state and last read, and (behind their toggles) the cache hit rate as a ring and the cost per job as bars
-- one card per feature from its `stats()`; stats that are plain numbers get a graph of the last 7 days and how much they changed
+- "Vivy's mind": a box features fill with `panels()` (panels with the same title merge). Memory adds her mood, what she's thinking about and what she wants to know, from the `mood:`, `thinking:` and `wondering:` lines the daily reflection writes in `/memories/vivy/mood.md` (the newest one, like her Discord status). Chat adds her next check-in in a server, with whom and what about, and how many are planned (check-ins from DMs stay off it)
+- one card per feature from its `stats()`; stats that are plain numbers get a graph of the last 7 days and how much they changed. Chat: answers and planned follow-ups. Reminders: pending, sent this week, next. Wheel: games, open bets, rounds played. Memory: files, folders, changes today, last reflection
 - the last error, with when it happened
 
 "Updated <t:…:R>" is text above the picture. Discord renders that as "12 seconds ago" and keeps counting on its own, so a crashed bot is obvious even though it can't edit the message any more. On a clean shutdown the bot swaps in an OFFLINE picture before it exits. If the picture can't be drawn, the message shows the same information as an embed.

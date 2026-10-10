@@ -95,6 +95,7 @@ impl Feature for Reminders {
         if let Some(next) = stats.next_fire_at {
             lines.push(Stat::new("Next", format!("<t:{next}:R>")));
         }
+        lines.push(Stat::new("Sent this week", stats.sent_this_week));
         if stats.failing > 0 {
             lines.push(Stat::new("Failing to send", stats.failing));
         }

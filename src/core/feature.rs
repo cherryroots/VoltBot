@@ -82,6 +82,12 @@ pub trait Feature: Send + Sync + 'static {
         Ok(Vec::new())
     }
 
+    /// Full-width boxes on the status message, for text that is too long for a stat line.
+    /// Panels with the same title, from any feature, are shown as one box.
+    async fn panels(&self, _ctx: &BotCtx) -> Result<Vec<Panel>> {
+        Ok(Vec::new())
+    }
+
     // ---- Lifecycle ----
 
     /// Called once after connecting to Discord. Start background tasks here with
@@ -157,6 +163,24 @@ impl Stat {
         Stat {
             name: name.into(),
             value: value.to_string(),
+        }
+    }
+}
+
+/// A box of longer text on the control panel, like Vivy's mood. Each row is a label and a
+/// line or two of text.
+#[derive(Debug, Clone)]
+pub struct Panel {
+    pub title: String,
+    pub rows: Vec<Stat>,
+}
+
+impl Panel {
+    /// The box about the bot herself ("Vivy's mind"), which several features add rows to.
+    pub fn about_bot(ctx: &BotCtx, rows: Vec<Stat>) -> Panel {
+        Panel {
+            title: format!("{}'s mind", ctx.cache.current_user().name),
+            rows,
         }
     }
 }

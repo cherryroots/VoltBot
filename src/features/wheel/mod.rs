@@ -108,6 +108,7 @@ impl Feature for Wheel {
         Ok(vec![
             Stat::new("Games", stats.games),
             Stat::new("Open bets", stats.open_bets),
+            Stat::new("Rounds played", stats.rounds_played),
         ])
     }
 

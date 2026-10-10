@@ -12,8 +12,8 @@
 use chrono::{DateTime, Datelike, Months, NaiveDate, TimeDelta, Utc};
 
 use super::history::{self, History};
-use crate::core::Stat;
 use crate::core::logging::ErrorStats;
+use crate::core::{Panel, Stat};
 use crate::util::shorten;
 use crate::util::svg::{
     ACCENT, AMBER, DIM, GREEN, LINE, MUTED, RED, ROW, Style, Svg, TEXT, text_width,
@@ -44,6 +44,8 @@ pub struct Dashboard {
     /// `None` when Claude isn't set up; an error when this month couldn't be read.
     pub spend: Option<Result<SpendView, String>>,
     pub features: Vec<FeatureView>,
+    /// Boxes of longer text from the features, those with the same title merged.
+    pub panels: Vec<Panel>,
     pub history: History,
 }
 
@@ -97,6 +99,9 @@ pub fn online_svg(d: &Dashboard) -> String {
     header(&mut svg, &d.bot_name, "ONLINE", GREEN, &right, &sub);
     tiles(&mut svg, d);
     ai(&mut svg, d);
+    for panel in &d.panels {
+        text_panel(&mut svg, d, panel);
+    }
     if let Some(spend) = &d.spend {
         match spend {
             Ok(spend) => claude_spend(&mut svg, d, spend),
@@ -294,6 +299,47 @@ fn ai(svg: &mut Svg, d: &Dashboard) {
             &shorten(&plain(fallback, d.now), 90),
             Style::new(12.0, AMBER).weight(500),
         );
+    }
+    svg.y += height;
+}
+
+/// A feature's box of longer text: labels on the left, a line or a few on the right.
+fn text_panel(svg: &mut Svg, d: &Dashboard, panel: &Panel) {
+    section(svg, &panel.title);
+    let (label_x, text_x) = (32.0, 160.0);
+    // Running text is narrower than `text_width`'s estimate, which is made for names.
+    let chars = ((RIGHT - 16.0 - text_x) / (13.0 * 0.5)) as usize;
+    let rows: Vec<(&str, Vec<String>)> = panel
+        .rows
+        .iter()
+        .map(|row| {
+            (
+                row.name.as_str(),
+                wrap_words(&plain(&row.value, d.now), chars, 3),
+            )
+        })
+        .collect();
+    let lines: usize = rows.iter().map(|(_, lines)| lines.len().max(1)).sum();
+    let height = 20.0 + 19.0 * lines as f32 + 8.0 * rows.len().saturating_sub(1) as f32;
+    let y = svg.y;
+    svg.rect([LEFT, y, RIGHT - LEFT, height], ROW, 8.0, "");
+    svg.rect([LEFT, y, 4.0, height], ACCENT, 2.0, "");
+    let mut line_y = y + 24.0;
+    for (label, lines) in rows {
+        svg.text(
+            label_x,
+            line_y,
+            &shorten(label, 16),
+            Style::new(12.0, DIM).weight(600),
+        );
+        for line in &lines {
+            svg.text(text_x, line_y, line, Style::new(13.0, TEXT).weight(500));
+            line_y += 19.0;
+        }
+        if lines.is_empty() {
+            line_y += 19.0;
+        }
+        line_y += 8.0;
     }
     svg.y += height;
 }
@@ -872,7 +918,12 @@ fn relative(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     // Two units at most: "3d 4h" rather than "3d 4h 12m".
     let short = |d: TimeDelta| {
         let text = human_duration(d);
-        text.splitn(3, ' ').take(2).collect::<Vec<_>>().join(" ")
+        let parts: Vec<&str> = text.split(' ').take(2).collect();
+        // "9h 0m" reads better as "9h".
+        match parts[..] {
+            [first, second] if !second.starts_with('0') => format!("{first} {second}"),
+            _ => parts[0].to_string(),
+        }
     };
     if delta > TimeDelta::zero() {
         format!("in {}", short(delta))
@@ -1050,16 +1101,26 @@ mod tests {
                     name: "reminders",
                     stats: Ok(vec![
                         Stat::new("Pending", 5),
+                        Stat::new("Sent this week", 11),
                         Stat::new("Next", format!("<t:{}:R>", (now + TimeDelta::minutes(134)).timestamp())),
                     ]),
                 },
                 FeatureView {
                     name: "wheel",
-                    stats: Ok(vec![Stat::new("Games", 1), Stat::new("Open bets", 6)]),
+                    stats: Ok(vec![
+                        Stat::new("Games", 1),
+                        Stat::new("Open bets", 6),
+                        Stat::new("Rounds played", 7),
+                    ]),
                 },
                 FeatureView {
                     name: "memory",
-                    stats: Ok(vec![Stat::new("Files", 48), Stat::new("Folders", 7)]),
+                    stats: Ok(vec![
+                        Stat::new("Files", 48),
+                        Stat::new("Folders", 7),
+                        Stat::new("Changes today", 9),
+                        Stat::new("Last reflection", format!("<t:{}:R>", (now - TimeDelta::hours(9)).timestamp())),
+                    ]),
                 },
                 FeatureView {
                     name: "snails",
@@ -1074,6 +1135,21 @@ mod tests {
                     stats: Err("database is locked".into()),
                 },
             ],
+            panels: vec![Panel {
+                title: "Vivy's mind".into(),
+                rows: vec![
+                    Stat::new("Mood", "cozy and a little smug after winning the horror movie argument"),
+                    Stat::new("Thinking about", "the wheel finale, Sam's Japan trip, whether Alien beats Aliens"),
+                    Stat::new("Wants to know", "what Mira's thesis is about, and if anyone actually finished Dune"),
+                    Stat::new(
+                        "Next check-in",
+                        format!(
+                            "<t:{}:R> with Sam (2 planned): ask how the job interview went",
+                            (now + TimeDelta::minutes(5 * 60 + 20)).timestamp()
+                        ),
+                    ),
+                ],
+            }],
             history: sample_history(now),
         }
     }
@@ -1088,6 +1164,8 @@ mod tests {
         assert!(svg.contains(">$26.84<") && svg.contains(">of $100<"));
         assert!(svg.contains("on pace for $"));
         assert!(svg.contains(">in 2h 14m<"));
+        assert!(svg.contains(">VIVY&apos;S MIND<") || svg.contains(">VIVY'S MIND<"));
+        assert!(svg.contains(">in 5h 20m with Sam (2 planned): ask how the job"));
         assert!(
             svg.contains(">Couldn&apos;t load: database is locked<")
                 || svg.contains("Couldn't load: database is locked")
@@ -1098,6 +1176,7 @@ mod tests {
         let mut fresh = sample(now);
         fresh.history = History::new();
         fresh.spend = None;
+        fresh.panels = Vec::new();
         fresh.errors = ErrorStats {
             last_hour: 0,
             last_day: 0,

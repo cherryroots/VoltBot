@@ -131,6 +131,16 @@ pub fn due_reflections(conn: &Connection, now: i64, every: i64) -> rusqlite::Res
     rows.collect()
 }
 
+/// For the control panel: changes to any folder since `since`, and the last reflection.
+pub fn activity(conn: &Connection, since: i64) -> rusqlite::Result<(i64, Option<i64>)> {
+    conn.query_row(
+        "SELECT (SELECT count(*) FROM memory_changes WHERE at >= ?1),
+                (SELECT max(at) FROM memory_reflections)",
+        [since],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
 /// The files changed since the last reflection, with who changed them and how often.
 pub fn changes_since_reflection(
     conn: &Connection,

@@ -21,10 +21,11 @@ mod store;
 mod tool;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use serde_json::Value;
 
 use crate::ai::ToolDef;
-use crate::core::{Asker, BotCtx, Command, Feature, Result, Stat};
+use crate::core::{Asker, BotCtx, Command, Feature, Panel, Result, Stat};
 
 pub struct Memory;
 
@@ -77,10 +78,43 @@ impl Feature for Memory {
     }
 
     async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {
-        let (files, folders) = ctx.db.call(|conn| Ok(store::stats(conn)?)).await?;
-        Ok(vec![
+        let day_ago = Utc::now().timestamp() - 86_400;
+        let ((files, folders), (changes, reflected)) = ctx
+            .db
+            .call(move |conn| Ok((store::stats(conn)?, store::activity(conn, day_ago)?)))
+            .await?;
+        let mut stats = vec![
             Stat::new("Files", files),
             Stat::new("Folders", folders),
-        ])
+            Stat::new("Changes today", changes),
+        ];
+        if let Some(at) = reflected {
+            stats.push(Stat::new("Last reflection", format!("<t:{at}:R>")));
+        }
+        Ok(stats)
+    }
+
+    /// Her mood, what's on her mind and what she wonders about, from the mood file she
+    /// rewrote last (the same one her Discord status comes from).
+    async fn panels(&self, ctx: &BotCtx) -> Result<Vec<Panel>> {
+        let newest = ctx
+            .db
+            .call(|conn| Ok(store::newest_file(conn, reflect::MOOD_FILE)?))
+            .await?;
+        let Some((_, mood)) = newest else {
+            return Ok(Vec::new());
+        };
+        let rows: Vec<Stat> = [
+            ("Mood", "mood"),
+            ("Thinking about", "thinking"),
+            ("Wants to know", "wondering"),
+        ]
+        .into_iter()
+        .filter_map(|(name, label)| Some(Stat::new(name, reflect::mood_line(&mood, label)?)))
+        .collect();
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![Panel::about_bot(ctx, rows)])
     }
 }

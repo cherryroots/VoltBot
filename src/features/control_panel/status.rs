@@ -21,7 +21,7 @@ use super::history::{self, History};
 use super::render::{self, AiView, Dashboard, FeatureView, SpendView, human_duration};
 use crate::ai::{AdminKey, display_name};
 use crate::core::logging::error_stats;
-use crate::core::{BotCtx, GIT_COMMIT, Result, VERSION};
+use crate::core::{BotCtx, GIT_COMMIT, Panel, Result, VERSION};
 use crate::util::{shorten, svg};
 
 pub const MIGRATIONS: &[&str] = &[
@@ -203,6 +203,7 @@ async fn gather(ctx: &BotCtx) -> Dashboard {
         runners.values().filter_map(|runner| runner.latency).max()
     };
     let mut features = Vec::new();
+    let mut panels: Vec<Panel> = Vec::new();
     for feature in ctx.features.iter() {
         if !ctx.gate(feature.name()).enabled {
             continue;
@@ -211,6 +212,10 @@ async fn gather(ctx: &BotCtx) -> Dashboard {
             name: feature.name(),
             stats: feature.stats(ctx).await.map_err(|err| format!("{err:#}")),
         });
+        match feature.panels(ctx).await {
+            Ok(new) => merge_panels(&mut panels, new),
+            Err(err) => warn!("couldn't load {}'s status box: {err:#}", feature.name()),
+        }
     }
     // Enough for the spend graph (this month) and the stats' graphs (7 days).
     let since = (now.timestamp() - 32 * 86_400).max(0);
@@ -235,7 +240,18 @@ async fn gather(ctx: &BotCtx) -> Dashboard {
         ai: ai_view(ctx),
         spend: spend_view(ctx).await,
         features,
+        panels,
         history,
+    }
+}
+
+/// Adds `new` to `panels`: rows of a panel whose title is already there go into that one.
+fn merge_panels(panels: &mut Vec<Panel>, new: Vec<Panel>) {
+    for panel in new {
+        match panels.iter_mut().find(|p| p.title == panel.title) {
+            Some(existing) => existing.rows.extend(panel.rows),
+            None => panels.push(panel),
+        }
     }
 }
 
@@ -368,6 +384,16 @@ fn online_embed(d: &Dashboard) -> CreateEmbed {
         );
     }
 
+    for panel in &d.panels {
+        let text = panel
+            .rows
+            .iter()
+            .map(|row| format!("**{}:** {}", row.name, row.value))
+            .collect::<Vec<_>>()
+            .join("\n");
+        embed = embed.field(&panel.title, shorten(&text, 1000), false);
+    }
+
     // One block per feature, from its `stats()`.
     for feature in &d.features {
         let value = match &feature.stats {
@@ -497,6 +523,24 @@ fn parse_location(value: &str, channel: ChannelId) -> Option<MessageId> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::Stat;
+
+    #[test]
+    fn panels_with_one_title_merge() {
+        let panel = |title: &str, row: &str| Panel {
+            title: title.into(),
+            rows: vec![Stat::new(row, 1)],
+        };
+        let mut panels = Vec::new();
+        merge_panels(&mut panels, vec![panel("Vivy's mind", "Next check-in")]);
+        merge_panels(
+            &mut panels,
+            vec![panel("Other", "a"), panel("Vivy's mind", "Mood")],
+        );
+        assert_eq!(panels.len(), 2);
+        let names: Vec<&str> = panels[0].rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, ["Next check-in", "Mood"]);
+    }
 
     #[test]
     fn saved_location() {
