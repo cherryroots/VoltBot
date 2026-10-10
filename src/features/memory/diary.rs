@@ -41,7 +41,7 @@ struct Settings {
 
 /// Writes the diary in every listed channel whose last entry is a week old.
 pub async fn post_due(ctx: &BotCtx) -> Result<()> {
-    if ctx.ai.chat.is_none() {
+    if ctx.ai.chat().is_none() {
         return Ok(());
     }
     let settings: Settings = ctx.config.feature("memory")?;
@@ -110,11 +110,7 @@ async fn post(ctx: &BotCtx, channel: ChannelId, now: i64) -> Result<()> {
     text.push_str("\n\nWhat changed in your memory this week:\n");
     text.push_str(&render_changes(&changed));
 
-    let provider = ctx
-        .ai
-        .chat
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("no model"))?;
+    let provider = ctx.ai.chat().ok_or_else(|| anyhow::anyhow!("no model"))?;
     let request = ChatRequest {
         system: SYSTEM.to_string(),
         input: Input::Full(vec![Turn {

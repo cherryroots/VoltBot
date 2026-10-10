@@ -8,16 +8,18 @@
 //! - web search and web fetch, run on Anthropic's side;
 //! - code execution in a container, also on Anthropic's side, kept per channel so files
 //!   stay around between answers, with Anthropic's skills for making office files;
-//! - its own memory tool, which takes the same commands as the bot's `memory` tool.
 //!
 //! Pictures and attached files go through the Files API: uploaded once, then sent by ID.
 //! Attached files are also copied into the code execution container, and files the code
 //! saves come back as Files API IDs, which [`Claude::download_file`] fetches.
 //!
+//! What each response cost is added to [`Spend`] (see `price.rs`).
+//!
 //! API reference: <https://platform.claude.com/docs/en/api/messages>
 
 mod collect;
 mod messages;
+mod price;
 
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
@@ -34,6 +36,8 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use self::collect::Collector;
+use super::fallback::ApiError;
+use super::spend::Spend;
 use super::sse::SseParser;
 use super::{ChatEvent, ChatProvider, ChatRequest, Done, GeneratedFile, Input, Part, Turn};
 use crate::util::media::ModelImage;
@@ -72,6 +76,8 @@ pub struct ClaudeConfig {
     pub code_execution: bool,
     /// When the model declines, let the API retry on another Claude model.
     pub fallbacks: bool,
+    /// USD a month; the log channel gets a warning at 80% and 100%. 0 turns that off.
+    pub monthly_budget: f64,
     /// Anthropic's skills loaded into the code execution container, for making
     /// spreadsheets ("xlsx"), documents ("docx"), slides ("pptx") and PDFs ("pdf").
     pub skills: Vec<String>,
@@ -85,6 +91,7 @@ impl Default for ClaudeConfig {
             max_tokens: 32_000,
             code_execution: true,
             fallbacks: true,
+            monthly_budget: 100.0,
             skills: ["xlsx", "docx", "pptx", "pdf"].map(String::from).to_vec(),
         }
     }
@@ -111,22 +118,9 @@ pub struct Claude {
     uploads: Mutex<HashMap<ContentKey, (String, Instant)>>,
     /// The code execution container each cache key (a channel) used last.
     containers: Arc<Mutex<HashMap<String, String>>>,
+    /// Where what each response cost is added up; `None` in tests.
+    spend: Option<Spend>,
 }
-
-/// An error answer from the API.
-#[derive(Debug)]
-struct ApiError {
-    status: reqwest::StatusCode,
-    message: String,
-}
-
-impl std::fmt::Display for ApiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Claude answered {}: {}", self.status, self.message)
-    }
-}
-
-impl std::error::Error for ApiError {}
 
 /// What's needed to send requests from the task that reads the stream.
 #[derive(Clone)]
@@ -168,6 +162,7 @@ impl Sender {
             }
             let text = response.text().await.unwrap_or_default();
             return Err(ApiError {
+                provider: "claude",
                 status,
                 message: error_message(&text),
             }
@@ -190,13 +185,19 @@ impl Sender {
 }
 
 impl Claude {
-    pub fn new(http: reqwest::Client, key: String, config: ClaudeConfig) -> Claude {
+    pub fn new(
+        http: reqwest::Client,
+        key: String,
+        config: ClaudeConfig,
+        spend: Option<Spend>,
+    ) -> Claude {
         Claude {
             http,
             key,
             config,
             uploads: Mutex::new(HashMap::new()),
             containers: Arc::new(Mutex::new(HashMap::new())),
+            spend,
         }
     }
 
@@ -445,8 +446,9 @@ impl ChatProvider for Claude {
         let (events, receiver) = mpsc::channel(64);
         let containers = self.containers.clone();
         let cache_key = request.cache_key;
+        let spend = self.spend.clone();
         tokio::spawn(async move {
-            let result = read_answer(&sender, body, response, &events).await;
+            let result = read_answer(&sender, spend.as_ref(), body, response, &events).await;
             let done = match result {
                 Ok(Some((done, container))) => {
                     if let Some(container) = container {
@@ -489,6 +491,7 @@ impl ChatProvider for Claude {
 /// finished round and its container, or `None` when nobody is listening anymore.
 async fn read_answer(
     sender: &Sender,
+    spend: Option<&Spend>,
     mut body: Value,
     mut response: reqwest::Response,
     events: &mpsc::Sender<anyhow::Result<ChatEvent>>,
@@ -518,6 +521,11 @@ async fn read_answer(
             "Claude used {} input tokens ({} read from cache, {} written to it) and wrote {}",
             usage.input, usage.cache_read, usage.cache_write, usage.output
         );
+        if let Some(spend) = spend {
+            let model = collector.model.as_deref();
+            let model = model.or(body["model"].as_str()).unwrap_or_default();
+            spend.add("claude", price::cost(&usage, model)).await;
+        }
 
         match collector.stop_reason.as_deref() {
             // A long run of built-in tools paused; send everything back to continue.
@@ -579,7 +587,7 @@ mod tests {
     use crate::ai::{Role, ToolDef};
 
     fn client(config: ClaudeConfig) -> Claude {
-        Claude::new(reqwest::Client::new(), "key".into(), config)
+        Claude::new(reqwest::Client::new(), "key".into(), config, None)
     }
 
     fn request() -> ChatRequest {
@@ -686,11 +694,13 @@ mod tests {
     #[test]
     fn expired_containers_are_recognised() {
         let gone = anyhow::Error::new(ApiError {
+            provider: "claude",
             status: reqwest::StatusCode::BAD_REQUEST,
             message: "Container container_1 has expired".into(),
         });
         assert!(container_gone(&gone));
         let other = anyhow::Error::new(ApiError {
+            provider: "claude",
             status: reqwest::StatusCode::BAD_REQUEST,
             message: "max_tokens is too large".into(),
         });

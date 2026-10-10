@@ -12,6 +12,7 @@ use rusqlite::OptionalExtension;
 use serenity::all::{ChannelId, CreateEmbed, CreateMessage, EditMessage, HttpError, MessageId};
 use tracing::warn;
 
+use crate::ai::display_name;
 use crate::core::logging::error_stats;
 use crate::core::{BotCtx, GIT_COMMIT, Result, VERSION};
 use crate::util::shorten;
@@ -118,7 +119,7 @@ async fn online_embed(ctx: &BotCtx) -> CreateEmbed {
             true,
         )
         .field("Database", megabytes(database_size(ctx)), true)
-        .field("AI", ai_provider(ctx), true)
+        .field("AI", ai_provider(ctx).await, true)
         .field(
             "Errors",
             format!(
@@ -165,17 +166,35 @@ fn offline_embed(ctx: &BotCtx) -> CreateEmbed {
         .field("Version", format!("{VERSION} (`{GIT_COMMIT}`)"), true)
 }
 
-/// The provider and model chat uses, from `provider` under `[ai]`.
-fn ai_provider(ctx: &BotCtx) -> String {
-    let Some(chat) = &ctx.ai.chat else {
+/// The provider and model chat uses now, whether it fell back from the main one, and
+/// what Claude cost this month.
+async fn ai_provider(ctx: &BotCtx) -> String {
+    let Some(chat) = ctx.ai.chat() else {
         return "Off (no key)".to_string();
     };
-    let name = match chat.name() {
-        "claude" => "Claude",
-        "openai" => "OpenAI",
-        other => other,
-    };
-    format!("{name}\n`{}`", chat.model())
+    let mut lines = vec![
+        display_name(chat.name()).to_string(),
+        format!("`{}`", chat.model()),
+    ];
+    if let Some((main, switched)) = ctx.ai.switched() {
+        lines.push(format!(
+            "{} {}; trying again <t:{}:R>",
+            display_name(main),
+            switched.outage.describe(),
+            switched.retry_at.timestamp()
+        ));
+    }
+    if let Some(spend) = &ctx.ai.spend {
+        match spend.this_month("claude").await {
+            Ok(usd) if spend.budget() > 0.0 => lines.push(format!(
+                "Claude: ${usd:.2} of ${:.0} this month",
+                spend.budget()
+            )),
+            Ok(usd) => lines.push(format!("Claude: ${usd:.2} this month")),
+            Err(err) => warn!("couldn't read what Claude cost: {err:#}"),
+        }
+    }
+    lines.join("\n")
 }
 
 /// "3d 4h 12m", "4h 12m" or "12m".

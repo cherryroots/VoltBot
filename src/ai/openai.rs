@@ -12,6 +12,8 @@
 //! API reference: <https://platform.openai.com/docs/api-reference/responses>,
 //! file inputs: <https://platform.openai.com/docs/guides/file-inputs>
 
+use std::time::Duration;
+
 use anyhow::{Context as _, bail};
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -19,6 +21,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use super::fallback::ApiError;
 use super::sse::{SseEvent, SseParser};
 use super::{
     Activity, ChatEvent, ChatProvider, ChatRequest, Done, GeneratedFile, Input, ModelFile, Part,
@@ -42,6 +45,8 @@ const MAX_READABLE_BYTES: usize = 50 * 1024 * 1024;
 /// Uploaded files are deleted by OpenAI after 30 days (the longest it allows). Replies
 /// continue from stored responses that point at the file, so it has to outlive the chat.
 const FILE_LIFETIME_SECS: u64 = 30 * 24 * 60 * 60;
+/// Waits before retrying when OpenAI is busy or rate limited.
+const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(6)];
 
 /// The file's extension in lowercase, like `"pdf"`. Empty when it has none.
 fn extension(file: &ModelFile) -> String {
@@ -183,6 +188,36 @@ impl OpenAi {
         self.http
             .post(format!("{}{path}", self.base_url))
             .bearer_auth(&self.token)
+    }
+
+    /// Posts a Responses request, retrying a couple of times when OpenAI is busy.
+    async fn responses(&self, body: &Value) -> anyhow::Result<reqwest::Response> {
+        let mut waits = RETRY_WAITS.iter();
+        loop {
+            let response = self
+                .post("/responses")
+                .json(body)
+                .send()
+                .await
+                .context("couldn't reach OpenAI")?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+            let busy = matches!(status.as_u16(), 429 | 500 | 502 | 503);
+            if busy && let Some(wait) = waits.next() {
+                warn!("OpenAI answered {status}, trying again");
+                tokio::time::sleep(*wait).await;
+                continue;
+            }
+            let text = response.text().await.unwrap_or_default();
+            return Err(ApiError {
+                provider: "openai",
+                status,
+                message: error_message(&text),
+            }
+            .into());
+        }
     }
 
     /// Uploads a file with the Files API and returns its ID.
@@ -333,13 +368,8 @@ fn parse_event(event: &SseEvent) -> anyhow::Result<Option<ChatEvent>> {
         "response.completed" | "response.incomplete" => {
             Some(ChatEvent::Done(parse_done(&data["response"])))
         }
-        "response.failed" => {
-            let message = data["response"]["error"]["message"]
-                .as_str()
-                .unwrap_or("no reason given");
-            bail!("OpenAI failed the response: {message}");
-        }
-        "error" => bail!("OpenAI error: {}", text("message")),
+        "response.failed" => return Err(stream_error(&data["response"]["error"]).into()),
+        "error" => return Err(stream_error(&data).into()),
         _ => None,
     })
 }
@@ -396,6 +426,24 @@ fn parse_done(response: &Value) -> Done {
     done
 }
 
+/// An error that came in the stream, as an [`ApiError`] with the status the same error
+/// has as an HTTP answer, so the fallback reads it the same way.
+fn stream_error(error: &Value) -> ApiError {
+    let status = match error["code"].as_str() {
+        Some("server_error") => 500,
+        Some("rate_limit_exceeded" | "insufficient_quota") => 429,
+        _ => 400,
+    };
+    ApiError {
+        provider: "openai",
+        status: reqwest::StatusCode::from_u16(status).unwrap_or_default(),
+        message: error["message"]
+            .as_str()
+            .unwrap_or("no reason given")
+            .to_string(),
+    }
+}
+
 /// The `message` of an OpenAI error body, or the whole body.
 fn error_message(body: &str) -> String {
     serde_json::from_str::<Value>(body)
@@ -420,17 +468,7 @@ impl ChatProvider for OpenAi {
     ) -> anyhow::Result<mpsc::Receiver<anyhow::Result<ChatEvent>>> {
         let uploads = self.upload_files(&request).await;
         let body = self.request_body(&request, &uploads);
-        let mut response = self
-            .post("/responses")
-            .json(&body)
-            .send()
-            .await
-            .context("couldn't reach OpenAI")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            bail!("OpenAI answered {status}: {}", error_message(&body));
-        }
+        let mut response = self.responses(&body).await?;
 
         let (sender, receiver) = mpsc::channel(64);
         tokio::spawn(async move {
@@ -694,6 +732,13 @@ mod tests {
         );
         let err = event(json!({"type": "error", "message": "rate limited"})).unwrap_err();
         assert!(err.to_string().contains("rate limited"));
+        let err = event(json!({"type": "response.failed", "response": {"error": {
+            "code": "server_error", "message": "The server had an error"}}}))
+        .unwrap_err();
+        assert_eq!(
+            crate::ai::fallback::outage(&err),
+            Some(crate::ai::fallback::Outage::Down)
+        );
     }
 
     #[test]

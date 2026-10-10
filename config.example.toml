@@ -24,6 +24,10 @@ discord_level = "warn"
 # Which provider chats: "claude" or "openai" (left out: "openai"). Only that provider's key
 # in .env is used.
 provider = "claude"
+# The provider chat moves to while the main one can't answer (leave out for none; its key
+# must be in .env too). Out of credit: the main one is tried again a day later. Down: an
+# hour later. The first answer that works on it moves chat back.
+fallback = "openai"
 
 # Claude settings. The key goes in .env (ANTHROPIC_API_KEY).
 [ai.claude]
@@ -38,6 +42,9 @@ code_execution = true
 skills = ["xlsx", "docx", "pptx", "pdf"]
 # When Claude declines a request, retry it on another Claude model.
 fallbacks = true
+# Claude's monthly cost in USD, for the status message and the warnings in the log channel
+# at 80% and 100% (estimated from list prices). 0 turns the warnings off.
+monthly_budget = 100.0
 
 # OpenAI settings. The key goes in .env (OPENAI_TOKEN).
 [ai.openai]

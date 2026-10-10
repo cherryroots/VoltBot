@@ -108,6 +108,15 @@ pub const CORE_MIGRATIONS: &[&str] = &[
         imported_at INTEGER NOT NULL,
         rows INTEGER NOT NULL
     );",
+    // 2: what the AI costs per calendar month (UTC), see `ai::Spend`. `warned` is the
+    // highest share of the budget already warned about, in percent.
+    "CREATE TABLE ai_spend (
+        month TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        usd REAL NOT NULL,
+        warned INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (month, provider)
+    );",
 ];
 
 /// An in-memory database with the core tables and the given migrations, for tests.
