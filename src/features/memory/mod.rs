@@ -92,6 +92,18 @@ impl Feature for Memory {
     }
 
     async fn start(&self, ctx: &BotCtx) -> Result<()> {
+        // `[features.memory]` is split over the settings of these parts, so a key is a
+        // typo only when none of them reads it.
+        let config = &ctx.config;
+        config.warn_unknown(
+            self.name(),
+            &[
+                config.ignored_by::<banner::Settings>(self.name()),
+                config.ignored_by::<diary::Settings>(self.name()),
+                config.ignored_by::<face::Settings>(self.name()),
+                config.ignored_by::<mood::Settings>(self.name()),
+            ],
+        );
         reflect::spawn(ctx);
         Ok(())
     }

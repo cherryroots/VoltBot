@@ -42,7 +42,7 @@ Answer with the entry only.";
 /// `[features.memory]` settings for the diary.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct Settings {
+pub(super) struct Settings {
     /// Channels and threads to post the diary in.
     diary_channels: Vec<u64>,
 }
@@ -53,7 +53,7 @@ pub async fn post_due(ctx: &BotCtx) -> Result<()> {
     if ctx.ai.chat().is_none() {
         return Ok(());
     }
-    let settings: Settings = ctx.config.feature("memory")?;
+    let settings: Settings = ctx.config.feature_part("memory")?;
     let now = Utc::now().timestamp();
     let due = |posted: Option<i64>| posted.is_none_or(|at| at <= now - EVERY_SECS);
 

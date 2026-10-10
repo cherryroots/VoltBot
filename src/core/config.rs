@@ -256,7 +256,35 @@ Copy config.example.toml to start one.",
     /// Keys that neither the struct nor the gate reads are typos: each is warned about once.
     pub fn feature<T: DeserializeOwned + Default>(&self, name: &str) -> anyhow::Result<T> {
         let (settings, ignored) = self.read_section::<T>(name)?;
-        for path in ignored {
+        self.warn_unknown(name, &[ignored]);
+        Ok(settings)
+    }
+
+    /// Like [`Config::feature`], for a feature whose section is split over several
+    /// structs (memory's faces, mood checks, diary...). One struct can't tell another's
+    /// keys from typos, so this warns about nothing: the feature calls
+    /// [`Config::warn_unknown`] once with what every part leaves out.
+    pub fn feature_part<T: DeserializeOwned + Default>(&self, name: &str) -> anyhow::Result<T> {
+        Ok(self.read_section::<T>(name)?.0)
+    }
+
+    /// The keys of a feature section that `T` doesn't read, for [`Config::warn_unknown`].
+    pub fn ignored_by<T: DeserializeOwned + Default>(&self, name: &str) -> Vec<String> {
+        self.read_section::<T>(name)
+            .map(|(_, ignored): (T, _)| ignored)
+            .unwrap_or_default()
+    }
+
+    /// Warns once about each key of `[features.<name>]` that every one of `parts` (the
+    /// keys each settings struct didn't read) left out, unless the gate reads it.
+    pub fn warn_unknown(&self, name: &str, parts: &[Vec<String>]) {
+        let Some((first, rest)) = parts.split_first() else {
+            return;
+        };
+        for path in first {
+            if rest.iter().any(|part| !part.contains(path)) {
+                continue;
+            }
             let top = path.split('.').next().unwrap_or_default();
             if GATE_KEYS.contains(&top) {
                 continue;
@@ -266,7 +294,6 @@ Copy config.example.toml to start one.",
                 warn!("config.toml: unknown key `{path}` is ignored");
             }
         }
-        Ok(settings)
     }
 
     /// Reads a feature section into `T`, and returns the keys `T` didn't read.
@@ -376,6 +403,39 @@ mod tests {
                 .contains("features.x.intervall")
         );
         assert!(config.startup_warnings(&["x"]).is_empty());
+    }
+
+    #[test]
+    fn split_sections_warn_only_about_keys_no_part_reads() {
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Faces {
+            #[allow(dead_code)]
+            faces_dir: String,
+        }
+        #[derive(Deserialize, Default)]
+        #[serde(default)]
+        struct Moods {
+            #[allow(dead_code)]
+            timezone: String,
+        }
+        let config = Config::parse(
+            "[features.memory]\nguilds = [1]\nfaces_dir = \"f\"\ntimezone = \"UTC\"\nfaces_dri = 1",
+        )
+        .unwrap();
+        config.feature_part::<Faces>("memory").unwrap();
+        config.feature_part::<Moods>("memory").unwrap();
+        assert!(config.warned.lock().unwrap().is_empty());
+        config.warn_unknown(
+            "memory",
+            &[
+                config.ignored_by::<Faces>("memory"),
+                config.ignored_by::<Moods>("memory"),
+            ],
+        );
+        let warned = config.warned.lock().unwrap();
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert!(warned.contains("features.memory.faces_dri"));
     }
 
     #[test]

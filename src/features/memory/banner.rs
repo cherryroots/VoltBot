@@ -17,7 +17,7 @@ use crate::core::BotCtx;
 /// `[features.memory]` settings for her banner.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
-struct Settings {
+pub(super) struct Settings {
     /// The folder with one PNG per time of day.
     banners_dir: Option<String>,
 }
@@ -35,7 +35,7 @@ fn period(hour: u32) -> &'static str {
 /// Puts the banner for this time of day on her profile in every server where she has a
 /// mood. Does nothing without `banners_dir` or without a picture for this time of day.
 pub async fn update_all(ctx: &BotCtx) {
-    let settings: Settings = ctx.config.feature("memory").unwrap_or_default();
+    let settings: Settings = ctx.config.feature_part("memory").unwrap_or_default();
     let Some(dir) = settings.banners_dir.map(PathBuf::from) else {
         return;
     };
