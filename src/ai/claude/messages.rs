@@ -156,9 +156,9 @@ fn file_blocks(
 }
 
 /// Claude's built-in tools, then the bot's, always in the same order (they're part of the
-/// cached prefix). The bot's `memory` tool becomes Claude's own memory tool when
-/// `native_memory` is on; it takes the same commands.
-pub fn tools(defs: &[ToolDef], code_execution: bool, native_memory: bool) -> Vec<Value> {
+/// cached prefix). The bot's `memory` tool is sent as a normal tool, not as Claude's own
+/// memory tool: that one comes with Anthropic's instruction to log task progress in memory.
+pub fn tools(defs: &[ToolDef], code_execution: bool) -> Vec<Value> {
     let mut tools = vec![
         json!({"type": "web_search_20260209", "name": "web_search"}),
         json!({"type": "web_fetch_20260209", "name": "web_fetch"}),
@@ -167,10 +167,6 @@ pub fn tools(defs: &[ToolDef], code_execution: bool, native_memory: bool) -> Vec
         tools.push(json!({"type": "code_execution_20260521", "name": "code_execution"}));
     }
     for def in defs {
-        if native_memory && def.name == "memory" {
-            tools.push(json!({"type": "memory_20250818", "name": "memory"}));
-            continue;
-        }
         tools.push(json!({
             "name": def.name,
             "description": def.description,
@@ -182,24 +178,13 @@ pub fn tools(defs: &[ToolDef], code_execution: bool, native_memory: bool) -> Vec
     tools
 }
 
-/// The system prompt as blocks. Claude's own memory tool has no description of ours, so
-/// the bot's description of it (where to save what) follows the prompt. The last block
-/// marks the end of the part every request shares, for the prompt cache.
-pub fn system(prompt: &str, defs: &[ToolDef], native_memory: bool) -> Vec<Value> {
-    let mut blocks = Vec::new();
-    if !prompt.trim().is_empty() {
-        blocks.push(json!({"type": "text", "text": prompt}));
+/// The system prompt as one block, marked as the end of the part every request shares, for
+/// the prompt cache.
+pub fn system(prompt: &str) -> Vec<Value> {
+    if prompt.trim().is_empty() {
+        return Vec::new();
     }
-    if native_memory && let Some(memory) = defs.iter().find(|d| d.name == "memory") {
-        blocks.push(json!({
-            "type": "text",
-            "text": format!("How to use your memory tool:\n{}", memory.description),
-        }));
-    }
-    if let Some(last) = blocks.last_mut() {
-        last["cache_control"] = json!({"type": "ephemeral"});
-    }
-    blocks
+    vec![json!({"type": "text", "text": prompt, "cache_control": {"type": "ephemeral"}})]
 }
 
 #[cfg(test)]
@@ -338,42 +323,25 @@ mod tests {
     }
 
     #[test]
-    fn memory_becomes_claudes_own_tool() {
+    fn built_in_tools_come_first() {
         let defs = [def("get_current_time"), def("memory")];
-        let tools = tools(&defs, true, true);
-        let types: Vec<&str> = tools
-            .iter()
-            .map(|t| t["type"].as_str().unwrap_or("custom"))
-            .collect();
+        let tools = tools(&defs, true);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert_eq!(
-            types,
+            names,
             [
-                "web_search_20260209",
-                "web_fetch_20260209",
-                "code_execution_20260521",
-                "custom",
-                "memory_20250818"
+                "web_search",
+                "web_fetch",
+                "code_execution",
+                "get_current_time",
+                "memory"
             ]
         );
-        assert_eq!(tools[3]["eager_input_streaming"], true);
-        assert_eq!(
-            tools[4],
-            json!({"type": "memory_20250818", "name": "memory"})
-        );
+        assert_eq!(tools[4]["eager_input_streaming"], true);
+        assert_eq!(super::tools(&defs, false).len(), 4);
 
-        let blocks = system("Be nice.", &defs, true);
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(
-            blocks[1]["text"],
-            "How to use your memory tool:\nDoes things."
-        );
-        assert!(blocks[0].get("cache_control").is_none());
-        assert_eq!(blocks[1]["cache_control"], json!({"type": "ephemeral"}));
-
-        // Turned off, it's a tool like the others and the prompt stays alone.
-        let tools = super::tools(&defs, false, false);
-        assert_eq!(tools.len(), 4);
-        assert_eq!(tools[3]["name"], "memory");
-        assert_eq!(system("Be nice.", &defs, false).len(), 1);
+        let blocks = system("Be nice.");
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["cache_control"], json!({"type": "ephemeral"}));
     }
 }

@@ -70,8 +70,6 @@ pub struct ClaudeConfig {
     pub max_tokens: u32,
     /// Let it run code, which also lets it open attached files.
     pub code_execution: bool,
-    /// Send the bot's memory tool as Claude's own memory tool.
-    pub native_memory: bool,
     /// When the model declines, let the API retry on another Claude model.
     pub fallbacks: bool,
     /// Anthropic's skills loaded into the code execution container, for making
@@ -86,7 +84,6 @@ impl Default for ClaudeConfig {
             effort: "medium".to_string(),
             max_tokens: 32_000,
             code_execution: true,
-            native_memory: true,
             fallbacks: true,
             skills: ["xlsx", "docx", "pptx", "pdf"].map(String::from).to_vec(),
         }
@@ -222,9 +219,9 @@ impl Claude {
             "model": config.model,
             "max_tokens": config.max_tokens,
             "stream": true,
-            "system": messages::system(&request.system, &request.tools, config.native_memory),
+            "system": messages::system(&request.system),
             "messages": conversation,
-            "tools": messages::tools(&request.tools, config.code_execution, config.native_memory),
+            "tools": messages::tools(&request.tools, config.code_execution),
             // Thinking can't be turned off; effort sets how much. When an earlier turn
             // changed, the thinking after it is left out instead of failing the request.
             "thinking": {

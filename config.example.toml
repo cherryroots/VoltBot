@@ -36,8 +36,6 @@ max_tokens = 32000
 code_execution = true
 # Anthropic's skills in the sandbox, for making spreadsheets, documents, slides and PDFs.
 skills = ["xlsx", "docx", "pptx", "pdf"]
-# Use Claude's built-in memory tool for the memory folder (false: the bot's own tool).
-native_memory = true
 # When Claude declines a request, retry it on another Claude model.
 fallbacks = true
 
