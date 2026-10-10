@@ -11,11 +11,11 @@ use std::sync::Mutex;
 
 use chrono::Utc;
 use serde::Deserialize;
-use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage, GuildId};
+use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage, GuildId, HttpError};
 use tracing::{info, warn};
 
 use super::folder::{self, Command};
-use super::retry::RetryLater;
+use super::retry::{RETRY_SECS, RetryLater};
 use super::{store, tool};
 use crate::ai::{ChatRequest, Input, Part, Role, Turn, complete};
 use crate::core::{BotCtx, Result};
@@ -81,23 +81,92 @@ pub async fn post_due(ctx: &BotCtx) -> Result<()> {
         if RETRY.waiting(&key, now) {
             continue;
         }
-        if let Err(err) = post(ctx, guild, &channels, now).await {
-            // Not saved as posted, so it's tried again in a few hours, not next week.
-            warn!(
-                guild = guild.get(),
-                "couldn't write the diary, trying again later: {err:#}"
-            );
-            RETRY.failed(&key, now);
-            continue;
+        // An entry written earlier that couldn't be posted is posted now, instead of
+        // asking the model for a new one. One older than a week is stale: write anew.
+        let unsent = UNSENT
+            .lock()
+            .unwrap()
+            .remove(&guild.get())
+            .filter(|u| u.written_at > now - EVERY_SECS);
+        let unsent = match unsent {
+            Some(unsent) => unsent,
+            None => match write(ctx, guild, now).await {
+                Ok(Some(entry)) => Unsent {
+                    entry,
+                    written_at: now,
+                    warned_no_access: false,
+                },
+                // Nothing new this week: no diary, and the next try is next week.
+                Ok(None) => {
+                    RETRY.done(&key);
+                    set_posted(ctx, &channels, now).await?;
+                    continue;
+                }
+                Err(err) => {
+                    // Not saved as posted, so it's tried again in a few hours, not next week.
+                    warn!(
+                        guild = guild.get(),
+                        "couldn't write the diary, trying again later: {err:#}"
+                    );
+                    RETRY.failed(&key, now, RETRY_SECS);
+                    continue;
+                }
+            },
+        };
+        match post(ctx, &channels, &unsent.entry).await {
+            Posted::Somewhere => {
+                RETRY.done(&key);
+                set_posted(ctx, &channels, now).await?;
+            }
+            Posted::Nowhere { no_access } => {
+                if no_access {
+                    // The bot can't post there: that won't fix itself in a few hours. Warn
+                    // once per entry, then check again daily.
+                    if !unsent.warned_no_access {
+                        warn!(
+                            guild = guild.get(),
+                            "can't post the diary: no access to any diary channel; \
+                             trying again daily"
+                        );
+                    }
+                    RETRY.failed(&key, now, NO_ACCESS_RETRY_SECS);
+                } else {
+                    warn!(
+                        guild = guild.get(),
+                        "couldn't post the diary anywhere, trying again later"
+                    );
+                    RETRY.failed(&key, now, RETRY_SECS);
+                }
+                // Kept, so the next try only posts it.
+                UNSENT.lock().unwrap().insert(
+                    guild.get(),
+                    Unsent {
+                        warned_no_access: unsent.warned_no_access || no_access,
+                        ..unsent
+                    },
+                );
+            }
         }
-        RETRY.done(&key);
-        set_posted(ctx, &channels, now).await?;
     }
     Ok(())
 }
 
 /// Servers whose last diary failed, and when they may try again.
 static RETRY: RetryLater = RetryLater::new();
+
+/// How long to wait when the bot has no access to any diary channel.
+const NO_ACCESS_RETRY_SECS: i64 = 24 * 60 * 60;
+
+/// An entry that was written but couldn't be posted, by server. In memory only: after a
+/// restart a new one is written.
+static UNSENT: Mutex<BTreeMap<u64, Unsent>> = Mutex::new(BTreeMap::new());
+
+struct Unsent {
+    entry: String,
+    written_at: i64,
+    /// Whether "no access" was already warned about for this entry.
+    warned_no_access: bool,
+}
 
 /// When we last warned about each diary channel we couldn't find.
 static WARNED: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
@@ -149,8 +218,8 @@ async fn set_posted(ctx: &BotCtx, channels: &[ChannelId], now: i64) -> Result<()
     Ok(())
 }
 
-/// Writes one entry for `guild` and posts it in each of `channels`.
-async fn post(ctx: &BotCtx, guild: GuildId, channels: &[ChannelId], now: i64) -> Result<()> {
+/// Writes one entry for `guild`. `None` when nothing changed this week.
+async fn write(ctx: &BotCtx, guild: GuildId, now: i64) -> Result<Option<String>> {
     let scope = store::scope(Some(guild.get()), 0);
     let (folder, changed) = {
         let scope = scope.clone();
@@ -165,7 +234,7 @@ async fn post(ctx: &BotCtx, guild: GuildId, channels: &[ChannelId], now: i64) ->
     };
     if changed.is_empty() {
         info!("nothing new this week, no diary");
-        return Ok(());
+        return Ok(None);
     }
 
     let mut copy = folder.clone();
@@ -206,20 +275,57 @@ async fn post(ctx: &BotCtx, guild: GuildId, channels: &[ChannelId], now: i64) ->
     if entry.is_empty() {
         anyhow::bail!("the model wrote nothing");
     }
+    Ok(Some(entry.to_string()))
+}
+
+/// Where [`post`] got the entry to.
+enum Posted {
+    Somewhere,
+    /// Nowhere. `no_access`: every channel refused the bot (no access or permission).
+    Nowhere {
+        no_access: bool,
+    },
+}
+
+/// Posts an entry in each of `channels`.
+async fn post(ctx: &BotCtx, channels: &[ChannelId], entry: &str) -> Posted {
     let mut sent = 0;
+    let mut all_no_access = true;
     for &channel in channels {
         // One target failing (deleted, no permission) doesn't stop the others.
         match send(ctx, channel, entry).await {
             Ok(()) => sent += 1,
-            Err(err) => warn!(channel = channel.get(), "couldn't post the diary: {err:#}"),
+            // No access is warned about once by the caller, not on every try.
+            Err(err) if is_no_access(&err) => {
+                info!(
+                    channel = channel.get(),
+                    "no access to post the diary: {err:#}"
+                );
+            }
+            Err(err) => {
+                all_no_access = false;
+                warn!(channel = channel.get(), "couldn't post the diary: {err:#}");
+            }
         }
     }
-    // Posted nowhere (Discord down?) counts as failed, so it's tried again.
     if sent == 0 {
-        anyhow::bail!("couldn't post it in any channel");
+        return Posted::Nowhere {
+            no_access: all_no_access,
+        };
     }
     info!("posted the weekly diary in {sent} places");
-    Ok(())
+    Posted::Somewhere
+}
+
+/// Whether Discord refused because the bot can't see or post in the channel: 403, or
+/// Missing Access (50001) / Missing Permissions (50013).
+fn is_no_access(err: &anyhow::Error) -> bool {
+    match err.downcast_ref::<serenity::Error>() {
+        Some(serenity::Error::Http(HttpError::UnsuccessfulRequest(response))) => {
+            response.status_code.as_u16() == 403 || matches!(response.error.code, 50001 | 50013)
+        }
+        _ => false,
+    }
 }
 
 async fn send(ctx: &BotCtx, channel: ChannelId, entry: &str) -> Result<()> {

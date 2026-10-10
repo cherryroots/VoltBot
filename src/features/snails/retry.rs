@@ -11,7 +11,7 @@ use serenity::all::{ChannelId, GuildId, MessageId};
 use tracing::{debug, info, warn};
 
 use super::store::{self, DueFailure};
-use super::{backfill, collect, index};
+use super::{backfill, check, collect, index};
 use crate::core::{BotCtx, Result};
 
 /// How often the list is checked for pictures due another try.
@@ -19,6 +19,9 @@ const CHECK_EVERY: Duration = Duration::from_secs(5 * 60);
 /// Pictures tried per check, so a provider that is down for a day doesn't flood Discord
 /// with message reads all at once.
 const BATCH: i64 = 25;
+/// How long a picture in a channel where snails is turned off waits before it's looked at
+/// again. It isn't counted as a try.
+const OFF_WAIT: i64 = 60 * 60;
 
 /// Starts the retry loop. It stops when the bot shuts down.
 pub fn spawn(ctx: &BotCtx) {
@@ -59,12 +62,18 @@ async fn retry_due(ctx: &BotCtx) -> Result<()> {
         let failures = &due[start..end];
         start = end;
         let first = &failures[0];
-        // Turned off here since it failed: leave it on the list for when it's back on.
+        // Turned off here since it failed: leave it on the list for when it's back on, but
+        // move it back in the queue. Otherwise these would stay the longest waiting, fill
+        // every batch, and no other picture would ever be retried.
         if !ctx.allows(
             "snails",
             Some(GuildId::new(first.guild)),
             ChannelId::new(first.channel),
         ) {
+            let until = now + OFF_WAIT;
+            ctx.db
+                .call(move |conn| Ok(store::postpone_failures(conn, message, until)?))
+                .await?;
             continue;
         }
         retry_message(ctx, failures).await?;
@@ -124,14 +133,22 @@ async fn retry_message(ctx: &BotCtx, failures: &[DueFailure]) -> Result<()> {
                     "a failed snail picture downloaded on retry"
                 );
                 let (failure, stored) = (failure.clone(), loaded.stored());
-                ctx.db
+                let guild = GuildId::new(failure.guild);
+                // Saved only if the failure is still listed (one check and the save in the
+                // same transaction), so a message deleted meanwhile stays deleted.
+                let saved = ctx
+                    .db
                     .call(move |conn| {
                         let tx = conn.transaction()?;
-                        store::retry_succeeded(&tx, &failure, &stored)?;
+                        let saved = store::retry_succeeded(&tx, &failure, &stored)?;
                         tx.commit()?;
-                        Ok(())
+                        Ok(saved)
                     })
                     .await?;
+                if saved {
+                    // Checked like a new picture: it may be a snail.
+                    check::on_retried_picture(ctx, guild, &msg, loaded).await?;
+                }
             }
             Err(failed) => {
                 debug!(

@@ -84,7 +84,31 @@ async fn find_snails(
 /// Snail.
 pub async fn on_new_message(ctx: &BotCtx, guild: GuildId, msg: &Message) -> Result<()> {
     let synced = index::sync_message(ctx, guild, msg).await?;
-    if synced.new_links.is_empty() && synced.new_pictures.is_empty() {
+    count_if_snail(ctx, guild, msg, &synced.new_links, &synced.new_pictures).await
+}
+
+/// A failed picture of `msg` downloaded on retry (and was saved): checked like a new
+/// picture, so a snail whose picture was slow to load still counts.
+pub async fn on_retried_picture(
+    ctx: &BotCtx,
+    guild: GuildId,
+    msg: &Message,
+    picture: LoadedPicture,
+) -> Result<()> {
+    count_if_snail(ctx, guild, msg, &[], &[picture]).await
+}
+
+/// Counts `msg` as caught if any of `links` or `pictures` (what's new in it) was posted
+/// before. Only what's new is checked: the rest was checked when it arrived. A message is
+/// counted once.
+async fn count_if_snail(
+    ctx: &BotCtx,
+    guild: GuildId,
+    msg: &Message,
+    links: &[String],
+    pictures: &[LoadedPicture],
+) -> Result<()> {
+    if links.is_empty() && pictures.is_empty() {
         return Ok(());
     }
     let id = msg.id.get();
@@ -95,17 +119,9 @@ pub async fn on_new_message(ctx: &BotCtx, guild: GuildId, msg: &Message) -> Resu
     {
         return Ok(());
     }
-    // Only what's new is checked: the rest was checked when it arrived.
-    if earlier_posts(
-        ctx,
-        guild,
-        msg,
-        &synced.new_links,
-        &synced.new_pictures,
-        true,
-    )
-    .await?
-    .is_empty()
+    if earlier_posts(ctx, guild, msg, links, pictures, true)
+        .await?
+        .is_empty()
     {
         return Ok(());
     }
@@ -183,6 +199,8 @@ async fn save_if_new(
         links: keys.to_vec(),
         pictures: pictures.iter().map(LoadedPicture::stored).collect(),
         failed,
+        // Only saved when it wasn't read before, so nothing failed before.
+        waiting: Vec::new(),
     };
     let now = Utc::now().timestamp();
     ctx.db

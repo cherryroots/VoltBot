@@ -24,10 +24,10 @@ impl RetryLater {
         retries.get(key).is_some_and(|&at| now < at)
     }
 
-    /// `key` failed at `now`: try again in [`RETRY_SECS`].
-    pub fn failed(&self, key: &str, now: i64) {
+    /// `key` failed at `now`: try again in `wait` seconds (usually [`RETRY_SECS`]).
+    pub fn failed(&self, key: &str, now: i64, wait: i64) {
         let mut retries = self.0.lock().unwrap();
-        retries.insert(key.to_string(), now + RETRY_SECS);
+        retries.insert(key.to_string(), now + wait);
     }
 
     /// `key` worked: no more waiting.
@@ -44,11 +44,11 @@ mod tests {
     fn waits_after_a_failure_until_it_works() {
         let retry = RetryLater::new();
         assert!(!retry.waiting("server:1", 100));
-        retry.failed("server:1", 100);
+        retry.failed("server:1", 100, RETRY_SECS);
         assert!(retry.waiting("server:1", 100 + 3600));
         assert!(!retry.waiting("server:2", 100 + 3600));
         assert!(!retry.waiting("server:1", 100 + RETRY_SECS));
-        retry.failed("server:1", 200);
+        retry.failed("server:1", 200, RETRY_SECS);
         retry.done("server:1");
         assert!(!retry.waiting("server:1", 300));
     }

@@ -170,17 +170,19 @@ pub struct Synced {
 
 /// Reads a message's links and pictures and makes the saved rows match: new ones are added
 /// and ones an edit removed are dropped. Pictures already saved (the same file) keep their
-/// fingerprint instead of being downloaded again, and pictures that fail to load go on the
-/// retry list. Safe to run again on the same message: it only reports what is new.
-/// (Messages read from history don't say which server they are in, so it's passed.)
+/// fingerprint instead of being downloaded again, pictures that fail to load go on the
+/// retry list, and pictures already on it are left to the retry loop. Safe to run again on
+/// the same message: it only reports what is new. (Messages read from history don't say
+/// which server they are in, so it's passed.)
 pub async fn sync_message(ctx: &BotCtx, guild: GuildId, msg: &Message) -> anyhow::Result<Synced> {
     let id = msg.id.get();
-    let (old_links, saved) = ctx
+    let (old_links, saved, retrying) = ctx
         .db
         .call(move |conn| {
             Ok((
                 store::message_links(conn, id)?,
                 store::message_pictures(conn, id)?,
+                store::waiting_failures(conn, id)?,
             ))
         })
         .await?;
@@ -188,6 +190,7 @@ pub async fn sync_message(ctx: &BotCtx, guild: GuildId, msg: &Message) -> anyhow
 
     let mut kept = Vec::new();
     let mut to_load = Vec::new();
+    let mut waiting = Vec::new();
     for (position, picture) in collect::pictures(msg).into_iter().enumerate() {
         let source = picture.source();
         // Pictures saved before sources were kept are matched by their place instead.
@@ -201,6 +204,9 @@ pub async fn sync_message(ctx: &BotCtx, guild: GuildId, msg: &Message) -> anyhow
                 source,
                 fp: s.fp.clone(),
             }),
+            // It failed before and the retry loop is on it: downloading it again now (like
+            // the re-read for link previews) would count as another try within seconds.
+            None if retrying.contains(&source) => waiting.push(source),
             None => to_load.push((position, picture)),
         }
     }
@@ -222,6 +228,7 @@ pub async fn sync_message(ctx: &BotCtx, guild: GuildId, msg: &Message) -> anyhow
         links,
         pictures,
         failed,
+        waiting,
     };
     let now = Utc::now().timestamp();
     ctx.db

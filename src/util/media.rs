@@ -7,7 +7,7 @@
 //! and videos as grids of frames (see [`frames`](super::frames)).
 
 use std::collections::HashSet;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -291,15 +291,36 @@ fn is_public(ip: IpAddr) -> bool {
                 || a == 0
                 // Carrier-grade NAT, 100.64.0.0/10.
                 || (a == 100 && (64..128).contains(&b))
+                // IETF protocol assignments, 192.0.0.0/24.
+                || (a == 192 && b == 0 && ip.octets()[2] == 0)
+                // Benchmarking, 198.18.0.0/15.
+                || (a == 198 && (b == 18 || b == 19))
                 // Reserved, 240.0.0.0/4.
                 || a >= 240)
         }
         IpAddr::V6(ip) => {
-            // An IPv4 address written as IPv6 (::ffff:127.0.0.1) is checked as IPv4.
+            // An IPv4 address inside an IPv6 one is checked as IPv4, since it can lead to
+            // it: mapped (::ffff:127.0.0.1), IPv4-compatible (::127.0.0.1), NAT64
+            // (64:ff9b::127.0.0.1) and 6to4 (2002:7f00:1::, the IPv4 in segments 1-2).
+            let s = ip.segments();
+            let o = ip.octets();
+            let tail = Ipv4Addr::new(o[12], o[13], o[14], o[15]);
             if let Some(v4) = ip.to_ipv4_mapped() {
                 return is_public(IpAddr::V4(v4));
             }
-            let first = ip.segments()[0];
+            // IPv4-compatible: the first 96 bits are zero (:: and ::1 are checked below).
+            if s[..6] == [0; 6] && !(ip.is_unspecified() || ip.is_loopback()) {
+                return is_public(IpAddr::V4(tail));
+            }
+            // NAT64, 64:ff9b::/96. Translated to the IPv4 it holds, so check that.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_public(IpAddr::V4(tail));
+            }
+            // 6to4, 2002::/16.
+            if s[0] == 0x2002 {
+                return is_public(IpAddr::V4(Ipv4Addr::new(o[2], o[3], o[4], o[5])));
+            }
+            let first = s[0];
             !(ip.is_unspecified()
                 || ip.is_loopback()
                 || ip.is_multicast()
@@ -618,6 +639,15 @@ mod tests {
             "http://[::ffff:127.0.0.1]/",
             "http://[fd00::1]/",
             "http://[fe80::1]/",
+            "http://192.0.0.8/",
+            "http://198.18.0.1/",
+            "http://198.19.255.255/",
+            "http://[::127.0.0.1]/",
+            "http://[::a00:1]/",
+            "http://[64:ff9b::127.0.0.1]/",
+            "http://[64:ff9b::a9fe:a9fe]/",
+            "http://[2002:7f00:1::]/",
+            "http://[2002:c0a8:101::1]/",
             "file:///etc/passwd",
             "ftp://example.com/x",
         ] {
@@ -627,6 +657,10 @@ mod tests {
             "https://cdn.discordapp.com/a.png",
             "http://8.8.8.8/",
             "https://[2606:4700::1111]/",
+            "http://198.20.0.1/",
+            "http://192.0.1.1/",
+            "http://[64:ff9b::808:808]/",
+            "http://[2002:808:808::]/",
         ] {
             assert!(check_url(good).is_ok(), "{good} should be allowed");
         }

@@ -13,7 +13,7 @@ use serenity::all::GuildId;
 use tracing::{Instrument as _, error, info, info_span, warn};
 
 use super::folder::{self, Command};
-use super::retry::RetryLater;
+use super::retry::{RETRY_SECS, RetryLater};
 use super::{diary, store, tool};
 use crate::ai::{ChatRequest, Input, Part, Role, Turn, complete};
 use crate::core::{BotCtx, Result};
@@ -95,7 +95,7 @@ async fn reflect_due(ctx: &BotCtx) -> Result<()> {
         if let Err(err) = reflect(ctx, &scope).await {
             // Not saved as done, so it's tried again in a few hours, not tomorrow.
             warn!(scope, "reflection failed, trying again later: {err:#}");
-            RETRY.failed(&scope, started);
+            RETRY.failed(&scope, started, RETRY_SECS);
             continue;
         }
         RETRY.done(&scope);
