@@ -146,6 +146,34 @@ pub fn find_media(msg: &Message) -> Vec<Media> {
     found
 }
 
+/// An attached file that isn't a picture or video: a PDF, a spreadsheet, a text file...
+#[derive(Debug, Clone, PartialEq)]
+pub struct FoundFile {
+    pub url: String,
+    pub name: String,
+    /// Like `application/pdf`; `application/octet-stream` when Discord doesn't say.
+    pub mime: String,
+}
+
+/// The message's attachments that [`find_media`] doesn't take, in order.
+pub fn find_files(msg: &Message) -> Vec<FoundFile> {
+    msg.attachments
+        .iter()
+        .filter(|a| classify(a.content_type.as_deref(), &a.url).is_none())
+        .map(|a| FoundFile {
+            url: a.url.clone(),
+            name: a.filename.clone(),
+            mime: a
+                .content_type
+                .as_deref()
+                .and_then(|t| t.split(';').next())
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+        })
+        .collect()
+}
+
 /// The http(s) links in a message's text, including `<link>` (no preview) and links in
 /// brackets.
 pub fn links(text: &str) -> Vec<&str> {
@@ -361,6 +389,34 @@ mod tests {
         assert_eq!(
             (found[3].kind, found[3].mime),
             (MediaKind::Video, "video/mp4")
+        );
+    }
+
+    #[test]
+    fn finds_other_files() {
+        let mut msg = Message::default();
+        msg.attachments = vec![
+            attachment("https://cdn.discordapp.com/a/1/pic.png", Some("image/png")),
+            attachment(
+                "https://cdn.discordapp.com/a/2/notes.txt",
+                Some("text/plain; charset=utf-8"),
+            ),
+            attachment("https://cdn.discordapp.com/a/3/data.bin", None),
+        ];
+        let files = find_files(&msg);
+        let found: Vec<(&str, &str)> = files
+            .iter()
+            .map(|f| (f.url.as_str(), f.mime.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("https://cdn.discordapp.com/a/2/notes.txt", "text/plain"),
+                (
+                    "https://cdn.discordapp.com/a/3/data.bin",
+                    "application/octet-stream"
+                ),
+            ]
         );
     }
 

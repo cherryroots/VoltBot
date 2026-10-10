@@ -9,14 +9,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context as _, anyhow};
+use anyhow::anyhow;
 use serenity::all::{CreateAttachment, MessageId};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::ai::{
-    Activity, ChatEvent, ChatProvider, ChatRequest, Done, GeneratedFile, Input, Part, Role,
-    ToolCall, ToolDef, Turn,
+    Activity, ChatEvent, ChatProvider, ChatRequest, Done, GeneratedFile, Input, NativeRound,
+    ToolCall, ToolDef, ToolOutput, next_input,
 };
 use crate::core::errors::is_user_error;
 use crate::core::{Asker, BotCtx, Feature};
@@ -140,7 +140,7 @@ pub async fn run(ctx: &BotCtx, provider: &dyn ChatProvider, job: Job) -> Outcome
     .await;
 
     let (end, written) = match result {
-        Ok(Some((done, natives, files))) => {
+        Ok(Some((done, rounds, files))) => {
             screen.status = None;
             if let Err(err) = attach_files(ctx, provider, &mut screen, &files).await {
                 warn!("couldn't attach the answer's files: {err:#}");
@@ -153,7 +153,7 @@ pub async fn run(ctx: &BotCtx, provider: &dyn ChatProvider, job: Job) -> Outcome
                 provider: provider.name().to_string(),
                 model: provider.model().to_string(),
                 continuation_id: done.continuation,
-                native_json: Some(serde_json::Value::Array(natives).to_string()),
+                native_json: serde_json::to_string(&rounds).ok(),
             };
             (End::Finished, Some(written))
         }
@@ -181,7 +181,7 @@ pub async fn run(ctx: &BotCtx, provider: &dyn ChatProvider, job: Job) -> Outcome
     }
 }
 
-type Finished = (Done, Vec<serde_json::Value>, Vec<GeneratedFile>);
+type Finished = (Done, Vec<NativeRound>, Vec<GeneratedFile>);
 
 /// Streams rounds of model output until the model stops asking for tools. Returns `None`
 /// when ❌ stopped it.
@@ -194,14 +194,14 @@ async fn stream_answer(
     screen: &mut Screen,
 ) -> anyhow::Result<Option<Finished>> {
     let (tools, owners) = tools_for(ctx, asker);
-    let mut natives = Vec::new();
+    let mut rounds = Vec::new();
     let mut files = Vec::new();
     screen.show(ctx).await?;
 
     for _round in 0..MAX_ROUNDS {
         let request = ChatRequest {
             system: SYSTEM_PROMPT.to_string(),
-            input,
+            input: input.clone(),
             tools: tools.clone(),
             cache_key: format!("discord:{}", asker.channel),
         };
@@ -235,17 +235,16 @@ async fn stream_answer(
                 },
             }
         };
-        natives.push(done.native.clone());
         files.extend(done.files.iter().cloned());
         if done.tool_calls.is_empty() {
-            return Ok(Some((done, natives, files)));
+            rounds.push(NativeRound {
+                output: done.native.clone(),
+                results: Vec::new(),
+            });
+            return Ok(Some((done, rounds, files)));
         }
 
-        // Run the tools, then continue the same response with their results.
-        let continuation = done
-            .continuation
-            .clone()
-            .context("the model asked for tools but gave no way to continue")?;
+        // Run the tools, then continue the answer with their results.
         let mut results = Vec::new();
         for call in &done.tool_calls {
             screen.status = Some(tool_status(&call.name));
@@ -254,19 +253,17 @@ async fn stream_answer(
                 output = run_tool(ctx, asker, &owners, call) => output,
                 () = cancel.cancelled() => return Ok(None),
             };
-            results.push(Part::ToolResult {
+            results.push(ToolOutput {
                 call_id: call.id.clone(),
                 output,
             });
         }
         screen.status = Some(activity_status(&Activity::Thinking));
-        input = Input::After {
-            continuation,
-            new: vec![Turn {
-                role: Role::User,
-                parts: results,
-            }],
-        };
+        input = next_input(provider, input, &done, &results);
+        rounds.push(NativeRound {
+            output: done.native,
+            results,
+        });
     }
     Err(anyhow!(
         "the model kept calling tools ({MAX_ROUNDS} rounds)"

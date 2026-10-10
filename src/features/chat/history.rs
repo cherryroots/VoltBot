@@ -8,13 +8,17 @@ use serenity::all::{ContentSafeOptions, Message, content_safe};
 use tracing::warn;
 
 use super::store::{self, StoredPart, Turn};
-use crate::ai::{self, ChatProvider, Input, Part, Role};
+use crate::ai::{self, ChatProvider, Input, ModelFile, NativeRound, Part, Role};
 use crate::core::BotCtx;
 use crate::util::media::{self, Media};
 use crate::util::text::{attachment_text, embed_text};
 
 /// At most this many images, GIFs or videos are read from one message.
 const MAX_MEDIA_PER_MESSAGE: usize = 8;
+/// At most this many other files are read from one message.
+const MAX_FILES_PER_MESSAGE: usize = 10;
+/// Files bigger than this are left out. Discord's own upload limit is 100 MB.
+const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 /// Only the newest turns with media send it again in a full history; older ones say there
 /// was an image. Videos turn into several grids each, so this keeps requests small.
 const MEDIA_TURNS: usize = 4;
@@ -72,6 +76,16 @@ pub async fn read_message(
                 mime: found.mime.to_string(),
             });
         }
+        for found in media::find_files(msg)
+            .into_iter()
+            .take(MAX_FILES_PER_MESSAGE)
+        {
+            parts.push(StoredPart::File {
+                url: found.url,
+                name: found.name,
+                mime: found.mime,
+            });
+        }
     }
     parts
 }
@@ -112,11 +126,11 @@ async fn to_model_turns(ctx: &BotCtx, turns: &[Turn]) -> Vec<ai::Turn> {
     // Discord's attachment links expire after about a day; ask for fresh ones.
     let urls: Vec<String> = turns
         .iter()
-        .filter(|t| loaded_turns.contains(&t.id))
-        .flat_map(|t| &t.parts)
-        .filter_map(|p| match p {
-            StoredPart::Media { url, .. } => Some(url.clone()),
-            StoredPart::Text { .. } => None,
+        .flat_map(|t| t.parts.iter().map(move |p| (t, p)))
+        .filter_map(|(t, p)| match p {
+            StoredPart::Media { url, .. } if loaded_turns.contains(&t.id) => Some(url.clone()),
+            StoredPart::File { url, .. } => Some(url.clone()),
+            StoredPart::Media { .. } | StoredPart::Text { .. } => None,
         })
         .collect();
     let fresh = refresh_urls(ctx, &urls).await;
@@ -146,7 +160,27 @@ async fn to_model_turns(ctx: &BotCtx, turns: &[Turn]) -> Vec<ai::Turn> {
                         }
                     }
                 }
+                StoredPart::File { .. } if turn.role == Role::Assistant => {}
+                StoredPart::File { url, name, mime } => {
+                    let link = fresh.get(url).unwrap_or(url);
+                    match media::download(&ctx.web, link, MAX_FILE_BYTES).await {
+                        Ok(data) => parts.push(Part::File(ModelFile {
+                            name: name.clone(),
+                            mime: mime.clone(),
+                            data,
+                        })),
+                        Err(err) => {
+                            warn!("couldn't load {name} for chat: {err:#}");
+                            parts.push(Part::Text(format!(
+                                "[the file {name}, which couldn't be loaded]"
+                            )));
+                        }
+                    }
+                }
             }
+        }
+        if let Some(native) = native_part(turn) {
+            parts.push(native);
         }
         result.push(ai::Turn {
             role: turn.role,
@@ -154,6 +188,23 @@ async fn to_model_turns(ctx: &BotCtx, turns: &[Turn]) -> Vec<ai::Turn> {
         });
     }
     result
+}
+
+/// An answer's raw output, for the provider that wrote it. Answers saved before rounds
+/// were stored (or by a provider that keeps nothing) have none.
+fn native_part(turn: &Turn) -> Option<Part> {
+    if turn.role != Role::Assistant {
+        return None;
+    }
+    let rounds = NativeRound::parse_list(turn.native_json.as_deref()?)?;
+    if rounds.is_empty() {
+        return None;
+    }
+    Some(Part::Native {
+        provider: turn.provider.clone()?,
+        model: turn.model.clone()?,
+        rounds,
+    })
 }
 
 /// The stored MIME type as one of the known `&'static str`s.

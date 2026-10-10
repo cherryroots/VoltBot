@@ -206,7 +206,7 @@ pub async fn speak(
         provider: provider.name().to_string(),
         model: provider.model().to_string(),
         continuation_id: done.continuation,
-        native_json: Some(serde_json::Value::Array(done.natives).to_string()),
+        native_json: serde_json::to_string(&done.rounds).ok(),
     };
     let (sent_id, bot_id) = (sent.id.get(), ctx.bot_id.get());
     ctx.db

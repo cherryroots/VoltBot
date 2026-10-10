@@ -67,6 +67,12 @@ pub enum StoredPart {
         kind: StoredKind,
         mime: String,
     },
+    /// Any other attachment, like a PDF or a spreadsheet.
+    File {
+        url: String,
+        name: String,
+        mime: String,
+    },
 }
 
 /// [`MediaKind`] as stored.
@@ -129,6 +135,8 @@ pub struct Turn {
     pub provider: Option<String>,
     pub model: Option<String>,
     pub continuation_id: Option<String>,
+    /// The provider's raw output, for answers.
+    pub native_json: Option<String>,
 }
 
 /// Adds a turn and links its Discord messages to it. Linking a message that already
@@ -187,7 +195,8 @@ pub fn turn_for_message(conn: &Connection, message_id: u64) -> anyhow::Result<Op
 pub fn get_turn(conn: &Connection, id: i64) -> anyhow::Result<Option<Turn>> {
     let row = conn
         .query_row(
-            "SELECT id, parent_id, role, author_id, content_json, provider, model, continuation_id
+            "SELECT id, parent_id, role, author_id, content_json, provider, model, continuation_id,
+                    native_json
              FROM chat_turns WHERE id = ?1",
             [id],
             read_row,
@@ -233,6 +242,7 @@ type RawRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 fn read_row(row: &Row) -> rusqlite::Result<RawRow> {
@@ -245,11 +255,13 @@ fn read_row(row: &Row) -> rusqlite::Result<RawRow> {
         row.get(5)?,
         row.get(6)?,
         row.get(7)?,
+        row.get(8)?,
     ))
 }
 
 fn into_turn(row: RawRow) -> anyhow::Result<Turn> {
-    let (id, parent_id, role, author_id, content, provider, model, continuation_id) = row;
+    let (id, parent_id, role, author_id, content, provider, model, continuation_id, native_json) =
+        row;
     Ok(Turn {
         id,
         parent_id,
@@ -263,6 +275,7 @@ fn into_turn(row: RawRow) -> anyhow::Result<Turn> {
         provider,
         model,
         continuation_id,
+        native_json,
     })
 }
 
