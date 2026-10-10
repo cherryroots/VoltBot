@@ -41,10 +41,11 @@ pub fn enabled(ctx: &BotCtx) -> bool {
 }
 
 /// The line added to the mood instructions when her nickname follows her mood.
-pub const INSTRUCTION: &str = "Add an `emoji:` line with one emoji that fits your mood or what you're doing; it's shown after your name in this server.";
+pub const INSTRUCTION: &str = "Add an `emoji:` line with one standard emoji (never a custom server emoji: names can't show them) that fits your mood or what you're doing; it's shown after your name in this server.";
 
 /// `emoji` if it is one short emoji (or a few joined ones), without letters, digits or
-/// spaces, so the line can't put words in her name.
+/// spaces, so the line can't put words in her name. A custom emoji (`<:name:id>` or
+/// `:name:`) is ASCII, so it is turned down too: names are plain text and can't show one.
 pub fn clean(emoji: &str) -> Option<String> {
     let emoji = emoji.trim().trim_matches(['"', '`']);
     let count = emoji.chars().count();
@@ -118,6 +119,9 @@ mod tests {
         assert_eq!(parse("emoji: happy"), None);
         assert_eq!(parse("emoji: ☕ hi"), None);
         assert_eq!(parse("emoji: :)"), None);
+        // Custom server emoji can't show in a name.
+        assert_eq!(parse("emoji: <:vivy_happy:123456789012345678>"), None);
+        assert_eq!(parse("emoji: :vivy_happy:"), None);
         assert_eq!(parse("emoji:"), None);
         assert_eq!(parse("mood: cozy"), None);
     }
