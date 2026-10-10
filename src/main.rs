@@ -1,4 +1,4 @@
-//! VoltBot: load the config, open the database, connect to Discord, and hand events to the
+//! Vivy: load the config, open the database, connect to Discord, and hand events to the
 //! features in `features::all()`.
 
 mod ai;
@@ -28,7 +28,10 @@ use crate::core::{BotCtx, Feature, dispatcher};
 async fn main() -> anyhow::Result<()> {
     // Secrets come from `.env` (or the real environment). A missing file is fine.
     let _ = dotenvy::dotenv();
-    let config_path = std::env::var("VOLTBOT_CONFIG").unwrap_or_else(|_| "config.toml".into());
+    // VOLTBOT_CONFIG is the name from before the bot was renamed to Vivy.
+    let config_path = std::env::var("VIVY_CONFIG")
+        .or_else(|_| std::env::var("VOLTBOT_CONFIG"))
+        .unwrap_or_else(|_| "config.toml".into());
     let config = Config::load(Path::new(&config_path))?;
     let log_queue = logging::init(&config.logging)?;
 
@@ -45,7 +48,7 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
     let config = Arc::new(config);
     let features = Arc::new(features::all());
     let web = reqwest::Client::builder()
-        .user_agent(concat!("VoltBot/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Vivy/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         // A response that sends nothing for this long fails instead of hanging forever.
         // Generous, since AI streams can go quiet while the model thinks (Claude sends a
@@ -55,6 +58,9 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
         .context("creating the HTTP client")?;
 
     // Database: open, run every owner's migrations, then import voltgpt's data if present.
+    if db::adopt_old_name(Path::new(&config.database)).context("renaming voltbot.db")? {
+        info!("renamed voltbot.db to {}", config.database);
+    }
     let db = Db::open(&config.database)
         .await
         .context("opening the database")?;
@@ -179,7 +185,7 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
 
                 info!(
                     target: "lifecycle",
-                    "🟢 **Started** VoltBot {} (`{}`) as {} · features: {}{}",
+                    "🟢 **Started** Vivy {} (`{}`) as {} · features: {}{}",
                     crate::core::VERSION,
                     crate::core::GIT_COMMIT,
                     ready.user.name,

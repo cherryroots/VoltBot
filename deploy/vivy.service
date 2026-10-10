@@ -1,14 +1,14 @@
 [Unit]
-Description=VoltBot Discord bot
+Description=Vivy Discord bot
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=voltbot
-Group=voltbot
-WorkingDirectory=/opt/voltbot
-ExecStart=/opt/voltbot/voltbot
+User=vivy
+Group=vivy
+WorkingDirectory=/opt/vivy
+ExecStart=/opt/vivy/vivy
 Environment=RUST_LOG=info
 Restart=on-failure
 RestartSec=5
@@ -20,7 +20,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/opt/voltbot
+ReadWritePaths=/opt/vivy
 
 [Install]
 WantedBy=multi-user.target

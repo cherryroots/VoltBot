@@ -1,6 +1,6 @@
-# VoltBot feature map
+# Vivy feature map
 
-This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it, which Discord events each feature listens to, and the order we port them in. It is the reference for every later stage.
+This maps every feature of the Go bot (voltgpt) to what Vivy will do with it, which Discord events each feature listens to, and the order we port them in. It is the reference for every later stage.
 
 ## Decisions so far
 
@@ -8,13 +8,13 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 |---|---|
 | Discord library | `serenity` + `poise` (poise handles slash commands, serenity handles raw events) |
 | AI provider | OpenAI first, behind a provider trait. Claude next, through the plain Messages API (not the Agent SDK), then maybe Gemini. `provider` under `[ai]` picks which one chats |
-| Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` behind `tokio-rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, named after it (`reminders`, `reminder_images`, `wheel_*`, `chat_turns`), and its own migrations, recorded in a shared `schema_migrations` table. Core tables shared by all features: `user_settings`, `legacy_imports` |
+| Storage | One SQLite file (`vivy.db`, WAL mode), raw SQL through `rusqlite` behind `tokio-rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, named after it (`reminders`, `reminder_images`, `wheel_*`, `chat_turns`), and its own migrations, recorded in a shared `schema_migrations` table. Core tables shared by all features: `user_settings`, `legacy_imports` |
 | Config | `.env` for secrets, `config.toml` for everything else (admin IDs, per-feature settings and guild/channel gating that Go hardcodes) |
 | Async runtime | `tokio` (serenity already uses it) |
 
 ## Scope
 
-| Go feature | Go location | VoltBot |
+| Go feature | Go location | Vivy |
 |---|---|---|
 | AI chat (mention the bot, streamed reply) | `handler/messages.go`, `apis/openai/chat.go` | **Port** |
 | Reminders (`@Vivy remind me in 2h ...`, `/reminders`) | `reminder/`, parts of `handler/` | **Port** |
@@ -25,7 +25,7 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 
 ## Architecture
 
-The Go bot has one big `HandleMessage` function that does hashing, memory capture, reminders and chat in sequence, and chat has to know about reminders to stay out of their way. VoltBot is built so that adding a feature means adding one folder and one line, without editing any other feature.
+The Go bot has one big `HandleMessage` function that does hashing, memory capture, reminders and chat in sequence, and chat has to know about reminders to stay out of their way. Vivy is built so that adding a feature means adding one folder and one line, without editing any other feature.
 
 ### Rules
 
@@ -97,7 +97,7 @@ pub fn all() -> Vec<Arc<dyn Feature>> {
 
 Every handler runs in its own tokio task, so a slow or failing feature never blocks the others, and a panic is logged instead of crashing the bot (the Go bot has no panic recovery). Errors are logged with the feature name; an error type that marks a message as safe to show is sent back to the user, anything else becomes a generic "something went wrong".
 
-**Gating is config, not code.** Go hardcodes `MainServer` and a channel blacklist inside the handlers. VoltBot gives every feature an `enabled` flag and optional guild and channel allow/deny lists in its config section, and the dispatcher checks them before calling the feature:
+**Gating is config, not code.** Go hardcodes `MainServer` and a channel blacklist inside the handlers. Vivy gives every feature an `enabled` flag and optional guild and channel allow/deny lists in its config section, and the dispatcher checks them before calling the feature:
 
 ```toml
 [features.chat]
@@ -117,11 +117,11 @@ A thread is gated as itself and as its parent channel (looked up in the cache by
 
 ### Logging and error reporting
 
-- **`tracing` everywhere.** The dispatcher opens a span for every event with the feature name, guild, channel, user and interaction or message ID, so every log line inside a handler carries that context without passing it around. `tracing-subscriber` writes readable lines in development and JSON in production, with the level set by `RUST_LOG` (for example `RUST_LOG=info,voltbot::features::chat=debug`).
+- **`tracing` everywhere.** The dispatcher opens a span for every event with the feature name, guild, channel, user and interaction or message ID, so every log line inside a handler carries that context without passing it around. `tracing-subscriber` writes readable lines in development and JSON in production, with the level set by `RUST_LOG` (for example `RUST_LOG=info,vivy::features::chat=debug`).
 - **Errors keep their cause.** Handlers return `anyhow::Result`, and errors get `.context("what we were doing")` where they happen. The dispatcher logs the whole chain once, at `error` level, with the span's context. A panic hook logs panics the same way.
 - **Logs in Discord.** A small `tracing` layer forwards log events to the control panel's log channel (see "Control panel" below), rate limited and grouped so one broken feature doesn't flood it. An error message includes the feature, the error chain and a link to the triggering message.
 - **Optional, later: Sentry.** The `sentry` crate with its `tracing` integration groups errors, counts them, and keeps the breadcrumbs that led up to each one. It turns on when `SENTRY_DSN` is set; GlitchTip is a self-hostable server that speaks the same protocol.
-- **Running it.** A systemd service (`deploy/voltbot.service`): it restarts the bot on a crash and keeps the full logs in the journal (`journalctl -u voltbot -f`). Setup steps are in the README.
+- **Running it.** A systemd service (`deploy/vivy.service`): it restarts the bot on a crash and keeps the full logs in the journal (`journalctl -u vivy -f`). Setup steps are in the README.
 
 ### Shared services on `BotCtx`
 
@@ -171,9 +171,9 @@ Nothing else changes. Memory, for example, is a feature that declares its tables
 
 What it does: when someone @-mentions the bot, it builds a request from the message (text, attachment names, embed text, images, video frames), sends it to OpenAI's Responses API with web search and code interpreter turned on, and streams the answer into a Discord reply, editing it about once per second. Long answers are split across several messages. Files produced by the code interpreter are attached to the final message.
 
-Conversation history: in Go, every Discord message ID of a bot reply is stored with its OpenAI response ID (`response_ids` table), and replying to a bot message continues from that ID. That only works for OpenAI, because Claude and Gemini keep no conversation state on their side. VoltBot keeps its own provider-neutral history instead (see "AI providers" below), and OpenAI's response ID becomes an optional shortcut stored next to it.
+Conversation history: in Go, every Discord message ID of a bot reply is stored with its OpenAI response ID (`response_ids` table), and replying to a bot message continues from that ID. That only works for OpenAI, because Claude and Gemini keep no conversation state on their side. Vivy keeps its own provider-neutral history instead (see "AI providers" below), and OpenAI's response ID becomes an optional shortcut stored next to it.
 
-Progress feedback: Go adds a ⏳ reaction while the model works and swaps it for ✅ at the end. VoltBot drops the status reactions and shows the state in the reply itself, as a small line under the text using Discord's `-#` subtext markdown, updated with the same once-per-second edit that streams the answer:
+Progress feedback: Go adds a ⏳ reaction while the model works and swaps it for ✅ at the end. Vivy drops the status reactions and shows the state in the reply itself, as a small line under the text using Discord's `-#` subtext markdown, updated with the same once-per-second edit that streams the answer:
 
 - `-# 💭 Thinking…` before any text arrives
 - `-# 🔧 Reading recent messages…` (one line per tool, named by the tool)
@@ -192,7 +192,7 @@ Server emoji (`chat/emoji.rs`, Cherry's design, 2026-10-09): a task waits 30 sec
 
 Provider trait: the parts that differ per provider are building the input, streaming the output, continuing a conversation, and returning generated files. Those go behind a trait (see "AI providers" below). Discord streaming, message splitting, media extraction, the tool loop and the bot's own tools stay outside it so every provider reuses them.
 
-Prompt caching: the system prompt is fully static. The Go bot appended the current time, channel name and memory context to the instructions, which come first in every request, so the cache broke there and the conversation history after it was never reused. VoltBot drops memory and gives the model tools to look up the time and channel instead. The tool list is also static and in a fixed order, since it is part of the cached prefix.
+Prompt caching: the system prompt is fully static. The Go bot appended the current time, channel name and memory context to the instructions, which come first in every request, so the cache broke there and the conversation history after it was never reused. Vivy drops memory and gives the model tools to look up the time and channel instead. The tool list is also static and in a fixed order, since it is part of the cached prefix.
 
 Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and deletes a finished one, and 🔁 regenerates it from the same input, editing the old answer's messages in place. Only the person who asked can use them. The bot removes the 🔁 again, so it can be used for the next try.
 
@@ -237,7 +237,7 @@ The tool loop: when the model asks for a tool, the bot runs it, sends the result
 
 Go helpers and what replaces them. Most come from serenity, poise or a well-known crate; only a few small functions are written by hand:
 
-| Go helper | In VoltBot |
+| Go helper | In Vivy |
 |---|---|
 | `ResolveMentions`, `CleanMessage` | `serenity::utils::content_safe` (turns `<@id>` into names) |
 | `MessageMentionsUser`, `IsBotDirectedMessage` | `Message::mentions_user_id` |
@@ -337,14 +337,14 @@ Likely crates: `winnow`, `chrono`, `chrono-tz`.
 
 ### 3. Movie wheel
 
-What it does: a betting game for movie night. Admins add options to the wheel, players claim 100 per round, bet on which option wins, and admins set the winner. Players who bet under 10% of their money get taxed. A status embed shows the round with buttons for claim, bet and winner (in VoltBot, a rendered picture).
+What it does: a betting game for movie night. Admins add options to the wheel, players claim 100 per round, bet on which option wins, and admins set the winner. Players who bet under 10% of their money get taxed. A status embed shows the round with buttons for claim, bet and winner (in Vivy, a rendered picture).
 
 Commands: `/wheel_status`, `/wheel_add` (admin), `/insert_bet` (admin), `/reset_wheel` (admin).
-Components: `button_currentround`, `button_claim`, `button_bet`, `button_winner`, `menu_bet` (place, remove, winner). Modal: `modal_bet` (amount). In VoltBot these become actions of one `wheel:` custom ID enum (`wheel:claim:<round>`, `wheel:bet:<round>`, and so on).
+Components: `button_currentround`, `button_claim`, `button_bet`, `button_winner`, `menu_bet` (place, remove, winner). Modal: `modal_bet` (amount). In Vivy these become actions of one `wheel:` custom ID enum (`wheel:claim:<round>`, `wheel:bet:<round>`, and so on).
 
 Events and guards: slash commands, buttons, select menus, modal submit; admin guard on the admin actions.
 
-Storage: Go saves the whole game as one JSON blob in `game_state` and rewrites it after every change. VoltBot uses small tables instead, because seasons, undo, admin edits and the chat tool all need to find or change one claim or bet at a time:
+Storage: Go saves the whole game as one JSON blob in `game_state` and rewrites it after every change. Vivy uses small tables instead, because seasons, undo, admin edits and the chat tool all need to find or change one claim or bet at a time:
 
 ```sql
 CREATE TABLE wheel_seasons (id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL,
@@ -368,13 +368,13 @@ Rules today, so the port keeps them exact: every round a player can claim 100. B
 
 Changes in the port:
 
-- **One ledger function.** Go recomputes a player's money from round 0 for every row of the status embed. VoltBot computes a ledger once, a pure function that folds over the rounds and returns every player's balance, tax and payout per round. The embed, the bet checks and the `get_wheel_status` tool all read from it. It is the first thing to write, with unit tests.
+- **One ledger function.** Go recomputes a player's money from round 0 for every row of the status embed. Vivy computes a ledger once, a pure function that folds over the rounds and returns every player's balance, tax and payout per round. The embed, the bet checks and the `get_wheel_status` tool all read from it. It is the first thing to write, with unit tests.
 - **Same numbers as today.** A one-time import reads the current `game_state` JSON from voltgpt into the tables as the first season, and a test checks that the ledger produces the same balances the Go bot shows, so the running game carries over.
-- **Store user IDs, not user objects.** Go saves the whole Discord user in the JSON, so names and avatars go stale. VoltBot stores IDs and looks names up when it renders the embed.
+- **Store user IDs, not user objects.** Go saves the whole Discord user in the JSON, so names and avatars go stale. Vivy stores IDs and looks names up when it renders the embed.
 - **Fix a wrong winner.** Once a winner is set, a new round starts and the old one can no longer be changed, so a mis-click is permanent. Admins get an "Undo winner" action on the latest resolved round, allowed while the new round has no bets yet.
-- **Winner without bets.** Go refuses to set a winner when nobody bet ("No bets!"), which blocks the wheel if a movie was watched without bets. VoltBot allows it.
-- **Seasons instead of a hard reset.** `/reset_wheel` deletes everything with no confirmation. VoltBot asks for confirmation with a button and archives the old game as a finished season, so past results stay viewable.
-- **One game per server.** Go has a single global game. VoltBot keys the game by guild ID; it costs nothing and avoids surprises.
+- **Winner without bets.** Go refuses to set a winner when nobody bet ("No bets!"), which blocks the wheel if a movie was watched without bets. Vivy allows it.
+- **Seasons instead of a hard reset.** `/reset_wheel` deletes everything with no confirmation. Vivy asks for confirmation with a button and archives the old game as a finished season, so past results stay viewable.
+- **One game per server.** Go has a single global game. Vivy keys the game by guild ID; it costs nothing and avoids surprises.
 - **No lock held during Discord calls.** Go keeps `gamble.Mu` locked while it calls the Discord API. With the tables above, each action is a short database transaction, and the bot only talks to Discord after it commits.
 
 How it was built (stage 4), where it differs from the plan above:
@@ -455,7 +455,7 @@ Crates: `sysinfo` (memory use) and a small `build.rs` (git commit in the binary)
 
 ## Importing from voltgpt (`old.db`)
 
-Copy voltgpt's `voltgpt.db` next to the bot as `old.db` and start the bot. On startup it checks for `old.db`, opens it read-only, and imports what VoltBot uses, each part in one transaction. A `legacy_imports (part, imported_at, rows)` table records each finished part so a restart never imports twice. When every part is done, the file is renamed to `old.db.imported` and kept, so image hashes can be imported later when hashing comes back.
+Copy voltgpt's `voltgpt.db` next to the bot as `old.db` and start the bot. On startup it checks for `old.db`, opens it read-only, and imports what Vivy uses, each part in one transaction. A `legacy_imports (part, imported_at, rows)` table records each finished part so a restart never imports twice. When every part is done, the file is renamed to `old.db.imported` and kept, so image hashes can be imported later when hashing comes back.
 
 Each feature owns its import function (`reminders::import_legacy`, `wheel::import_legacy`), so the reminders import ships in stage 1 and the wheel import in stage 4. A part whose feature isn't ported yet is simply skipped and picked up on a later start.
 
@@ -479,7 +479,7 @@ Replaces the Go bot's hasher (`features/snails/`). Every guild message's link ke
 
 ## Memory
 
-voltgpt's memory captured every message, summarized it into notes and profiles, and pasted the matches into the instructions of every request. That bloated the prompt and broke the cache. VoltBot's memory is a folder of text files the model manages itself through one chat tool, `memory`, and nothing is pasted into the instructions.
+voltgpt's memory captured every message, summarized it into notes and profiles, and pasted the matches into the instructions of every request. That bloated the prompt and broke the cache. Vivy's memory is a folder of text files the model manages itself through one chat tool, `memory`, and nothing is pasted into the instructions.
 
 - **Compatible with Claude.** The tool's commands (`view`, `create`, `str_replace`, `insert`, `delete`, `rename`), arguments and reply texts follow Anthropic's memory tool (`memory_20250818`), which models know well. Both providers get it as a normal function tool. Claude's own memory tool was tried first, but Anthropic sends it with an instruction to record task progress in memory, so people's files filled up with one-off tasks (shared spreadsheets, reports Vivy made). The tool's description says what's worth saving (lasting facts, not a log of what happened), and the daily reflection deletes task logs that slip through.
 - **Folders.** One `/memories` folder per server, shared by everyone in it, and a private one per person in DMs (scope `server:<id>` or `dm:<id>`). The tool suggests a folder per person, `/memories/users/<user id>/`, with `about.md` (name first) and one file per topic (`games.md`, `movies.md`), and a server folder with one file per topic: `/memories/server/channels.md`, `culture.md`, and more as needed (Cherry's idea, 2026-10-09). The model fills the server files from conversations, `search_messages` and `list_channels`, so it learns the environment it's in. `/memories/vivy/` holds Vivy's notes about herself in that server (`personality.md`, `interests.md`, under 2K together), so each server grows its own Vivy; the system prompt tells her to be the Vivy those notes describe (Cherry's idea, 2026-10-09). `/memories/vivy/skills/` holds her how-to notes for recurring jobs (diary, wheel recaps, summaries), one file per job; they're listed like other files and left out of the notes shown up front. This is the skill-driven memory instead of Anthropic's Skills API, which is workspace-wide (one persuaded skill would reach every server) and changes every request when a skill changes (Cherry agreed 2026-10-10). Small topic files let the model open only what the conversation needs. Chat's `<user>` tags carry the user ID for this.

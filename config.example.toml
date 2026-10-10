@@ -1,4 +1,4 @@
-# VoltBot settings. Secrets (tokens) go in .env, not here.
+# Vivy settings. Secrets (tokens) go in .env, not here.
 # Discord IDs: turn on Developer Mode in Discord, then right-click a user or channel.
 
 # Users who may run admin commands.
@@ -8,7 +8,7 @@ admins = []
 # main_server = 122962330165313536
 
 # The SQLite database file.
-database = "voltbot.db"
+database = "vivy.db"
 
 # voltgpt's database. If this file exists on startup, reminders and the movie wheel are
 # imported once, then the file is renamed to old.db.imported.

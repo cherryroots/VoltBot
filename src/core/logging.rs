@@ -50,7 +50,7 @@ pub struct LogLine {
 /// [`spawn_discord_poster`] empties once the bot is connected. Lines logged before then wait
 /// in the queue, so startup errors still reach Discord.
 pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
-    // RUST_LOG picks what goes to stdout, for example `info,voltbot::features::chat=debug`.
+    // RUST_LOG picks what goes to stdout, for example `info,vivy::features::chat=debug`.
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let stdout = if std::env::var("LOG_FORMAT").is_ok_and(|f| f == "json") {
         tracing_subscriber::fmt::layer().json().boxed()
@@ -70,7 +70,7 @@ pub fn init(config: &LoggingConfig) -> anyhow::Result<mpsc::Receiver<LogLine>> {
     let discord = DiscordLayer { sender }.with_filter(filter::filter_fn(move |meta| {
         // The layer sees our own spans (for their fields), lifecycle lines, and anything
         // at `discord_level` or above.
-        (meta.is_span() && meta.target().starts_with("voltbot"))
+        (meta.is_span() && meta.target().starts_with("vivy"))
             || meta.target() == "lifecycle"
             || *meta.level() <= min_level
     }));
@@ -126,7 +126,7 @@ impl log::Log for LogBridge {
 /// ```
 ///
 /// Shorter than tracing's own format: the time to the second, our modules without
-/// `voltbot::features::`, and the spans without `feature`, `guild` and `user` (see
+/// `vivy::features::`, and the spans without `feature`, `guild` and `user` (see
 /// [`CompactFields`]).
 struct Compact;
 
@@ -214,11 +214,11 @@ impl Visit for CompactVisitor<'_> {
     }
 }
 
-/// Our own modules without the `voltbot::` (and `features::`) in front.
+/// Our own modules without the `vivy::` (and `features::`) in front.
 fn short_target(target: &str) -> &str {
     target
-        .strip_prefix("voltbot::features::")
-        .or_else(|| target.strip_prefix("voltbot::"))
+        .strip_prefix("vivy::features::")
+        .or_else(|| target.strip_prefix("vivy::"))
         .unwrap_or(target)
 }
 
@@ -557,7 +557,7 @@ mod tests {
                 user = 4u64
             );
             let _entered = span.enter();
-            tracing::info!(target: "voltbot::features::chat::answer", tool = "x", "ran a tool");
+            tracing::info!(target: "vivy::features::chat::answer", tool = "x", "ran a tool");
         });
         let output = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
         let line = output.strip_suffix('\n').unwrap();
