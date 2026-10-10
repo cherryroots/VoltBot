@@ -43,6 +43,15 @@ impl Default for Settings {
     }
 }
 
+/// Where she lives (`timezone`), or UTC when it isn't set or isn't a known name.
+pub fn zone(ctx: &BotCtx) -> Tz {
+    let settings: Settings = ctx.config.feature("memory").unwrap_or_default();
+    settings.timezone.parse().unwrap_or_else(|_| {
+        warn!(timezone = settings.timezone, "unknown timezone, using UTC");
+        Tz::UTC
+    })
+}
+
 /// The instructions, with the faces she can pick from when there are any.
 fn system(faces: &[String]) -> String {
     match face::instruction(faces) {
@@ -60,10 +69,7 @@ pub async fn check_due(ctx: &BotCtx) -> Result<()> {
     if settings.mood_checks_per_day == 0 {
         return Ok(());
     }
-    let zone: Tz = settings.timezone.parse().unwrap_or_else(|_| {
-        warn!(timezone = settings.timezone, "unknown timezone, using UTC");
-        Tz::UTC
-    });
+    let zone = zone(ctx);
     let every = 86_400 / i64::from(settings.mood_checks_per_day);
     let now = Utc::now().timestamp();
 

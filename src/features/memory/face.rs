@@ -24,7 +24,9 @@ use crate::core::{BotCtx, Result};
 
 /// Avatars are scaled down to this size, which is plenty for Discord.
 const AVATAR_SIZE: u32 = 512;
-/// The shortest time between two avatar changes in one server, so a lively conversation
+/// Banners are scaled down to fit this width (and height).
+const BANNER_SIZE: u32 = 1500;
+/// The shortest time between two changes of one picture in one server, so a lively conversation
 /// can't run into Discord's limits. A face skipped for this waits for the next mood change.
 const MIN_GAP_SECS: i64 = 10 * 60;
 
@@ -88,7 +90,7 @@ pub fn parse(mood: &str, names: &[String]) -> Option<String> {
     names.iter().find(|name| *name == face).cloned()
 }
 
-/// Reads a face and scales it down to at most `size` pixels, as a PNG.
+/// Reads a picture and scales it down to at most `size` pixels, as a PNG.
 fn load(path: &Path, size: u32) -> anyhow::Result<Vec<u8>> {
     let picture = image::open(path).with_context(|| format!("reading {}", path.display()))?;
     let picture = if picture.width() > size || picture.height() > size {
@@ -124,36 +126,81 @@ pub async fn update(ctx: &BotCtx, scope: &str, mood: &str) {
     let Some(face) = parse(mood, &names_in(&dir)) else {
         return;
     };
-    if let Err(err) = set_avatar(ctx, guild, &dir, &face).await {
+    let path = dir.join(format!("{face}.png"));
+    if let Err(err) = set_picture(ctx, guild, Slot::Avatar, path, &face).await {
         warn!(%guild, face, "changing her face: {err:#}");
     }
 }
 
-async fn set_avatar(ctx: &BotCtx, guild: GuildId, dir: &Path, face: &str) -> Result<()> {
-    let path = dir.join(format!("{face}.png"));
-    let png = tokio::task::spawn_blocking(move || load(&path, AVATAR_SIZE)).await??;
+/// A picture on her profile in a server.
+#[derive(Debug, Clone, Copy)]
+pub enum Slot {
+    Avatar,
+    Banner,
+}
+
+impl Slot {
+    /// Its field in Discord's API, and its name in `memory_pictures`.
+    fn field(self) -> &'static str {
+        match self {
+            Slot::Avatar => "avatar",
+            Slot::Banner => "banner",
+        }
+    }
+
+    /// The largest size it's sent at.
+    fn size(self) -> u32 {
+        match self {
+            Slot::Avatar => AVATAR_SIZE,
+            Slot::Banner => BANNER_SIZE,
+        }
+    }
+}
+
+/// Sets the picture at `path` (named `name`, like "happy") in `slot` of her profile in
+/// `guild`, unless it's already there or that slot changed in the last 10 minutes.
+pub async fn set_picture(
+    ctx: &BotCtx,
+    guild: GuildId,
+    slot: Slot,
+    path: PathBuf,
+    name: &str,
+) -> Result<()> {
+    let png = tokio::task::spawn_blocking(move || load(&path, slot.size())).await??;
     let print = fingerprint(&png);
     let id = guild.get();
-    let current = ctx.db.call(move |conn| Ok(store::face(conn, id)?)).await?;
+    let current = ctx
+        .db
+        .call(move |conn| Ok(store::picture(conn, id, slot.field())?))
+        .await?;
     if let Some((current, at)) = current {
         if current == print {
             return Ok(());
         }
         if Utc::now().timestamp() - at < MIN_GAP_SECS {
-            info!(%guild, face, "face changed less than 10 minutes ago, keeping it for now");
+            info!(%guild, name, "{} changed less than 10 minutes ago, keeping it for now", slot.field());
             return Ok(());
         }
     }
 
-    let avatar = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&png));
+    let data = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&png));
     let mut body = serde_json::Map::new();
-    body.insert("avatar".into(), avatar.into());
+    body.insert(slot.field().into(), data.into());
     ctx.http.edit_member_me(guild, &body, None).await?;
-    info!(%guild, face, "changed her face");
+    info!(%guild, name, "changed her {}", slot.field());
 
-    let (name, now) = (face.to_string(), Utc::now().timestamp());
+    let (name, now) = (name.to_string(), Utc::now().timestamp());
     ctx.db
-        .call(move |conn| Ok(store::set_face(conn, id, &name, &print, now)?))
+        .call(move |conn| {
+            Ok(store::set_picture(
+                conn,
+                id,
+                slot.field(),
+                &name,
+                &print,
+                now,
+            )?)
+        })
         .await?;
     Ok(())
 }

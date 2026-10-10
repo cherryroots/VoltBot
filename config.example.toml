@@ -104,6 +104,10 @@ timezone = "UTC"
 # with each mood, and it becomes her avatar in that server (and shows on the status
 # picture). Leave out for no faces.
 # faces_dir = "faces"
+# A folder with her banner for each time of day where she lives: morning.png (5 to 11),
+# day.png (11 to 17), evening.png (17 to 22) and night.png. Checked every hour. Leave out
+# for no banners.
+# banners_dir = "banners"
 
 [features.snails]
 # Repost detection. New messages' links and pictures are saved as they arrive; right-click a

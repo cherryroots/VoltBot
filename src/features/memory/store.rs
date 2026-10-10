@@ -39,12 +39,15 @@ pub const MIGRATIONS: &[&str] = &[
         channel_id INTEGER PRIMARY KEY,
         at INTEGER NOT NULL               -- unix seconds
     );",
-    // 4: the face (avatar) Vivy has in each server, and when her mood was last checked.
-    "CREATE TABLE memory_faces (
-        guild_id INTEGER PRIMARY KEY,
-        face TEXT NOT NULL,               -- happy, sleepy, ...
+    // 4: the pictures on Vivy's profile in each server (her face and her banner), and when
+    // her mood was last checked.
+    "CREATE TABLE memory_pictures (
+        guild_id INTEGER NOT NULL,
+        slot TEXT NOT NULL,               -- avatar or banner
+        name TEXT NOT NULL,               -- happy, night, ...
         fingerprint TEXT NOT NULL,        -- of the picture sent, to skip sending it again
-        at INTEGER NOT NULL               -- unix seconds
+        at INTEGER NOT NULL,              -- unix seconds
+        PRIMARY KEY (guild_id, slot)
     );
     CREATE TABLE memory_mood_checks (
         scope TEXT PRIMARY KEY,
@@ -198,28 +201,35 @@ pub fn every_file(conn: &Connection, path: &str) -> rusqlite::Result<Vec<(String
     rows.collect()
 }
 
-/// The fingerprint of the face Vivy has in `guild`, and when it was set.
-pub fn face(conn: &Connection, guild: u64) -> rusqlite::Result<Option<(String, i64)>> {
+/// The fingerprint of the picture in `slot` ("avatar" or "banner") Vivy has in `guild`,
+/// and when it was set.
+pub fn picture(
+    conn: &Connection,
+    guild: u64,
+    slot: &str,
+) -> rusqlite::Result<Option<(String, i64)>> {
     conn.query_row(
-        "SELECT fingerprint, at FROM memory_faces WHERE guild_id = ?1",
-        [guild],
+        "SELECT fingerprint, at FROM memory_pictures WHERE guild_id = ?1 AND slot = ?2",
+        params![guild, slot],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
 }
 
-pub fn set_face(
+pub fn set_picture(
     conn: &Connection,
     guild: u64,
-    face: &str,
+    slot: &str,
+    name: &str,
     fingerprint: &str,
     at: i64,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO memory_faces (guild_id, face, fingerprint, at) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT (guild_id) DO UPDATE SET
-            face = excluded.face, fingerprint = excluded.fingerprint, at = excluded.at",
-        params![guild, face, fingerprint, at],
+        "INSERT INTO memory_pictures (guild_id, slot, name, fingerprint, at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (guild_id, slot) DO UPDATE SET
+            name = excluded.name, fingerprint = excluded.fingerprint, at = excluded.at",
+        params![guild, slot, name, fingerprint, at],
     )?;
     Ok(())
 }
@@ -438,10 +448,18 @@ mod tests {
     #[test]
     fn faces_and_mood_checks() {
         let conn = db();
-        assert_eq!(face(&conn, 1).unwrap(), None);
-        set_face(&conn, 1, "happy", "aa", 10).unwrap();
-        set_face(&conn, 1, "sleepy", "bb", 20).unwrap();
-        assert_eq!(face(&conn, 1).unwrap(), Some(("bb".to_string(), 20)));
+        assert_eq!(picture(&conn, 1, "avatar").unwrap(), None);
+        set_picture(&conn, 1, "avatar", "happy", "aa", 10).unwrap();
+        set_picture(&conn, 1, "avatar", "sleepy", "bb", 20).unwrap();
+        set_picture(&conn, 1, "banner", "night", "cc", 30).unwrap();
+        assert_eq!(
+            picture(&conn, 1, "avatar").unwrap(),
+            Some(("bb".to_string(), 20))
+        );
+        assert_eq!(
+            picture(&conn, 1, "banner").unwrap(),
+            Some(("cc".to_string(), 30))
+        );
 
         assert_eq!(mood_checked_at(&conn, "server:1").unwrap(), None);
         set_mood_checked(&conn, "server:1", 5).unwrap();

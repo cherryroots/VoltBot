@@ -14,7 +14,7 @@ use serenity::all::GuildId;
 use tracing::{Instrument as _, error, info, info_span, warn};
 
 use super::folder::{self, Command};
-use super::{diary, face, mood, store, tool};
+use super::{banner, diary, face, mood, store, tool};
 use crate::ai::{ChatRequest, Input, Part, Role, Turn, complete};
 use crate::core::{BotCtx, Result};
 use crate::util::shorten;
@@ -62,6 +62,7 @@ async fn run(ctx: BotCtx) {
         if let Err(err) = mood::check_due(&ctx).await {
             error!("checking her mood: {err:#}");
         }
+        banner::update_all(&ctx).await;
         if let Err(err) = diary::post_due(&ctx).await {
             error!("writing the diary: {err:#}");
         }

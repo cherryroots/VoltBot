@@ -14,8 +14,10 @@
 //! - `mood.rs`: mood checks a few times a day, which follow the time of day
 //! - `set_mood.rs`: the `set_mood` tool, for when a conversation changes her mood
 //! - `face.rs`: her face, a picture per mood that becomes her avatar in each server
+//! - `banner.rs`: her banner, a picture per time of day
 //! - `diary.rs`: the weekly diary she posts in `diary_channels`
 
+mod banner;
 mod commands;
 mod diary;
 mod face;
