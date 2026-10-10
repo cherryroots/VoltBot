@@ -165,8 +165,11 @@ pub async fn speak(
     };
     let done = complete(provider.as_ref(), request, &runner, MAX_ROUNDS).await?;
 
+    // A voice message she sent with a tool counts as speaking up, even when she then
+    // passes on writing a line.
+    let posted = asker.posted.ids();
     let line = match (decide(&done.text), last) {
-        (Decision::Say(line), _) => line,
+        (Decision::Say(line), _) => Some(line),
         (Decision::React(emoji), Some(msg)) => {
             let reaction = ReactionType::try_from(emoji.as_str())
                 .with_context(|| format!("{emoji:?} isn't an emoji"))?;
@@ -174,22 +177,29 @@ pub async fn speak(
             info!("reacted with {emoji}");
             return Ok(());
         }
-        _ => {
+        _ if posted.is_empty() => {
             info!("read along and passed");
             return Ok(());
         }
+        _ => None,
     };
-    let pings = match mention {
-        Some(user) => CreateAllowedMentions::new().users([user]),
-        None => CreateAllowedMentions::new(),
-    };
-    let sent = asker
-        .channel
-        .send_message(
-            &ctx.http,
-            CreateMessage::new().content(&line).allowed_mentions(pings),
-        )
-        .await?;
+    let mut ids: Vec<u64> = Vec::new();
+    if let Some(line) = &line {
+        let pings = match mention {
+            Some(user) => CreateAllowedMentions::new().users([user]),
+            None => CreateAllowedMentions::new(),
+        };
+        let sent = asker
+            .channel
+            .send_message(
+                &ctx.http,
+                CreateMessage::new().content(line).allowed_mentions(pings),
+            )
+            .await?;
+        ids.push(sent.id.get());
+    }
+    ids.extend(posted.iter().map(|id| id.get()));
+    let line = answer::with_posted(line.as_deref().unwrap_or(""), &asker.posted.texts());
     info!("spoke up on her own");
     // Saved like a question and its answer, exactly as the model read it, so a reply to
     // her line continues the same conversation.
@@ -210,7 +220,7 @@ pub async fn speak(
         continuation_id: done.continuation,
         native_json: serde_json::to_string(&done.rounds).ok(),
     };
-    let (sent_id, bot_id) = (sent.id.get(), ctx.bot_id.get());
+    let bot_id = ctx.bot_id.get();
     ctx.db
         .call(move |conn| {
             let question_id = store::add_turn(conn, &question, &[])?;
@@ -223,7 +233,7 @@ pub async fn speak(
                 written: Some(written),
                 created_at: Utc::now().timestamp(),
             };
-            store::add_turn(conn, &answer, &[sent_id])
+            store::add_turn(conn, &answer, &ids)
         })
         .await
         .context("saving what she said")?;

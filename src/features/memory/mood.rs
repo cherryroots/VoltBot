@@ -144,18 +144,34 @@ async fn check(ctx: &BotCtx, scope: &str, mood: &str, since: i64, zone: Tz) -> R
         return Ok(false);
     };
 
-    let (owned, bot) = (scope.to_string(), ctx.bot_id.get());
+    let (owned, bot, old) = (scope.to_string(), ctx.bot_id.get(), mood.to_string());
     let now = Utc::now().timestamp();
-    ctx.db
+    let saved = ctx
+        .db
         .call(move |conn| {
-            let before = store::load(conn, &owned)?;
+            let tx = conn.transaction()?;
+            let before = store::load(&tx, &owned)?;
+            // A conversation changed her mood (set_mood) while she was thinking: that one
+            // is newer, so it stays.
+            if before.get(reflect::MOOD_FILE) != Some(&old) {
+                return Ok(false);
+            }
             let mut after = before.clone();
             after.insert(reflect::MOOD_FILE.to_string(), new);
-            Ok(store::save(conn, &owned, &before, &after, bot, now)?)
+            store::save(&tx, &owned, &before, &after, bot, now)?;
+            tx.commit()?;
+            Ok(true)
         })
         .await?;
-    info!(scope, "checked her mood");
-    Ok(true)
+    if saved {
+        info!(scope, "checked her mood");
+    } else {
+        info!(
+            scope,
+            "her mood changed during the check, keeping the newer one"
+        );
+    }
+    Ok(saved)
 }
 
 /// What she's told: the time, her notes, her mood and what changed.

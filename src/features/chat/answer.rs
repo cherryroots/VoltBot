@@ -189,7 +189,7 @@ pub async fn run(ctx: &BotCtx, provider: &dyn ChatProvider, job: Job) -> Outcome
 }
 
 /// The answer's text for the history, with what the tools' messages said after it.
-fn with_posted(text: &str, posted: &[String]) -> String {
+pub(super) fn with_posted(text: &str, posted: &[String]) -> String {
     let mut parts: Vec<String> = Vec::new();
     if !text.trim().is_empty() {
         parts.push(text.trim_end().to_string());

@@ -205,6 +205,13 @@ fn retry_later(ctx: &BotCtx, scope: &str, wait: i64) {
             () = ctx.shutdown.cancelled() => return,
         }
         WAITING.lock().unwrap().remove(&scope);
+        let allowed = scope
+            .strip_prefix("server:")
+            .and_then(|id| id.parse().ok())
+            .is_some_and(|id| ctx.gate("memory").allows_guild(GuildId::new(id)));
+        if !allowed {
+            return;
+        }
         let owned = scope.clone();
         let mood = ctx
             .db
@@ -327,10 +334,19 @@ pub async fn sync_all(ctx: &BotCtx) {
     }
 }
 
+/// The last face drawn for the control panel: its name and its `data:` URL. The status
+/// is redrawn every minute, and the face rarely changes.
+static PANEL_FACE: Mutex<Option<(String, String)>> = Mutex::new(None);
+
 /// The face for the control panel, as a small PNG in a `data:` URL, from her newest mood.
 pub async fn panel_picture(ctx: &BotCtx, mood: &str) -> Option<String> {
     let dir = dir(ctx)?;
     let face = parse(mood, &names_in(&dir))?;
+    if let Some((name, url)) = PANEL_FACE.lock().unwrap().as_ref()
+        && *name == face
+    {
+        return Some(url.clone());
+    }
     let path = dir.join(format!("{face}.png"));
     let crop = crop(ctx);
     let png = tokio::task::spawn_blocking(move || load(&path, PANEL_SIZE, crop))
@@ -338,10 +354,9 @@ pub async fn panel_picture(ctx: &BotCtx, mood: &str) -> Option<String> {
         .ok()?
         .inspect_err(|err| warn!("reading her face: {err:#}"))
         .ok()?;
-    Some(format!(
-        "data:image/png;base64,{}",
-        BASE64_STANDARD.encode(&png)
-    ))
+    let url = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&png));
+    *PANEL_FACE.lock().unwrap() = Some((face, url.clone()));
+    Some(url)
 }
 
 #[cfg(test)]
