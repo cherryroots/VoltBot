@@ -67,6 +67,14 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
     let import_summary = import_legacy(&db, &features, &config).await;
     info!("database {} is ready", config.database);
     let ai = ai_from_env(&config, &web, &db);
+    // With an Admin API key, Claude's spend comes from Anthropic's bill (see ai/spend.rs).
+    if let (Some(spend), Ok(key)) = (&ai.spend, std::env::var("ANTHROPIC_ADMIN_KEY"))
+        && !key.trim().is_empty()
+        && config.ai.claude.billed_spend
+    {
+        let billing = ai::claude::billing::Billing::new(web.clone(), key.trim().to_string());
+        tokio::spawn(spend.clone().follow_bill(billing));
+    }
 
     // Slash commands. The category remembers which feature a command belongs to, for gating.
     let mut commands = Vec::new();

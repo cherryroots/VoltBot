@@ -142,6 +142,7 @@ async fn reflect(ctx: &BotCtx, scope: &str) -> Result<()> {
         }]),
         tools: vec![tool::def()],
         cache_key: format!("memory:{scope}"),
+        job: "reflection",
     };
     let runner = tool::FolderRunner {
         ctx: ctx.clone(),

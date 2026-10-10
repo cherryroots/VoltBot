@@ -17,6 +17,7 @@
 //!
 //! API reference: <https://platform.claude.com/docs/en/api/messages>
 
+pub mod billing;
 mod collect;
 mod messages;
 mod price;
@@ -37,13 +38,13 @@ use tracing::{debug, info, warn};
 
 use self::collect::Collector;
 use super::fallback::ApiError;
-use super::spend::Spend;
+use super::spend::{Spend, Used};
 use super::sse::SseParser;
 use super::{ChatEvent, ChatProvider, ChatRequest, Done, GeneratedFile, Input, Part, Turn};
 use crate::util::media::ModelImage;
 
-const API: &str = "https://api.anthropic.com/v1";
-const VERSION: &str = "2023-06-01";
+pub(crate) const API: &str = "https://api.anthropic.com/v1";
+pub(crate) const VERSION: &str = "2023-06-01";
 /// Lets a request say what to do with earlier thinking when the conversation changed
 /// (`block_binding`), and reports what was left out.
 const THINKING_BETA: &str = "thinking-binding-controls-2026-08-01";
@@ -78,6 +79,13 @@ pub struct ClaudeConfig {
     pub fallbacks: bool,
     /// USD a month; the log channel gets a warning at 80% and 100%. 0 turns that off.
     pub monthly_budget: f64,
+    /// With `ANTHROPIC_ADMIN_KEY` in `.env`, read Anthropic's bill hourly and use it in
+    /// place of the estimate.
+    pub billed_spend: bool,
+    /// Show on the status message how much input came from the prompt cache this month.
+    pub show_cache_hits: bool,
+    /// Show on the status message what each job (chat, chime-ins, ...) cost this month.
+    pub show_job_costs: bool,
     /// Anthropic's skills loaded into the code execution container, for making
     /// spreadsheets ("xlsx"), documents ("docx"), slides ("pptx") and PDFs ("pdf").
     pub skills: Vec<String>,
@@ -92,6 +100,9 @@ impl Default for ClaudeConfig {
             code_execution: true,
             fallbacks: true,
             monthly_budget: 100.0,
+            billed_spend: true,
+            show_cache_hits: true,
+            show_job_costs: true,
             skills: ["xlsx", "docx", "pptx", "pdf"].map(String::from).to_vec(),
         }
     }
@@ -446,7 +457,7 @@ impl ChatProvider for Claude {
         let (events, receiver) = mpsc::channel(64);
         let containers = self.containers.clone();
         let cache_key = request.cache_key;
-        let spend = self.spend.clone();
+        let spend = self.spend.clone().map(|spend| (spend, request.job));
         tokio::spawn(async move {
             let result = read_answer(&sender, spend.as_ref(), body, response, &events).await;
             let done = match result {
@@ -491,7 +502,7 @@ impl ChatProvider for Claude {
 /// finished round and its container, or `None` when nobody is listening anymore.
 async fn read_answer(
     sender: &Sender,
-    spend: Option<&Spend>,
+    spend: Option<&(Spend, &'static str)>,
     mut body: Value,
     mut response: reqwest::Response,
     events: &mpsc::Sender<anyhow::Result<ChatEvent>>,
@@ -521,10 +532,16 @@ async fn read_answer(
             "Claude used {} input tokens ({} read from cache, {} written to it) and wrote {}",
             usage.input, usage.cache_read, usage.cache_write, usage.output
         );
-        if let Some(spend) = spend {
+        if let Some((spend, job)) = spend {
             let model = collector.model.as_deref();
             let model = model.or(body["model"].as_str()).unwrap_or_default();
-            spend.add("claude", price::cost(&usage, model)).await;
+            let used = Used {
+                usd: price::cost(&usage, model),
+                input: usage.input,
+                cache_read: usage.cache_read,
+                cache_write: usage.cache_write,
+            };
+            spend.add("claude", job, used).await;
         }
 
         match collector.stop_reason.as_deref() {
@@ -603,6 +620,7 @@ mod tests {
                 parameters: json!({"type": "object", "properties": {}}),
             }],
             cache_key: "discord:1".into(),
+            job: "chat",
         }
     }
 

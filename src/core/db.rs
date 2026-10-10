@@ -117,6 +117,18 @@ pub const CORE_MIGRATIONS: &[&str] = &[
         warned INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (month, provider)
     );",
+    // 3: the estimate and input tokens per job ("chat", "diary", ...), for the status
+    // message's cost per job and cache hit rate.
+    "CREATE TABLE ai_spend_jobs (
+        month TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        job TEXT NOT NULL,
+        usd REAL NOT NULL,
+        input INTEGER NOT NULL,
+        cache_read INTEGER NOT NULL,
+        cache_write INTEGER NOT NULL,
+        PRIMARY KEY (month, provider, job)
+    );",
 ];
 
 /// An in-memory database with the core tables and the given migrations, for tests.

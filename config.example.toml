@@ -45,6 +45,14 @@ fallbacks = true
 # Claude's monthly cost in USD, for the status message and the warnings in the log channel
 # at 80% and 100% (estimated from list prices). 0 turns the warnings off.
 monthly_budget = 100.0
+# With ANTHROPIC_ADMIN_KEY in .env, use Anthropic's real bill (read hourly) instead of the
+# estimate. Without the key, or when it can't be read, the estimate is used.
+billed_spend = true
+# Show on the status message how much input came from the prompt cache this month.
+show_cache_hits = true
+# Show on the status message what each job (chat, chime-ins, reflection, diary, emoji)
+# cost this month, estimated.
+show_job_costs = true
 
 # OpenAI settings. The key goes in .env (OPENAI_TOKEN).
 [ai.openai]

@@ -592,6 +592,7 @@ mod tests {
                 parameters: json!({"type": "object", "properties": {}}),
             }],
             cache_key: "discord:1".into(),
+            job: "chat",
         };
         let body = client().request_body(&request, &[]);
         assert_eq!(body["previous_response_id"], "resp_1");
@@ -636,6 +637,7 @@ mod tests {
             }]),
             tools: Vec::new(),
             cache_key: String::new(),
+            job: "chat",
         };
         let uploads = [
             Some("file-1".to_string()),

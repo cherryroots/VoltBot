@@ -155,6 +155,7 @@ pub async fn speak(
         }]),
         tools,
         cache_key: format!("discord:{}", asker.channel),
+        job: "chime",
     };
     let runner = Runner {
         ctx: ctx.clone(),

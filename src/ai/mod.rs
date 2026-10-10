@@ -145,6 +145,8 @@ pub struct ChatRequest {
     pub tools: Vec<ToolDef>,
     /// Requests with the same key share a cache, for example one per channel.
     pub cache_key: String,
+    /// What the request is for ("chat", "diary", ...), for what each job costs.
+    pub job: &'static str,
 }
 
 /// Something the model is busy with, shown in the reply's status line.

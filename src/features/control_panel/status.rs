@@ -128,6 +128,9 @@ async fn online_embed(ctx: &BotCtx) -> CreateEmbed {
             ),
             true,
         );
+    if let Some(spend) = claude_spend(ctx).await {
+        embed = embed.field("Claude spend", spend, true);
+    }
     if let Some((at, text)) = errors.last {
         embed = embed.field(
             "Last error",
@@ -166,8 +169,7 @@ fn offline_embed(ctx: &BotCtx) -> CreateEmbed {
         .field("Version", format!("{VERSION} (`{GIT_COMMIT}`)"), true)
 }
 
-/// The provider and model chat uses now, whether it fell back from the main one, and
-/// what Claude cost this month.
+/// The provider and model chat uses now, and whether it fell back from the main one.
 async fn ai_provider(ctx: &BotCtx) -> String {
     let Some(chat) = ctx.ai.chat() else {
         return "Off (no key)".to_string();
@@ -184,17 +186,39 @@ async fn ai_provider(ctx: &BotCtx) -> String {
             switched.retry_at.timestamp()
         ));
     }
-    if let Some(spend) = &ctx.ai.spend {
-        match spend.this_month("claude").await {
-            Ok(usd) if spend.budget() > 0.0 => lines.push(format!(
-                "Claude: ${usd:.2} of ${:.0} this month",
-                spend.budget()
-            )),
-            Ok(usd) => lines.push(format!("Claude: ${usd:.2} this month")),
-            Err(err) => warn!("couldn't read what Claude cost: {err:#}"),
+    lines.join("\n")
+}
+
+/// What Claude cost this month: Anthropic's bill (with an Admin API key) or the estimate,
+/// and, when turned on under `[ai.claude]`, the cache hit rate and the cost per job.
+/// `None` when Claude isn't set up.
+async fn claude_spend(ctx: &BotCtx) -> Option<String> {
+    let spend = ctx.ai.spend.as_ref()?;
+    let config = &ctx.config.ai.claude;
+    let month = match spend.this_month("claude").await {
+        Ok(month) => month,
+        Err(err) => return Some(format!("couldn't read it: {err}")),
+    };
+    let budget = match spend.budget() {
+        budget if budget > 0.0 => format!(" of ${budget:.0}"),
+        _ => String::new(),
+    };
+    let source = match spend.billed_at() {
+        Some(at) => format!("billed, read <t:{}:R>", at.timestamp()),
+        None => "estimate".to_string(),
+    };
+    let mut lines = vec![format!("${:.2}{budget} this month ({source})", month.usd)];
+    if config.show_cache_hits
+        && let Some(hits) = month.cache_hits
+    {
+        lines.push(format!("Cache hits: {:.0}% of input", hits * 100.0));
+    }
+    if config.show_job_costs {
+        for (job, usd) in &month.jobs {
+            lines.push(format!("{job}: ${usd:.2}"));
         }
     }
-    lines.join("\n")
+    Some(lines.join("\n"))
 }
 
 /// "3d 4h 12m", "4h 12m" or "12m".

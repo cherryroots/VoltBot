@@ -119,6 +119,7 @@ async fn post(ctx: &BotCtx, channel: ChannelId, now: i64) -> Result<()> {
         }]),
         tools: vec![tool::def()],
         cache_key: format!("diary:{scope}"),
+        job: "diary",
     };
     let runner = tool::FolderRunner {
         ctx: ctx.clone(),
