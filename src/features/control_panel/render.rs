@@ -22,7 +22,7 @@ use crate::util::svg::{
 };
 
 /// Width of the picture in SVG units.
-const WIDTH: f32 = 640.0;
+const WIDTH: f32 = 800.0;
 /// Left and right edge of the cards.
 const LEFT: f32 = 16.0;
 const RIGHT: f32 = WIDTH - 16.0;
@@ -528,7 +528,12 @@ fn cache_and_jobs(svg: &mut Svg, spend: &SpendView) {
     svg.y += height;
 }
 
-/// One card per feature with its stats, two side by side. Numbers get a graph of the
+/// Feature cards side by side.
+const FEATURE_COLUMNS: usize = 3;
+/// Space between a feature card's stat lines.
+const STAT_LINE: f32 = 22.0;
+
+/// One card per feature with its stats, three side by side. Numbers get a graph of the
 /// last 7 days and how much they changed in that time.
 fn features(svg: &mut Svg, d: &Dashboard) {
     let shown: Vec<&FeatureView> = d
@@ -540,18 +545,20 @@ fn features(svg: &mut Svg, d: &Dashboard) {
         return;
     }
     section(svg, "Features");
-    let width = (RIGHT - LEFT - GAP) / 2.0;
+    let columns = FEATURE_COLUMNS as f32;
+    let width = (RIGHT - LEFT - GAP * (columns - 1.0)) / columns;
     let week_ago = d.now.timestamp() - 7 * 86_400;
     let rows = |f: &FeatureView| match &f.stats {
         Ok(stats) => stats.len(),
         Err(_) => 1,
     };
-    for (n, pair) in shown.chunks(2).enumerate() {
+    for (n, row) in shown.chunks(FEATURE_COLUMNS).enumerate() {
         if n > 0 {
             svg.y += GAP;
         }
-        let height = 44.0 + 24.0 * pair.iter().map(|f| rows(f)).max().unwrap_or(1) as f32;
-        for (column, feature) in pair.iter().enumerate() {
+        let lines = row.iter().map(|f| rows(f)).max().unwrap_or(1) as f32;
+        let height = 40.0 + STAT_LINE * lines;
+        for (column, feature) in row.iter().enumerate() {
             let x = LEFT + column as f32 * (width + GAP);
             feature_card(svg, d, feature, [x, svg.y, width, height], week_ago);
         }
@@ -581,15 +588,10 @@ fn feature_card(svg: &mut Svg, d: &Dashboard, f: &FeatureView, card: [f32; 4], w
         }
     };
     let mut graphed = false;
+    let right = x + width - 14.0;
     for (n, stat) in stats.iter().enumerate() {
-        let row_y = y + 54.0 + 24.0 * n as f32;
+        let row_y = y + 50.0 + STAT_LINE * n as f32;
         let value = plain(&stat.value, d.now);
-        svg.text(
-            x + 14.0,
-            row_y,
-            &shorten(&stat.name, 18),
-            Style::new(13.0, MUTED).weight(500),
-        );
         let points = match value.parse::<f64>() {
             Ok(number) => series(
                 &d.history,
@@ -600,25 +602,28 @@ fn feature_card(svg: &mut Svg, d: &Dashboard, f: &FeatureView, card: [f32; 4], w
             Err(_) => Vec::new(),
         };
         if points.len() < 2 {
-            // Room for the value is what the name leaves.
-            let room = width - 28.0 - text_width(&stat.name, 13.0) - 12.0;
-            let max = (room / (13.0 * 0.6)).max(4.0) as usize;
+            // The value gets what it needs, up to half the card; the name gets the rest.
+            let value = shorten(&value, ((width / 2.0) / (13.0 * 0.6)) as usize);
+            let room = width - 28.0 - text_width(&value, 13.0) - 8.0;
+            label(svg, x + 14.0, row_y, &stat.name, room);
             svg.text(
-                x + width - 14.0,
+                right,
                 row_y,
-                &shorten(&value, max),
+                &value,
                 Style::new(13.0, TEXT).weight(600).end(),
             );
             continue;
         }
         graphed = true;
         svg.text(
-            x + width - 14.0,
+            right,
             row_y,
             &value,
             Style::new(13.0, TEXT).weight(600).end(),
         );
-        let spark = [x + width - 14.0 - 52.0 - 80.0, row_y - 12.0, 80.0, 14.0];
+        // Value, graph and change from the right; the name gets what's left.
+        let spark_right = right - text_width(&value, 13.0).max(28.0) - 8.0;
+        let spark = [spark_right - 56.0, row_y - 12.0, 56.0, 14.0];
         sparkline(svg, spark, &points, (week_ago, d.now.timestamp()), ACCENT);
         let change = points[points.len() - 1].1 - points[0].1;
         let (text, color) = match change {
@@ -627,11 +632,13 @@ fn feature_card(svg: &mut Svg, d: &Dashboard, f: &FeatureView, card: [f32; 4], w
             _ => ("±0".to_string(), DIM),
         };
         svg.text(
-            spark[0] - 8.0,
+            spark[0] - 6.0,
             row_y,
             &text,
             Style::new(11.0, color).weight(600).end(),
         );
+        let room = spark[0] - 6.0 - text_width(&text, 11.0) - 8.0 - (x + 14.0);
+        label(svg, x + 14.0, row_y, &stat.name, room);
     }
     if graphed {
         svg.text(
@@ -643,34 +650,63 @@ fn feature_card(svg: &mut Svg, d: &Dashboard, f: &FeatureView, card: [f32; 4], w
     }
 }
 
+/// A stat's name, cut to fit in `room` units.
+fn label(svg: &mut Svg, x: f32, y: f32, name: &str, room: f32) {
+    // `text_width` is made for names in bold; plain text this size is narrower.
+    let max = (room / (13.0 * 0.52)).max(4.0) as usize;
+    svg.text(
+        x,
+        y,
+        &shorten(name, max),
+        Style::new(13.0, MUTED).weight(500),
+    );
+}
+
 /// The most recent error, in a red box.
-/// One row per background loop: its name, how often it runs, when it last ran and when it
-/// runs next.
+/// One small card per background loop, two side by side: its name and when it runs next on
+/// top, how often it runs and when it last ran below.
 fn timers(svg: &mut Svg, d: &Dashboard) {
     if d.timers.is_empty() {
         return;
     }
     section(svg, "Timers");
-    let height = 28.0;
-    svg.y += 4.0;
-    for (n, timer) in d.timers.iter().enumerate() {
-        svg.stripe(n, height);
-        let y = svg.y + 18.5;
-        svg.text(32.0, y, timer.name, Style::new(13.0, TEXT).weight(500));
-        svg.text(200.0, y, timer.every, Style::new(12.0, DIM));
-        let (next, color) = timer_next(timer, d.now);
-        svg.text(
-            RIGHT - 16.0,
-            y,
-            &next,
-            Style::new(13.0, color).weight(600).end(),
-        );
-        if let Some(last) = timer.last {
+    let width = (RIGHT - LEFT - GAP) / 2.0;
+    let height = 44.0;
+    for (n, pair) in d.timers.chunks(2).enumerate() {
+        if n > 0 {
+            svg.y += 6.0;
+        }
+        for (column, timer) in pair.iter().enumerate() {
+            let x = LEFT + column as f32 * (width + GAP);
+            let (y, right) = (svg.y, x + width - 14.0);
+            svg.rect([x, y, width, height], ROW, 8.0, "");
+            let (next, color) = timer_next(timer, d.now);
             svg.text(
-                RIGHT - 120.0,
-                y,
-                &format!("ran {}", relative(last, d.now)),
-                Style::new(12.0, MUTED).end(),
+                right,
+                y + 19.0,
+                &next,
+                Style::new(13.0, color).weight(600).end(),
+            );
+            let room = width - 28.0 - text_width(&next, 13.0) - 8.0;
+            let max = (room / (13.0 * 0.55)) as usize;
+            svg.text(
+                x + 14.0,
+                y + 19.0,
+                &shorten(timer.name, max),
+                Style::new(13.0, TEXT).weight(500),
+            );
+            let last = timer
+                .last
+                .map(|last| format!("ran {}", relative(last, d.now)))
+                .unwrap_or_default();
+            svg.text(right, y + 35.0, &last, Style::new(11.0, MUTED).end());
+            let room = width - 28.0 - text_width(&last, 11.0) - 8.0;
+            let max = (room / (11.0 * 0.55)) as usize;
+            svg.text(
+                x + 14.0,
+                y + 35.0,
+                &shorten(timer.every, max),
+                Style::new(11.0, DIM),
             );
         }
         svg.y += height;
