@@ -11,14 +11,22 @@
 //! - `commands.rs`: `/memory show`, `forget` and `delete`
 //! - `reflect.rs`: the daily reflection, where Vivy tidies her memory and updates her own notes
 //!   and mood (which sets her Discord status)
+//! - `mood.rs`: mood checks a few times a day, which follow the time of day
+//! - `set_mood.rs`: the `set_mood` tool, for when a conversation changes her mood
+//! - `face.rs`: her face, a picture per mood that becomes her avatar in each server
+//! - `banner.rs`: her banner, a picture per time of day
 //! - `diary.rs`: the weekly diary she posts in `diary_channels`
 //! - `retry.rs`: waiting a few hours before a failed reflection or diary tries again
 
+mod banner;
 mod commands;
 mod diary;
+mod face;
 mod folder;
+mod mood;
 mod reflect;
 mod retry;
+mod set_mood;
 mod store;
 mod tool;
 
@@ -46,21 +54,24 @@ impl Feature for Memory {
     }
 
     fn tools(&self) -> Vec<ToolDef> {
-        vec![tool::def()]
+        vec![tool::def(), set_mood::def()]
     }
 
     async fn run_tool(
         &self,
         ctx: &BotCtx,
         asker: &Asker,
-        _name: &str,
+        name: &str,
         args: &Value,
     ) -> Result<String> {
-        tool::run(ctx, asker, args).await
+        match name {
+            set_mood::NAME => set_mood::run(ctx, asker, args).await,
+            _ => tool::run(ctx, asker, args).await,
+        }
     }
 
-    /// The file list every time, and Vivy's own notes about herself at the start of a
-    /// conversation (a continued one still has them from its first answer).
+    /// The file list every time, and Vivy's own notes about herself (with her faces) at the
+    /// start of a conversation (a continued one still has them from its first answer).
     async fn chat_context(
         &self,
         ctx: &BotCtx,
@@ -70,6 +81,12 @@ impl Feature for Memory {
         let mut text = tool::file_list(ctx, asker).await?;
         if fresh && let Some(notes) = tool::self_notes(ctx, asker).await? {
             text = format!("{notes}\n{text}");
+        }
+        if fresh
+            && asker.guild.is_some()
+            && let Some(faces) = set_mood::faces_note(ctx)
+        {
+            text = format!("{faces}\n{text}");
         }
         Ok(Some(text))
     }
@@ -97,7 +114,7 @@ impl Feature for Memory {
     }
 
     /// Her mood, what's on her mind and what she wonders about, from the mood file she
-    /// rewrote last (the same one her Discord status comes from).
+    /// rewrote last (the same one her Discord status comes from), with its face.
     async fn panels(&self, ctx: &BotCtx) -> Result<Vec<Panel>> {
         let newest = ctx
             .db
@@ -117,6 +134,8 @@ impl Feature for Memory {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(vec![Panel::about_bot(ctx, rows)])
+        let mut panel = Panel::about_bot(ctx, rows);
+        panel.picture = face::panel_picture(ctx, &mood).await;
+        Ok(vec![panel])
     }
 }

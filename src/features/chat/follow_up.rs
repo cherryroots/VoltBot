@@ -145,6 +145,7 @@ async fn deliver(ctx: &BotCtx, follow_up: &FollowUp) -> Result<()> {
         guild: follow_up.guild_id.map(GuildId::new),
         channel: ChannelId::new(follow_up.channel_id),
         message: MessageId::new(follow_up.message_id),
+        posted: Default::default(),
     };
     // Chat may have been turned off there since it was planned.
     if !ctx.allows("chat", asker.guild, asker.channel) {

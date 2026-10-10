@@ -39,6 +39,20 @@ pub const MIGRATIONS: &[&str] = &[
         channel_id INTEGER PRIMARY KEY,
         at INTEGER NOT NULL               -- unix seconds
     );",
+    // 4: the pictures on Vivy's profile in each server (her face and her banner), and when
+    // her mood was last checked.
+    "CREATE TABLE memory_pictures (
+        guild_id INTEGER NOT NULL,
+        slot TEXT NOT NULL,               -- avatar or banner
+        name TEXT NOT NULL,               -- happy, night, ...
+        fingerprint TEXT NOT NULL,        -- of the picture sent, to skip sending it again
+        at INTEGER NOT NULL,              -- unix seconds
+        PRIMARY KEY (guild_id, slot)
+    );
+    CREATE TABLE memory_mood_checks (
+        scope TEXT PRIMARY KEY,
+        at INTEGER NOT NULL               -- unix seconds
+    );",
 ];
 
 /// The folder of a server, or of a person's DMs.
@@ -119,7 +133,9 @@ pub fn files_under(
 
 /// Server folders due for a reflection: changed since the last one, which was at least
 /// `every` seconds ago. Changes by `bot` (Vivy herself, like during a reflection) don't
-/// count, or every reflection would make the next one due.
+/// count, or every reflection would make the next one due. Her mood file doesn't count
+/// either: mood checks and `set_mood` rewrite it a few times a day, and a quiet server
+/// shouldn't get a reflection for that alone.
 pub fn due_reflections(
     conn: &Connection,
     now: i64,
@@ -129,7 +145,8 @@ pub fn due_reflections(
     let mut stmt = conn.prepare(
         "SELECT c.scope FROM memory_changes c
          LEFT JOIN memory_reflections r ON r.scope = c.scope
-         WHERE c.scope LIKE 'server:%' AND c.user_id != ?2 AND (r.at IS NULL OR r.at <= ?1)
+         WHERE c.scope LIKE 'server:%' AND c.user_id != ?2
+           AND c.path != '/memories/vivy/mood.md' AND (r.at IS NULL OR r.at <= ?1)
          GROUP BY c.scope
          HAVING max(c.at) > coalesce(max(r.at), 0)",
     )?;
@@ -198,6 +215,68 @@ pub fn newest_file(conn: &Connection, path: &str) -> rusqlite::Result<Option<(St
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
+}
+
+/// `path` in every server's folder that has it: (scope, content).
+pub fn every_file(conn: &Connection, path: &str) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT scope, content FROM memory_files
+         WHERE path = ?1 AND scope LIKE 'server:%' ORDER BY scope",
+    )?;
+    let rows = stmt.query_map([path], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+/// The name of the picture in `slot` ("avatar" or "banner") Vivy has in `guild`, like
+/// "happy", and when it was set.
+pub fn picture(
+    conn: &Connection,
+    guild: u64,
+    slot: &str,
+) -> rusqlite::Result<Option<(String, i64)>> {
+    conn.query_row(
+        "SELECT name, at FROM memory_pictures WHERE guild_id = ?1 AND slot = ?2",
+        params![guild, slot],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+}
+
+pub fn set_picture(
+    conn: &Connection,
+    guild: u64,
+    slot: &str,
+    name: &str,
+    fingerprint: &str,
+    at: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO memory_pictures (guild_id, slot, name, fingerprint, at)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (guild_id, slot) DO UPDATE SET
+            name = excluded.name, fingerprint = excluded.fingerprint, at = excluded.at",
+        params![guild, slot, name, fingerprint, at],
+    )?;
+    Ok(())
+}
+
+/// When the mood in `scope` was last checked (or rewritten by the reflection).
+pub fn mood_checked_at(conn: &Connection, scope: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT at FROM memory_mood_checks WHERE scope = ?1",
+        [scope],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn set_mood_checked(conn: &Connection, scope: &str, at: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO memory_mood_checks (scope, at) VALUES (?1, ?2)
+         ON CONFLICT (scope) DO UPDATE SET at = excluded.at",
+        params![scope, at],
+    )?;
+    Ok(())
 }
 
 /// The files changed since `since`, with their current text (`None` if deleted).
@@ -330,8 +409,18 @@ mod tests {
         );
         // Her own changes (bot id 5) don't make it due either.
         let mut mine = one.clone();
-        mine.insert("/memories/vivy/mood.md".into(), "status: hi".into());
+        mine.insert("/memories/vivy/notes.md".into(), "likes soup".into());
         save(&conn, "server:1", &one, &mine, 5, 250).unwrap();
+        assert!(
+            due_reflections(&conn, 200 + day, day, 5)
+                .unwrap()
+                .is_empty()
+        );
+        // A mood change from someone else (set_mood in a chat) doesn't either.
+        let mut moody = mine.clone();
+        moody.insert("/memories/vivy/mood.md".into(), "mood: sleepy".into());
+        save(&conn, "server:1", &mine, &moody, 7, 260).unwrap();
+        save(&conn, "server:1", &moody, &mine, 7, 270).unwrap();
         assert!(
             due_reflections(&conn, 200 + day, day, 5)
                 .unwrap()
@@ -395,6 +484,36 @@ mod tests {
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), None);
         set_diary_posted(&conn, 5, 1000).unwrap();
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), Some(1000));
+
+        assert_eq!(
+            every_file(&conn, "/memories/vivy/mood.md").unwrap(),
+            vec![
+                ("server:1".to_string(), "status: old".to_string()),
+                ("server:2".to_string(), "status: new".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn faces_and_mood_checks() {
+        let conn = db();
+        assert_eq!(picture(&conn, 1, "avatar").unwrap(), None);
+        set_picture(&conn, 1, "avatar", "happy", "aa", 10).unwrap();
+        set_picture(&conn, 1, "avatar", "sleepy", "bb", 20).unwrap();
+        set_picture(&conn, 1, "banner", "night", "cc", 30).unwrap();
+        assert_eq!(
+            picture(&conn, 1, "avatar").unwrap(),
+            Some(("sleepy".to_string(), 20))
+        );
+        assert_eq!(
+            picture(&conn, 1, "banner").unwrap(),
+            Some(("night".to_string(), 30))
+        );
+
+        assert_eq!(mood_checked_at(&conn, "server:1").unwrap(), None);
+        set_mood_checked(&conn, "server:1", 5).unwrap();
+        set_mood_checked(&conn, "server:1", 7).unwrap();
+        assert_eq!(mood_checked_at(&conn, "server:1").unwrap(), Some(7));
     }
 
     #[test]

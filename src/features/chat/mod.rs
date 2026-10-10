@@ -29,7 +29,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::Value;
-use serenity::all::{Message, MessageId, Reaction, ReactionType, UserId};
+use serenity::all::{Message, MessageFlags, MessageId, Reaction, ReactionType, UserId};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -162,6 +162,7 @@ impl Feature for Chat {
             guild: msg.guild_id,
             channel: msg.channel_id,
             message: msg.id,
+            posted: Default::default(),
         };
         let reply = LiveReply::new(msg.channel_id, Some(msg.id));
         self.answer(ctx, provider.as_ref(), asker, question_id, reply)
@@ -344,12 +345,26 @@ impl Chat {
             guild: reaction.guild_id,
             channel: reaction.channel_id,
             message: question_message.unwrap_or(reaction.message_id),
+            posted: Default::default(),
         };
-        let reply = LiveReply::resume(
-            reaction.channel_id,
-            question_message,
-            &found.answer_messages,
-        );
+        // Voice messages can't be edited into text: they go, and the new answer may send
+        // new ones.
+        let mut text_messages = Vec::new();
+        for id in found.answer_messages {
+            let voice = match reaction.channel_id.message(&ctx.http, id).await {
+                Ok(message) => message
+                    .flags
+                    .is_some_and(|flags| flags.contains(MessageFlags::IS_VOICE_MESSAGE)),
+                // Already deleted: nothing to reuse.
+                Err(_) => continue,
+            };
+            if voice {
+                let _ = reaction.channel_id.delete_message(&ctx.http, id).await;
+            } else {
+                text_messages.push(id);
+            }
+        }
+        let reply = LiveReply::resume(reaction.channel_id, question_message, &text_messages);
         info!("writing an answer again for 🔁");
         self.answer(ctx, provider.as_ref(), asker, found.question_id, reply)
             .await

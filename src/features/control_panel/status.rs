@@ -248,11 +248,17 @@ async fn gather(ctx: &BotCtx) -> Dashboard {
     }
 }
 
-/// Adds `new` to `panels`: rows of a panel whose title is already there go into that one.
+/// Adds `new` to `panels`: rows of a panel whose title is already there go into that one,
+/// and so does its picture if that one has none.
 fn merge_panels(panels: &mut Vec<Panel>, new: Vec<Panel>) {
     for panel in new {
         match panels.iter_mut().find(|p| p.title == panel.title) {
-            Some(existing) => existing.rows.extend(panel.rows),
+            Some(existing) => {
+                existing.rows.extend(panel.rows);
+                if existing.picture.is_none() {
+                    existing.picture = panel.picture;
+                }
+            }
             None => panels.push(panel),
         }
     }
@@ -533,6 +539,7 @@ mod tests {
         let panel = |title: &str, row: &str| Panel {
             title: title.into(),
             rows: vec![Stat::new(row, 1)],
+            picture: (row == "Mood").then(|| "face".to_string()),
         };
         let mut panels = Vec::new();
         merge_panels(&mut panels, vec![panel("Vivy's mind", "Next check-in")]);
@@ -543,6 +550,7 @@ mod tests {
         assert_eq!(panels.len(), 2);
         let names: Vec<&str> = panels[0].rows.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["Next check-in", "Mood"]);
+        assert_eq!(panels[0].picture.as_deref(), Some("face"));
     }
 
     #[test]

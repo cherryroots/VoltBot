@@ -5,6 +5,8 @@
 //! nothing, so a feature only writes the ones it uses. The dispatcher calls these methods;
 //! a feature never registers anything by hand.
 
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use serenity::all::{
     ChannelId, ComponentInteraction, GuildId, Message, MessageId, MessageUpdateEvent,
@@ -176,6 +178,33 @@ pub struct Asker {
     pub channel: ChannelId,
     /// The message that asked.
     pub message: MessageId,
+    /// Messages tools sent as part of the answer, like a voice message.
+    pub posted: Posted,
+}
+
+/// Messages a tool sent as part of the answer, so chat treats them like its own: a reply to
+/// one continues the conversation, ❌ deletes them too, and their text (like what a voice
+/// message says) is kept in the conversation's history. Shared by the clones of an [`Asker`].
+#[derive(Debug, Clone, Default)]
+pub struct Posted(Arc<Mutex<Vec<(MessageId, String)>>>);
+
+impl Posted {
+    pub fn add(&self, message: MessageId, text: impl Into<String>) {
+        self.0.lock().unwrap().push((message, text.into()));
+    }
+
+    pub fn ids(&self) -> Vec<MessageId> {
+        self.0.lock().unwrap().iter().map(|(id, _)| *id).collect()
+    }
+
+    pub fn texts(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(_, text)| text.clone())
+            .collect()
+    }
 }
 
 /// One line on the control panel, like "Pending: 4".
@@ -200,6 +229,9 @@ impl Stat {
 pub struct Panel {
     pub title: String,
     pub rows: Vec<Stat>,
+    /// A small square picture drawn on the right of the box, as a PNG `data:` URL, like
+    /// Vivy's face. Not shown in the embed fallback.
+    pub picture: Option<String>,
 }
 
 impl Panel {
@@ -208,6 +240,7 @@ impl Panel {
         Panel {
             title: format!("{}'s mind", ctx.cache.current_user().name),
             rows,
+            picture: None,
         }
     }
 }

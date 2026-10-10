@@ -95,6 +95,43 @@ enabled = true
 # Channels or threads where Vivy posts a weekly diary entry about her week in that server.
 # Several in one server (say a channel and a thread in it) get the same entry.
 # diary_channels = [123456789012345678, 234567890123456789]
+# How often a day Vivy checks in with her mood in each server (0 turns it off; the daily
+# reflection still updates it). Each check is one short model call.
+mood_checks_per_day = 5
+# Where she lives, so her mood follows the time of day (sleepy late at night).
+timezone = "UTC"
+# A folder with one PNG per mood, named after it: happy.png, sleepy.png, ... She picks one
+# with each mood, and it becomes her avatar in that server (and shows on the status
+# picture). Leave out for no faces.
+# faces_dir = "faces"
+# How far to zoom in on the faces for her avatar (1 is the whole picture, 1.5 the middle two
+# thirds), and where the middle of the crop sits, from the top (0) to the bottom (1).
+face_zoom = 1.0
+face_center = 0.5
+# A folder with her banner for each time of day where she lives: morning.png (5 to 11),
+# day.png (11 to 17), evening.png (17 to 22) and night.png. Checked every hour. Leave out
+# for no banners.
+# banners_dir = "banners"
+
+[features.voice]
+# Voice messages: Vivy can answer with a Discord voice message in her own voice, made with
+# ElevenLabs. The key goes in .env (ELEVENLABS_API_KEY); without it she can't send them.
+enabled = true
+# The ElevenLabs voice she speaks with (from Voice Design or the voice library).
+voice_id = "DIIk31SqVXDOEFbJGJl9"
+# "eleven_v4", or "eleven_v4_turbo" for faster and half the price.
+model = "eleven_v4"
+# 0 to 1: lower is more expressive and varied, higher is steadier.
+stability = 0.5
+# 0 to 1: how closely it sticks to the voice.
+similarity = 0.75
+# A language code like "en" to force a language. Left out, it follows the text.
+# language = "en"
+# The most characters a month, all voice messages together (0 for no limit). ElevenLabs
+# bills per character, audio tags included. The status picture shows what's used.
+monthly_characters = 50000
+# The most characters in one voice message.
+max_characters = 1000
 
 [features.snails]
 # Repost detection. New messages' links and pictures are saved as they arrive; right-click a
