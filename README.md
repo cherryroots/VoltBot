@@ -72,38 +72,46 @@ cd Vivy
 cargo build --release
 ```
 
-### 3. Configure
+### 3. Install
 
 ```bash
-cp config.example.toml config.toml
-cp .env.example .env
-chmod 600 .env
+sudo useradd --system --home /opt/vivy --shell /usr/sbin/nologin vivy
+sudo mkdir -p /opt/vivy
+sudo cp target/release/vivy /opt/vivy/
+sudo cp config.example.toml /opt/vivy/config.toml
+sudo cp .env.example /opt/vivy/.env
+sudo chown -R vivy:vivy /opt/vivy
+sudo chmod 600 /opt/vivy/.env
 ```
+
+Then fill in the two files:
 
 - `.env` holds the secrets: `DISCORD_TOKEN`, plus `ANTHROPIC_API_KEY` and/or `OPENAI_TOKEN` for whichever providers `[ai]` names, and optionally `ELEVENLABS_API_KEY`.
 - `config.toml` holds everything else: your user ID in `admins`, `main_server`, the log and status channel IDs, and per-feature settings.
 
-### 4. Run
-
-From the repo folder:
+### 4. Run with systemd
 
 ```bash
-./target/release/vivy
+sudo cp deploy/vivy.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now vivy
 ```
 
-It reads `.env` and `config.toml` from the folder it runs in (`VIVY_CONFIG` points at another config file). The database, `vivy.db`, is created on the first start, and migrations run automatically.
+`systemctl status vivy` shows whether it's running and `journalctl -u vivy -f` follows the logs. Set `RUST_LOG` in the service file to change the log level, for example `RUST_LOG=info,vivy::features::chat=debug`. The database, `vivy.db`, is created on the first start, and migrations run automatically.
 
-To run it as a service instead, `deploy/vivy.service` is a systemd unit that runs the bot from `/opt/vivy` as a `vivy` user.
+**Any other way works too.** Every file the bot uses (`.env`, `config.toml`, `vivy.db`, `faces_dir`, `banners_dir`) is found relative to the folder it runs in, so you can also skip the install and run `./target/release/vivy` straight from the repo folder, in `tmux`, or however you like. `VIVY_CONFIG` points at a config file somewhere else.
 
 ### Updating
 
 ```bash
 git pull
 cargo build --release
+sudo install -o vivy -g vivy target/release/vivy /opt/vivy/vivy
+sudo systemctl restart vivy
 ```
 
-Then restart the bot.
+When running from the repo folder, just rebuild and restart the bot.
 
 ### Coming from voltgpt
 
-Copy voltgpt's `voltgpt.db` next to the bot as `old.db` before starting. Its reminders and movie wheel game are imported once (the wheel into `main_server`), then the file is renamed to `old.db.imported`.
+Copy voltgpt's `voltgpt.db` into the bot's folder (`/opt/vivy`) as `old.db` before starting. Its reminders and movie wheel game are imported once (the wheel into `main_server`), then the file is renamed to `old.db.imported`.
