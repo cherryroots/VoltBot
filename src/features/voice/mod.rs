@@ -104,7 +104,7 @@ impl Feature for Voice {
             name: TOOL,
             description: "Send a Discord voice message in your own voice, as a reply to the asker. Use it when someone asks to hear you, and now and then when saying something fits better than typing it: a greeting, a laugh, a sleepy good night, a reaction. Keep it short, one to four sentences. \
 Write it as spoken words: no markdown, links, emoji or lists. Steer how you say it with audio tags in square brackets before the words they're for, in plain English: [whispers], [excited], [sighs], [laughs], [yawns], [sarcastic], [sleepy, slow]. A tag lasts until the next one; put several in one bracket with commas; don't mix opposite ones like [whispers, shouting]. Let your current mood show in how you sound. \
-Your text answer goes above the voice message: keep it to a short line, like what you'd type under a voice note, and don't repeat what you said.",
+The voice message is your whole answer, so usually write no text with it.",
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -179,6 +179,9 @@ Your text answer goes above the voice message: keep it to a short line, like wha
             .await
             .context("sending the voice message")?;
         info!(channel = %asker.channel, seconds = clip.seconds, characters, "sent a voice message");
+        asker
+            .posted
+            .add(message.id, format!("[Voice message] {script}"));
 
         let sent = store::Sent {
             message_id: message.id.get(),
@@ -193,7 +196,7 @@ Your text answer goes above the voice message: keep it to a short line, like wha
             .call(move |conn| Ok(store::record(conn, &sent)?))
             .await?;
         Ok(format!(
-            "Your voice message is sent ({:.1} seconds).",
+            "Your voice message is sent ({:.1} seconds). It is your answer: write no text after it, unless something can only be shown in writing (a link, code).",
             clip.seconds
         ))
     }

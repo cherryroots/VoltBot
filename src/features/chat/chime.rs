@@ -99,6 +99,7 @@ impl Chime {
             guild: Some(guild),
             channel: msg.channel_id,
             message: msg.id,
+            posted: Default::default(),
         };
         speak(ctx, &asker, Some(msg), INSTRUCTIONS, None).await
     }

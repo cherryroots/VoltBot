@@ -146,7 +146,12 @@ pub async fn run(ctx: &BotCtx, provider: &dyn ChatProvider, job: Job) -> Outcome
                 warn!("couldn't attach the answer's files: {err:#}");
                 screen.status = Some("⚠️ Some files couldn't be attached.".into());
             }
-            if screen.text.trim().is_empty() && files.is_empty() {
+            // A tool's message (like a voice message) can be the whole answer: then the
+            // text message goes away.
+            if screen.text.trim().is_empty()
+                && files.is_empty()
+                && job.asker.posted.ids().is_empty()
+            {
                 screen.text = EMPTY_ANSWER.to_string();
             }
             let written = Written {
@@ -173,12 +178,24 @@ pub async fn run(ctx: &BotCtx, provider: &dyn ChatProvider, job: Job) -> Outcome
         (Err(err), End::Finished) => End::Failed(err.context("showing the answer")),
         (_, end) => end,
     };
+    let mut message_ids = screen.reply.message_ids();
+    message_ids.extend(job.asker.posted.ids());
     Outcome {
-        text: screen.text,
+        text: with_posted(&screen.text, &job.asker.posted.texts()),
         written,
-        message_ids: screen.reply.message_ids(),
+        message_ids,
         end,
     }
+}
+
+/// The answer's text for the history, with what the tools' messages said after it.
+fn with_posted(text: &str, posted: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !text.trim().is_empty() {
+        parts.push(text.trim_end().to_string());
+    }
+    parts.extend(posted.iter().cloned());
+    parts.join("\n\n")
 }
 
 type Finished = (Done, Vec<NativeRound>, Vec<GeneratedFile>);
@@ -401,6 +418,14 @@ fn link_files(text: &str, files: &[(String, String)]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_what_tools_posted() {
+        let voice = vec!["[Voice message] hi".to_string()];
+        assert_eq!(with_posted("", &voice), "[Voice message] hi");
+        assert_eq!(with_posted("Hey!\n", &voice), "Hey!\n\n[Voice message] hi");
+        assert_eq!(with_posted("Hey!", &[]), "Hey!");
+    }
 
     #[test]
     fn status_goes_under_the_text() {

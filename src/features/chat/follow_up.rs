@@ -151,6 +151,7 @@ async fn deliver(ctx: &BotCtx, follow_up: &FollowUp) -> Result<()> {
         guild: follow_up.guild_id.map(GuildId::new),
         channel: ChannelId::new(follow_up.channel_id),
         message: MessageId::new(follow_up.message_id),
+        posted: Default::default(),
     };
     let user = follow_up.user_id;
     let instructions = format!(
