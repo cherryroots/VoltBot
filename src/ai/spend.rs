@@ -35,8 +35,34 @@ pub struct Spend {
     db: Db,
     /// USD per month; 0 means no warnings.
     budget: f64,
-    /// When the bill was last read, if it ever was.
-    billed_at: Arc<Mutex<Option<DateTime<Utc>>>>,
+    /// How reading the bill with the Admin API key is going.
+    admin_key: Arc<Mutex<AdminKey>>,
+    /// The last bill that was read, kept while later reads fail.
+    last_read: Arc<Mutex<Option<LastRead>>>,
+}
+
+/// One read of Anthropic's bill.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LastRead {
+    pub at: DateTime<Utc>,
+    /// USD billed this month, as of `at`.
+    pub usd: f64,
+}
+
+/// Whether the bot reads Anthropic's bill with an Admin API key, for the status message.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum AdminKey {
+    /// No `ANTHROPIC_ADMIN_KEY` in `.env`.
+    #[default]
+    Off,
+    /// The key is set, but `billed_spend` under `[ai.claude]` is off.
+    Unused,
+    /// The key is set; the first read hasn't finished yet.
+    Starting,
+    /// The last read worked.
+    Working,
+    /// The last read failed, for this reason.
+    Failing(String),
 }
 
 /// What one response used.
@@ -74,7 +100,8 @@ impl Spend {
         Spend {
             db,
             budget,
-            billed_at: Arc::default(),
+            admin_key: Arc::default(),
+            last_read: Arc::default(),
         }
     }
 
@@ -82,9 +109,16 @@ impl Spend {
         self.budget
     }
 
-    /// When the bill was last read. `None` without an Admin API key, or before it worked.
-    pub fn billed_at(&self) -> Option<DateTime<Utc>> {
-        *self.billed_at.lock().unwrap()
+    pub fn admin_key(&self) -> AdminKey {
+        self.admin_key.lock().unwrap().clone()
+    }
+
+    pub fn last_read(&self) -> Option<LastRead> {
+        *self.last_read.lock().unwrap()
+    }
+
+    pub fn set_admin_key(&self, state: AdminKey) {
+        *self.admin_key.lock().unwrap() = state;
     }
 
     /// Adds what one response of `job` used to this month. Errors are only logged: a
@@ -104,6 +138,7 @@ impl Spend {
 
     /// Reads Claude's bill now and then every hour, for as long as the bot runs.
     pub async fn follow_bill(self, billing: Billing) {
+        self.set_admin_key(AdminKey::Starting);
         let mut failing = false;
         loop {
             let now = Utc::now();
@@ -113,7 +148,8 @@ impl Spend {
                         info!("reading Anthropic's bill works again");
                     }
                     failing = false;
-                    *self.billed_at.lock().unwrap() = Some(now);
+                    self.set_admin_key(AdminKey::Working);
+                    *self.last_read.lock().unwrap() = Some(LastRead { at: now, usd });
                     let (month, budget) = (this_month(), self.budget);
                     let result = self
                         .db
@@ -123,12 +159,16 @@ impl Spend {
                         .await;
                     self.warn("claude", result);
                 }
-                // Warned once, so a bad key doesn't fill the log channel every hour.
-                Err(err) if !failing => {
+                Err(err) => {
+                    // Warned once, so a bad key doesn't fill the log channel every hour.
+                    if failing {
+                        info!("still can't read Anthropic's bill: {err:#}");
+                    } else {
+                        warn!("couldn't read Anthropic's bill, using the estimate: {err:#}");
+                    }
                     failing = true;
-                    warn!("couldn't read Anthropic's bill, using the estimate: {err:#}");
+                    self.set_admin_key(AdminKey::Failing(format!("{err:#}")));
                 }
-                Err(err) => info!("still can't read Anthropic's bill: {err:#}"),
             }
             tokio::time::sleep(BILL_EVERY).await;
         }

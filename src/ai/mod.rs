@@ -23,7 +23,7 @@ use crate::util::media::ModelImage;
 pub use claude::{Claude, ClaudeConfig};
 pub use complete::{ToolRunner, complete};
 pub use openai::{OpenAi, OpenAiConfig};
-pub use spend::Spend;
+pub use spend::{AdminKey, Spend};
 
 /// Who said something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

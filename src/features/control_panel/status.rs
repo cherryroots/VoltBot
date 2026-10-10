@@ -12,7 +12,7 @@ use rusqlite::OptionalExtension;
 use serenity::all::{ChannelId, CreateEmbed, CreateMessage, EditMessage, HttpError, MessageId};
 use tracing::warn;
 
-use crate::ai::display_name;
+use crate::ai::{AdminKey, display_name};
 use crate::core::logging::error_stats;
 use crate::core::{BotCtx, GIT_COMMIT, Result, VERSION};
 use crate::util::shorten;
@@ -203,11 +203,26 @@ async fn claude_spend(ctx: &BotCtx) -> Option<String> {
         budget if budget > 0.0 => format!(" of ${budget:.0}"),
         _ => String::new(),
     };
-    let source = match spend.billed_at() {
-        Some(at) => format!("billed, read <t:{}:R>", at.timestamp()),
-        None => "estimate".to_string(),
+    let admin_key = spend.admin_key();
+    let source = match admin_key {
+        AdminKey::Working => "billed",
+        _ => "estimate",
     };
     let mut lines = vec![format!("${:.2}{budget} this month ({source})", month.usd)];
+    lines.push(match admin_key {
+        AdminKey::Off => "Admin key: off".to_string(),
+        AdminKey::Unused => "Admin key: set, but `billed_spend` is off".to_string(),
+        AdminKey::Starting => "Admin key: on, reading the bill".to_string(),
+        AdminKey::Working => "Admin key: on".to_string(),
+        AdminKey::Failing(why) => format!("Admin key: failing ({})", shorten(&why, 120)),
+    });
+    if let Some(read) = spend.last_read() {
+        lines.push(format!(
+            "Last read <t:{}:R>: ${:.2} billed",
+            read.at.timestamp(),
+            read.usd
+        ));
+    }
     if config.show_cache_hits
         && let Some(hits) = month.cache_hits
     {
