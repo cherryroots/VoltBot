@@ -1,10 +1,16 @@
 //! The weekly diary: once a week Vivy writes a short entry about her week in the server,
 //! from what changed in her memory, and posts it in each channel listed in
 //! `diary_channels` under `[features.memory]`. No channels, no diary.
+//!
+//! A thread works as a target too, since Discord treats it as a channel. Targets in the
+//! same server get the same entry, written once: a server's diary is due a week after it
+//! was last posted to any of its targets, so a target added later joins the next one.
+
+use std::collections::BTreeMap;
 
 use chrono::Utc;
 use serde::Deserialize;
-use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage};
+use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage, GuildId};
 use tracing::{info, warn};
 
 use super::folder::{self, Command};
@@ -35,46 +41,87 @@ Answer with the entry only.";
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct Settings {
-    /// Channels to post the diary in.
+    /// Channels and threads to post the diary in.
     diary_channels: Vec<u64>,
 }
 
-/// Writes the diary in every listed channel whose last entry is a week old.
+/// Writes the diary for every server whose last entry is a week old, and posts it in all
+/// of that server's targets.
 pub async fn post_due(ctx: &BotCtx) -> Result<()> {
     if ctx.ai.chat().is_none() {
         return Ok(());
     }
     let settings: Settings = ctx.config.feature("memory")?;
     let now = Utc::now().timestamp();
+    let due = |posted: Option<i64>| posted.is_none_or(|at| at <= now - EVERY_SECS);
+
+    // The targets, grouped by server.
+    let mut servers: BTreeMap<GuildId, Vec<ChannelId>> = BTreeMap::new();
     for id in settings.diary_channels {
-        let posted = ctx
-            .db
-            .call(move |conn| Ok(store::diary_posted_at(conn, id)?))
-            .await?;
-        if posted.is_some_and(|at| at > now - EVERY_SECS) {
+        let channel = ChannelId::new(id);
+        match server_of(ctx, channel).await {
+            Ok(guild) => servers.entry(guild).or_default().push(channel),
+            Err(err) => {
+                // Warned once a week, not every hour.
+                if due(posted_at(ctx, &[channel]).await?) {
+                    warn!(channel = id, "can't post the diary there: {err:#}");
+                    set_posted(ctx, &[channel], now).await?;
+                }
+            }
+        }
+    }
+
+    for (guild, channels) in servers {
+        if !due(posted_at(ctx, &channels).await?) || !ctx.gate("memory").allows_guild(guild) {
             continue;
         }
-        if let Err(err) = post(ctx, ChannelId::new(id), now).await {
-            warn!(channel = id, "couldn't write the diary: {err:#}");
+        if let Err(err) = post(ctx, guild, &channels, now).await {
+            warn!(guild = guild.get(), "couldn't write the diary: {err:#}");
         }
         // Written or not, the next try is next week.
-        ctx.db
-            .call(move |conn| Ok(store::set_diary_posted(conn, id, now)?))
-            .await?;
+        set_posted(ctx, &channels, now).await?;
     }
     Ok(())
 }
 
-async fn post(ctx: &BotCtx, channel: ChannelId, now: i64) -> Result<()> {
-    let guild = channel
-        .to_channel(&ctx.http)
-        .await?
-        .guild()
-        .map(|c| c.guild_id)
-        .ok_or_else(|| anyhow::anyhow!("not a server channel"))?;
-    if !ctx.gate("memory").allows_guild(guild) {
-        return Ok(());
-    }
+/// The server a channel or thread is in.
+async fn server_of(ctx: &BotCtx, channel: ChannelId) -> Result<GuildId> {
+    let channel = channel.to_channel(&ctx.http).await?;
+    let guild = channel.guild().map(|c| c.guild_id);
+    guild.ok_or_else(|| anyhow::anyhow!("not a server channel"))
+}
+
+/// When the diary was last posted to any of `channels`.
+async fn posted_at(ctx: &BotCtx, channels: &[ChannelId]) -> Result<Option<i64>> {
+    let ids: Vec<u64> = channels.iter().map(|c| c.get()).collect();
+    let last = ctx
+        .db
+        .call(move |conn| {
+            let mut last = None;
+            for id in ids {
+                last = last.max(store::diary_posted_at(conn, id)?);
+            }
+            Ok(last)
+        })
+        .await?;
+    Ok(last)
+}
+
+async fn set_posted(ctx: &BotCtx, channels: &[ChannelId], now: i64) -> Result<()> {
+    let ids: Vec<u64> = channels.iter().map(|c| c.get()).collect();
+    ctx.db
+        .call(move |conn| {
+            for id in ids {
+                store::set_diary_posted(conn, id, now)?;
+            }
+            Ok(())
+        })
+        .await?;
+    Ok(())
+}
+
+/// Writes one entry for `guild` and posts it in each of `channels`.
+async fn post(ctx: &BotCtx, guild: GuildId, channels: &[ChannelId], now: i64) -> Result<()> {
     let scope = store::scope(Some(guild.get()), 0);
     let (folder, changed) = {
         let scope = scope.clone();
@@ -130,6 +177,17 @@ async fn post(ctx: &BotCtx, channel: ChannelId, now: i64) -> Result<()> {
     if entry.is_empty() {
         anyhow::bail!("the model wrote nothing");
     }
+    for &channel in channels {
+        // One target failing (deleted, no permission) doesn't stop the others.
+        if let Err(err) = send(ctx, channel, entry).await {
+            warn!(channel = channel.get(), "couldn't post the diary: {err:#}");
+        }
+    }
+    info!("posted the weekly diary in {} places", channels.len());
+    Ok(())
+}
+
+async fn send(ctx: &BotCtx, channel: ChannelId, entry: &str) -> Result<()> {
     for part in split_message(entry, 2000) {
         channel
             .send_message(
@@ -140,7 +198,6 @@ async fn post(ctx: &BotCtx, channel: ChannelId, now: i64) -> Result<()> {
             )
             .await?;
     }
-    info!("posted the weekly diary");
     Ok(())
 }
 
