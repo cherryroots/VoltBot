@@ -75,7 +75,7 @@ pub fn names(ctx: &BotCtx) -> Vec<String> {
 pub fn instruction(names: &[String]) -> Option<String> {
     (!names.is_empty()).then(|| {
         format!(
-            "Add a fifth line to mood.md, `face:` and the one word from this list that best fits your mood: {}. It becomes your profile picture in this server.",
+            "Add a fifth line to mood.md, `face:` and the one word from this list that best fits your mood or what you're doing right now: {}. It becomes your profile picture in this server.",
             names.join(", ")
         )
     })
