@@ -46,6 +46,13 @@ pub const MIGRATIONS: &[&str] = &[
         guild_id INTEGER PRIMARY KEY,
         running INTEGER NOT NULL
     );",
+    // 2: new messages that turned out to be snails, for the control panel's count.
+    "CREATE TABLE snail_caught (
+        message_id INTEGER PRIMARY KEY,
+        guild_id INTEGER NOT NULL,
+        author_id INTEGER NOT NULL,
+        caught_at INTEGER NOT NULL        -- unix seconds
+    );",
 ];
 
 /// What was found in one message.
@@ -203,6 +210,31 @@ pub fn close_pictures(
     }
     let next = (count == SCAN_CHUNK).then_some(last);
     Ok((found, next))
+}
+
+/// Notes that a new message was a snail.
+pub fn record_caught(
+    conn: &Connection,
+    guild: u64,
+    message: u64,
+    author: u64,
+    at: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO snail_caught (message_id, guild_id, author_id, caught_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![message, guild, author, at],
+    )?;
+    Ok(())
+}
+
+/// Snails caught since `since`, in every server.
+pub fn caught_since(conn: &Connection, since: i64) -> rusqlite::Result<u64> {
+    conn.query_row(
+        "SELECT count(*) FROM snail_caught WHERE caught_at >= ?1",
+        [since],
+        |row| row.get(0),
+    )
 }
 
 /// Forgets a message that no longer exists.
@@ -401,6 +433,17 @@ mod tests {
                 .0
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn counts_caught_snails() {
+        let conn = test_connection("snails", MIGRATIONS);
+        record_caught(&conn, 1, 10, 100, 1_000).unwrap();
+        record_caught(&conn, 1, 11, 100, 5_000).unwrap();
+        // The same message counts once.
+        record_caught(&conn, 1, 11, 100, 5_000).unwrap();
+        assert_eq!(caught_since(&conn, 0).unwrap(), 2);
+        assert_eq!(caught_since(&conn, 2_000).unwrap(), 1);
     }
 
     #[test]

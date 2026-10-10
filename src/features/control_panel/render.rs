@@ -1125,6 +1125,7 @@ mod tests {
                 FeatureView {
                     name: "snails",
                     stats: Ok(vec![
+                        Stat::new("Caught this week", 14),
                         Stat::new("Links", 5302),
                         Stat::new("Pictures", 18113),
                         Stat::new("Backfill", "41/52 channels"),
