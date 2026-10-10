@@ -77,7 +77,7 @@ impl Feature for Wheel {
     async fn start(&self, ctx: &BotCtx) -> Result<()> {
         // Reading the fonts and looking up names take a while; do it now rather than on the
         // first button press, which Discord only waits 3 seconds for.
-        tokio::task::spawn_blocking(render::load_fonts);
+        tokio::task::spawn_blocking(crate::util::svg::load_fonts);
         let ctx = ctx.clone();
         tokio::spawn(async move {
             let games = ctx

@@ -78,9 +78,9 @@ impl Feature for Memory {
 
     async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {
         let (files, folders) = ctx.db.call(|conn| Ok(store::stats(conn)?)).await?;
-        Ok(vec![Stat::new(
-            "Files",
-            format!("{files} in {folders} folders"),
-        )])
+        Ok(vec![
+            Stat::new("Files", files),
+            Stat::new("Folders", folders),
+        ])
     }
 }

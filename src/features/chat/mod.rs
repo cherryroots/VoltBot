@@ -37,7 +37,7 @@ use tracing::{error, info, warn};
 use self::answer::{End, Job};
 use self::store::{NewTurn, StoredPart};
 use crate::ai::{ChatProvider, Input, Part, Role, ToolDef};
-use crate::core::{Asker, BotCtx, Feature, Result, user_error};
+use crate::core::{Asker, BotCtx, Feature, Result, Stat, user_error};
 use crate::util::media;
 use crate::util::reply::LiveReply;
 
@@ -73,6 +73,14 @@ impl Feature for Chat {
     /// The empty prefix: every mention no other feature claimed.
     fn mention_prefixes(&self) -> &'static [&'static str] {
         &[""]
+    }
+
+    async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {
+        let (answers, follow_ups) = ctx.db.call(|conn| Ok(store::stats(conn)?)).await?;
+        Ok(vec![
+            Stat::new("Answers", answers),
+            Stat::new("Follow-ups", follow_ups),
+        ])
     }
 
     fn tools(&self) -> Vec<ToolDef> {

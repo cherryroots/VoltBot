@@ -240,6 +240,8 @@ static ERRORS: Mutex<ErrorLog> = Mutex::new(ErrorLog {
 pub struct ErrorStats {
     pub last_hour: usize,
     pub last_day: usize,
+    /// Errors per hour over the last day, oldest first: the last entry is the last hour.
+    pub per_hour: [usize; 24],
     pub last: Option<(DateTime<Utc>, String)>,
 }
 
@@ -257,14 +259,22 @@ fn record_error(text: &str) {
     log.last = Some((now, text.to_string()));
 }
 
-/// Errors logged in the last hour and day, and the most recent one.
+/// Errors logged in the last hour and day, per hour, and the most recent one.
 pub fn error_stats() -> ErrorStats {
     let now = Utc::now();
     let log = ERRORS.lock().unwrap_or_else(|e| e.into_inner());
     let since = |delta| log.times.iter().filter(|t| now - **t <= delta).count();
+    let mut per_hour = [0; 24];
+    for t in &log.times {
+        let hours_ago = (now - *t).num_hours();
+        if (0..24).contains(&hours_ago) {
+            per_hour[23 - hours_ago as usize] += 1;
+        }
+    }
     ErrorStats {
         last_hour: since(TimeDelta::hours(1)),
         last_day: since(TimeDelta::days(1)),
+        per_hour,
         last: log.last.clone(),
     }
 }

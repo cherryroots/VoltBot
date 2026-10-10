@@ -3,6 +3,8 @@
 //! The other half of the control panel, the log channel, is part of the core logging setup
 //! (`core::logging`), so it also works when this feature is turned off.
 
+mod history;
+mod render;
 mod status;
 
 use async_trait::async_trait;

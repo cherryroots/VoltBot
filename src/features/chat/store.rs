@@ -373,6 +373,16 @@ pub fn next_follow_up(conn: &Connection) -> rusqlite::Result<Option<i64>> {
     })
 }
 
+/// For the control panel: answers given so far, and check-ins still planned.
+pub fn stats(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
+    conn.query_row(
+        "SELECT (SELECT count(*) FROM chat_turns WHERE role = 'assistant'),
+                (SELECT count(*) FROM chat_follow_ups)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
 /// The emoji of a server that have a description, by ID.
 pub fn emoji_descriptions(
     conn: &Connection,
