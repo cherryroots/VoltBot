@@ -212,22 +212,54 @@ async fn register_commands(
     Ok(())
 }
 
-/// Sets up the AI providers whose keys are in `.env`.
+/// Sets up the AI provider for chat: the one `provider` under `[ai]` names, otherwise
+/// Claude when its key is in `.env`, otherwise OpenAI.
 fn ai_from_env(config: &Config, web: &reqwest::Client) -> ai::Ai {
-    let mut ai = ai::Ai::default();
-    match std::env::var("OPENAI_TOKEN") {
-        Ok(token) if !token.trim().is_empty() => {
+    let key = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+    };
+    let claude_key = key("ANTHROPIC_API_KEY");
+    let openai_key = key("OPENAI_TOKEN");
+    let choice = match config.ai.provider.as_deref() {
+        Some(choice) => choice,
+        None if claude_key.is_some() => "claude",
+        None => "openai",
+    };
+    let chat: Option<Arc<dyn ai::ChatProvider>> = match (choice, claude_key, openai_key) {
+        ("claude", Some(key), _) => Some(Arc::new(ai::Claude::new(
+            web.clone(),
+            key,
+            config.ai.claude.clone(),
+        ))),
+        ("openai", _, Some(key)) => {
             let base = std::env::var("OPENAI_BASE").ok();
-            ai.chat = Some(Arc::new(ai::OpenAi::new(
+            Some(Arc::new(ai::OpenAi::new(
                 web.clone(),
-                token.trim().to_string(),
+                key,
                 base.as_deref(),
                 config.ai.openai.clone(),
-            )));
+            )))
         }
-        _ => warn!("OPENAI_TOKEN is not set, so chat is off"),
+        ("claude", None, _) => {
+            warn!("ANTHROPIC_API_KEY is not set, so chat is off");
+            None
+        }
+        ("openai", _, None) => {
+            warn!("OPENAI_TOKEN is not set, so chat is off");
+            None
+        }
+        (other, _, _) => {
+            warn!("[ai] provider = {other:?} isn't \"claude\" or \"openai\", so chat is off");
+            None
+        }
+    };
+    if let Some(chat) = &chat {
+        info!("chat uses {} ({})", chat.name(), chat.model());
     }
-    ai
+    ai::Ai { chat }
 }
 
 /// Imports voltgpt's `old.db` if it's there. Returns a summary for the start notice.

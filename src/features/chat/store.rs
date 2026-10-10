@@ -67,6 +67,12 @@ pub enum StoredPart {
         kind: StoredKind,
         mime: String,
     },
+    /// What the features added to a question when it was asked (see
+    /// [`Feature::chat_context`](crate::core::Feature::chat_context)). Kept, so the
+    /// question reads the same every time the conversation is sent again.
+    Context {
+        text: String,
+    },
     /// Any other attachment, like a PDF or a spreadsheet.
     File {
         url: String,
@@ -175,6 +181,22 @@ pub fn add_turn(conn: &mut Connection, turn: &NewTurn, messages: &[u64]) -> anyh
     }
     tx.commit()?;
     Ok(id)
+}
+
+/// Adds parts to the end of a stored turn.
+pub fn add_parts(conn: &Connection, turn_id: i64, parts: &[StoredPart]) -> anyhow::Result<()> {
+    let content: String = conn.query_row(
+        "SELECT content_json FROM chat_turns WHERE id = ?1",
+        [turn_id],
+        |row| row.get(0),
+    )?;
+    let mut stored: Vec<StoredPart> = serde_json::from_str(&content)?;
+    stored.extend_from_slice(parts);
+    conn.execute(
+        "UPDATE chat_turns SET content_json = ?1 WHERE id = ?2",
+        params![serde_json::to_string(&stored)?, turn_id],
+    )?;
+    Ok(())
 }
 
 /// The turn a Discord message belongs to.
@@ -483,6 +505,13 @@ mod tests {
             mime: "image/png".into(),
         });
         let id = add_turn(&mut conn, &turn, &[1]).unwrap();
+        assert_eq!(get_turn(&conn, id).unwrap().unwrap().parts, turn.parts);
+
+        let context = StoredPart::Context {
+            text: "<memory_files/>".into(),
+        };
+        add_parts(&conn, id, std::slice::from_ref(&context)).unwrap();
+        turn.parts.push(context);
         assert_eq!(get_turn(&conn, id).unwrap().unwrap().parts, turn.parts);
     }
 }

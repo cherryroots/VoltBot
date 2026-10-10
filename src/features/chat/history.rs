@@ -21,6 +21,8 @@ const MAX_FILES_PER_MESSAGE: usize = 10;
 const MAX_FILE_BYTES: usize = 50 * 1024 * 1024;
 /// Only the newest turns with media send it again in a full history; older ones say there
 /// was an image. Videos turn into several grids each, so this keeps requests small.
+/// Providers that are always sent everything ([`ChatProvider::sends_full_history`]) get
+/// all of it.
 const MEDIA_TURNS: usize = 4;
 /// How far up a reply chain the history goes.
 pub const MAX_TURNS: usize = 40;
@@ -99,18 +101,26 @@ pub async fn build_input(ctx: &BotCtx, provider: &dyn ChatProvider, chain: &[Tur
             && turn.model.as_deref() == Some(provider.model())
             && turn.continuation_id.is_some()
     });
+    // A provider that is sent everything every time gets every turn's media, so earlier
+    // turns don't change from one request to the next.
+    let media_turns = if provider.sends_full_history() {
+        usize::MAX
+    } else {
+        MEDIA_TURNS
+    };
     match continuable {
         Some(i) => Input::After {
             continuation: chain[i].continuation_id.clone().unwrap_or_default(),
-            new: to_model_turns(ctx, &chain[i + 1..]).await,
+            new: to_model_turns(ctx, &chain[i + 1..], media_turns).await,
         },
-        None => Input::Full(to_model_turns(ctx, chain).await),
+        None => Input::Full(to_model_turns(ctx, chain, media_turns).await),
     }
 }
 
-/// Stored turns as the model reads them, with media downloaded. Media that can't be loaded
-/// is replaced by a short note, so the model knows something was there.
-async fn to_model_turns(ctx: &BotCtx, turns: &[Turn]) -> Vec<ai::Turn> {
+/// Stored turns as the model reads them, with media downloaded for the newest
+/// `media_turns` turns that have some. Media that can't be loaded is replaced by a short
+/// note, so the model knows something was there.
+async fn to_model_turns(ctx: &BotCtx, turns: &[Turn], media_turns: usize) -> Vec<ai::Turn> {
     let with_media: Vec<i64> = turns
         .iter()
         .filter(|t| {
@@ -120,7 +130,7 @@ async fn to_model_turns(ctx: &BotCtx, turns: &[Turn]) -> Vec<ai::Turn> {
         })
         .map(|t| t.id)
         .collect();
-    let load_from = with_media.len().saturating_sub(MEDIA_TURNS);
+    let load_from = with_media.len().saturating_sub(media_turns);
     let loaded_turns = &with_media[load_from..];
 
     // Discord's attachment links expire after about a day; ask for fresh ones.
@@ -130,7 +140,7 @@ async fn to_model_turns(ctx: &BotCtx, turns: &[Turn]) -> Vec<ai::Turn> {
         .filter_map(|(t, p)| match p {
             StoredPart::Media { url, .. } if loaded_turns.contains(&t.id) => Some(url.clone()),
             StoredPart::File { url, .. } => Some(url.clone()),
-            StoredPart::Media { .. } | StoredPart::Text { .. } => None,
+            StoredPart::Media { .. } | StoredPart::Text { .. } | StoredPart::Context { .. } => None,
         })
         .collect();
     let fresh = refresh_urls(ctx, &urls).await;
@@ -140,7 +150,9 @@ async fn to_model_turns(ctx: &BotCtx, turns: &[Turn]) -> Vec<ai::Turn> {
         let mut parts = Vec::new();
         for part in &turn.parts {
             match part {
-                StoredPart::Text { text } => parts.push(Part::Text(text.clone())),
+                StoredPart::Text { text } | StoredPart::Context { text } => {
+                    parts.push(Part::Text(text.clone()));
+                }
                 // Answers never carry media of their own.
                 StoredPart::Media { .. } if turn.role == Role::Assistant => {}
                 StoredPart::Media { .. } if !loaded_turns.contains(&turn.id) => {

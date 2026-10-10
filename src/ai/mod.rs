@@ -5,6 +5,7 @@
 //! arrives as a stream of [`ChatEvent`]s. Discord, message splitting, the tool loop and the
 //! bot's own tools live outside, so every provider reuses them.
 
+pub mod claude;
 mod complete;
 pub mod openai;
 mod sse;
@@ -17,6 +18,7 @@ use tokio::sync::mpsc;
 
 use crate::util::media::ModelImage;
 
+pub use claude::{Claude, ClaudeConfig};
 pub use complete::{ToolRunner, complete};
 pub use openai::{OpenAi, OpenAiConfig};
 
@@ -177,6 +179,13 @@ pub trait ChatProvider: Send + Sync {
     fn name(&self) -> &'static str;
     fn model(&self) -> &str;
 
+    /// Whether every request carries the whole conversation (Claude). History then sends
+    /// earlier turns exactly as before, media included, because changing them loses the
+    /// prompt cache and the model's earlier thinking.
+    fn sends_full_history(&self) -> bool {
+        false
+    }
+
     /// Starts an answer. Events arrive on the returned channel until [`ChatEvent::Done`] or
     /// an error. Dropping the receiver stops the request.
     async fn stream(
@@ -188,11 +197,14 @@ pub trait ChatProvider: Send + Sync {
     async fn download_file(&self, file: &GeneratedFile) -> anyhow::Result<Vec<u8>>;
 }
 
-/// `[ai]` in config.toml: one section per provider.
+/// `[ai]` in config.toml: which provider chats, and one section per provider.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AiConfig {
+    /// "claude" or "openai". Left out: Claude when its key is set, otherwise OpenAI.
+    pub provider: Option<String>,
     pub openai: OpenAiConfig,
+    pub claude: ClaudeConfig,
 }
 
 /// The AI services the bot has, set up from `.env` and `config.toml` at startup.

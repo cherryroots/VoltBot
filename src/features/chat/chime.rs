@@ -142,13 +142,10 @@ pub async fn speak(
 ) -> Result<()> {
     let provider = ctx.ai.chat.clone().context("chat has no model")?;
     let transcript = read_along(ctx, asker.guild, asker.channel, last).await?;
-    let mut parts = vec![Part::Text(format!("{transcript}\n{instructions}"))];
-    parts.extend(
-        answer::context_for(ctx, asker, true)
-            .await
-            .into_iter()
-            .map(Part::Text),
-    );
+    let question = format!("{transcript}\n{instructions}");
+    let context = answer::context_for(ctx, asker, true).await;
+    let mut parts = vec![Part::Text(question.clone())];
+    parts.extend(context.iter().cloned().map(Part::Text));
     let (tools, owners) = answer::tools_for(ctx, asker);
     let request = ChatRequest {
         system: SYSTEM_PROMPT.to_string(),
@@ -192,13 +189,16 @@ pub async fn speak(
         )
         .await?;
     info!("spoke up on her own");
-    // Saved like a question and its answer, so a reply to her line continues.
+    // Saved like a question and its answer, exactly as the model read it, so a reply to
+    // her line continues the same conversation.
+    let mut stored = vec![StoredPart::Text { text: question }];
+    stored.extend(context.into_iter().map(|text| StoredPart::Context { text }));
     let question = NewTurn {
         parent_id: None,
         role: Role::User,
         author_id: asker.user.get(),
         channel_id: asker.channel.get(),
-        parts: vec![StoredPart::Text { text: transcript }],
+        parts: stored,
         written: None,
         created_at: Utc::now().timestamp(),
     };
