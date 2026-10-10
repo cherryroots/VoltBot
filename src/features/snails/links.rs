@@ -26,17 +26,41 @@ const PICTURE_SITES: &[&str] = &[
 /// link to another Discord message is a reference, not a repost.
 const IGNORED_SITES: &[&str] = &["gif", "discord"];
 
+/// Embed fixers that also answer on one-letter subdomains: d.fxtwitter.com (just the media),
+/// g.fxbsky.app (gallery), c.vxtwitter.com...
+const MIRRORS: &[&str] = &[
+    "fxtwitter.com",
+    "vxtwitter.com",
+    "fixupx.com",
+    "fixvx.com",
+    "fxbsky.app",
+    "vxbsky.app",
+    "ddinstagram.com",
+    "kkinstagram.com",
+    "uuinstagram.com",
+    "vxinstagram.com",
+    "instagramez.com",
+    "vxtiktok.com",
+    "rxddit.com",
+    "vxreddit.com",
+    "phixiv.net",
+];
+
 /// Which site a host belongs to. Embed-fixer mirrors count as the site they mirror.
 fn site_of_host(host: &str) -> Option<&'static str> {
+    // d.fxtwitter.com -> fxtwitter.com
+    let host = match host.split_once('.') {
+        Some((sub, rest)) if sub.len() == 1 && MIRRORS.contains(&rest) => rest,
+        _ => host,
+    };
     Some(match host {
         "twitter.com" | "x.com" | "fxtwitter.com" | "vxtwitter.com" | "fixupx.com"
         | "fixvx.com" | "twittpr.com" | "girlcockx.com" | "nitter.net" | "xcancel.com"
         | "nitter.poast.org" | "mobile.twitter.com" | "mobile.x.com" => "x",
         "bsky.app" | "fxbsky.app" | "vxbsky.app" | "bskx.app" | "bskyx.app" | "bsyy.app" => "bsky",
         "threads.net" | "threads.com" | "fixthreads.net" | "vxthreads.net" => "threads",
-        "instagram.com" | "ddinstagram.com" | "d.ddinstagram.com" | "g.ddinstagram.com"
-        | "instagramez.com" | "kkinstagram.com" | "uuinstagram.com" | "vxinstagram.com"
-        | "kirkstagram.com" => "instagram",
+        "instagram.com" | "ddinstagram.com" | "instagramez.com" | "kkinstagram.com"
+        | "uuinstagram.com" | "vxinstagram.com" | "kirkstagram.com" => "instagram",
         "tiktok.com" | "vxtiktok.com" | "tnktok.com" | "tfxktok.com" | "tiktxk.com" => "tiktok",
         "youtube.com" | "music.youtube.com" | "youtube-nocookie.com" | "youtu.be" => "youtube",
         "reddit.com" | "old.reddit.com" | "new.reddit.com" | "np.reddit.com" | "sh.reddit.com"
@@ -88,6 +112,11 @@ fn after<'a>(segs: &[&'a str], marker: &str) -> Option<&'a str> {
     segs.get(i + 1).copied()
 }
 
+/// Whether `s` is all digits, like a post id on many sites.
+fn is_number(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// The id of a post, video or file on a known site. None when the link isn't one post
 /// (a profile, a search...); it then gets the plain host + path key.
 fn post_id(site: &str, host: &str, segs: &[&str], url: &Url) -> Option<String> {
@@ -123,28 +152,56 @@ fn post_id(site: &str, host: &str, segs: &[&str], url: &Url) -> Option<String> {
             .or_else(|| param("v"))
             .or_else(|| param("story_fbid"))?,
         "pixiv" => after(segs, "artworks")?.to_string(),
-        // <blog>.tumblr.com/post/<id> or tumblr.com/<blog>/<id>. Post ids are global.
-        "tumblr" => after(segs, "post").or(segs.get(1).copied())?.to_string(),
-        "twitch" if host == "clips.twitch.tv" => format!("clip/{}", first?),
+        // <blog>.tumblr.com/post/<id> or tumblr.com/<blog>/<id>. Post ids are global numbers.
+        // Anything else (tumblr.com/tagged/cats, the media CDN...) isn't one post.
+        "tumblr" => {
+            let id = if host == "tumblr.com" || host == "tpmblr.com" {
+                segs.get(1).copied()
+            } else {
+                after(segs, "post")
+            };
+            id.filter(|id| is_number(id))?.to_string()
+        }
+        // clips.twitch.tv/<slug>, or clips.twitch.tv/embed?clip=<slug> in a player.
+        "twitch" if host == "clips.twitch.tv" => match first? {
+            "embed" => format!("clip/{}", param("clip")?),
+            slug => format!("clip/{slug}"),
+        },
         "twitch" => match (after(segs, "clip"), after(segs, "videos")) {
             (Some(clip), _) => format!("clip/{clip}"),
             (None, Some(video)) => format!("video/{video}"),
             _ => return None,
         },
-        // i.imgur.com/<id>.jpg and imgur.com/<id> are the same picture.
-        "imgur" => match first {
-            Some("a" | "gallery") => format!("album/{}", segs.get(1)?),
-            _ => first?.split('.').next()?.to_string(),
+        // i.imgur.com/<id>.jpg and imgur.com/<id> are the same picture. Longer paths
+        // (imgur.com/t/<tag>, imgur.com/user/<name>...) aren't one picture.
+        "imgur" => match segs {
+            ["a" | "gallery", id, ..] => format!("album/{id}"),
+            [file] => file.split('.').next()?.to_string(),
+            _ => return None,
         },
-        "streamable" => first?.to_string(),
-        // open.spotify.com/intl-de/track/<id>
+        // streamable.com/<id>, or streamable.com/e/<id> in a player.
+        "streamable" => match segs {
+            [id] | ["e", id] => id.to_string(),
+            _ => return None,
+        },
+        // open.spotify.com/track/<id>, also with /intl-de/ or /embed/ in front, and old
+        // playlist links: /user/<name>/playlist/<id>.
         "spotify" => {
             let s: Vec<&str> = segs
                 .iter()
                 .copied()
-                .filter(|s| !s.starts_with("intl-"))
+                .filter(|s| !s.starts_with("intl-") && *s != "embed")
                 .collect();
-            format!("{}/{}", s.first()?, s.get(1)?)
+            match s.as_slice() {
+                [
+                    kind @ ("track" | "album" | "playlist" | "artist" | "episode" | "show"),
+                    id,
+                ] => {
+                    format!("{kind}/{id}")
+                }
+                ["user", _, "playlist", id] => format!("playlist/{id}"),
+                _ => return None,
+            }
         }
         "pinterest" => after(segs, "pin")?.to_string(),
         "discord" => {
@@ -160,37 +217,24 @@ fn post_id(site: &str, host: &str, segs: &[&str], url: &Url) -> Option<String> {
     Some(format!("{site}:{id}"))
 }
 
-/// Query parameters that never change what a link points to.
-const JUNK_PARAMS: &[&str] = &[
-    "ex",
-    "is",
-    "hm",
-    "si",
-    "feature",
-    "pp",
-    "t",
-    "s",
-    "igsh",
-    "igshid",
-    "fbclid",
-    "gclid",
-    "ref",
-    "ref_src",
-    "share_id",
-    "context",
-    "width",
-    "height",
-    "format",
-    "quality",
-    "name",
-    "mibextid",
-    "rdt",
-    "_r",
-    "is_from_webapp",
-    "sender_device",
-    "web_id",
-    "xmt",
-];
+/// Query parameters that are tracking on every site. Parameters starting with `utm_` too.
+const JUNK_PARAMS: &[&str] = &["fbclid", "gclid", "igsh", "igshid", "mibextid", "ref_src"];
+
+/// Query parameters that are junk only on some sites. Elsewhere a short name like `t` can
+/// matter: a forum's `?t=123` is a thread.
+fn site_junk(site: Option<&str>, host: &str) -> &'static [&'static str] {
+    match site {
+        Some("x") => &["s", "t"],
+        Some("youtube") => &["si", "feature", "pp", "t"],
+        Some("spotify") => &["si", "context"],
+        Some("reddit") => &["rdt", "share_id", "context", "ref", "ref_source"],
+        Some("threads") => &["xmt"],
+        Some("tiktok") => &["is_from_webapp", "sender_device", "web_id", "_r", "_t"],
+        // X's picture server: ?format=jpg&name=large
+        _ if host == "pbs.twimg.com" => &["format", "name"],
+        _ => &[],
+    }
+}
 
 /// The key a link is stored under, or None when it isn't a web link or should never count
 /// as a snail (see [`IGNORED_SITES`]).
@@ -211,9 +255,14 @@ pub fn link_key(link: &str) -> Option<String> {
         return Some(key);
     }
 
+    let junk = site_junk(site, &host);
     let mut params: Vec<(String, String)> = url
         .query_pairs()
-        .filter(|(k, _)| !JUNK_PARAMS.contains(&k.as_ref()) && !k.starts_with("utm_"))
+        .filter(|(k, _)| {
+            !JUNK_PARAMS.contains(&k.as_ref())
+                && !junk.contains(&k.as_ref())
+                && !k.starts_with("utm_")
+        })
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     params.sort();
@@ -365,6 +414,51 @@ mod tests {
                 "https://example.com/cat.jpeg",
                 "https://example.com/cat.jpeg?utm_source=discord",
             ),
+            (
+                "https://example.com/page?fbclid=abc",
+                "https://example.com/page?gclid=def",
+            ),
+            (
+                "https://www.youtube.com/@channel?si=abc",
+                "https://www.youtube.com/@channel",
+            ),
+            (
+                "https://pbs.twimg.com/media/A.jpg?format=jpg&name=small",
+                "https://pbs.twimg.com/media/A.jpg?name=large",
+            ),
+            ("https://x.com/user?s=20&t=abc", "https://x.com/user"),
+            (
+                "https://d.fxtwitter.com/a/status/1844012345678901234",
+                "https://x.com/a/status/1844012345678901234",
+            ),
+            (
+                "https://c.vxtwitter.com/a/status/1844012345678901234",
+                "https://i.fxtwitter.com/a/status/1844012345678901234",
+            ),
+            (
+                "https://g.fxbsky.app/profile/cherry.bsky.social/post/3l5abcxyz",
+                "https://bsky.app/profile/cherry.bsky.social/post/3l5abcxyz",
+            ),
+            (
+                "https://d.ddinstagram.com/p/C1a2B3c4D5e/",
+                "https://www.instagram.com/p/C1a2B3c4D5e/",
+            ),
+            (
+                "https://clips.twitch.tv/embed?clip=FunnyClipSlug-abc&parent=example.com",
+                "https://clips.twitch.tv/FunnyClipSlug-abc",
+            ),
+            (
+                "https://streamable.com/e/abc123",
+                "https://streamable.com/abc123",
+            ),
+            (
+                "https://open.spotify.com/embed/track/4uLU6hMCjMI75M1A2tKUQC",
+                "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+            ),
+            (
+                "https://open.spotify.com/user/someone/playlist/37i9dQZF1DXcBWIGoYBM5M",
+                "https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M",
+            ),
         ];
         for (a, b) in pairs {
             assert!(
@@ -400,6 +494,58 @@ mod tests {
                 "https://example.com/article?id=6",
             ),
             ("https://example.com/a.png", "https://other.com/a.png"),
+            // Short parameters only count as junk on the sites that use them that way.
+            (
+                "https://forum.example.com/viewtopic.php?t=123",
+                "https://forum.example.com/viewtopic.php?t=456",
+            ),
+            (
+                "https://example.com/search?s=cats",
+                "https://example.com/search?s=dogs",
+            ),
+            (
+                "https://example.com/img?width=100&name=a",
+                "https://example.com/img?width=200&name=b",
+            ),
+            // Pages that aren't one post mustn't share a key.
+            (
+                "https://www.tumblr.com/tagged/cats",
+                "https://www.tumblr.com/tagged/dogs",
+            ),
+            (
+                "https://www.tumblr.com/search/cats",
+                "https://www.tumblr.com/tagged/cats",
+            ),
+            (
+                "https://64.media.tumblr.com/abc/s640x960/one.jpg",
+                "https://64.media.tumblr.com/def/s640x960/two.jpg",
+            ),
+            (
+                "https://clips.twitch.tv/embed?clip=OneClip",
+                "https://clips.twitch.tv/embed?clip=OtherClip",
+            ),
+            ("https://imgur.com/t/cats", "https://imgur.com/t/dogs"),
+            ("https://imgur.com/user/alice", "https://imgur.com/user/bob"),
+            (
+                "https://imgur.com/r/aww/AbCdEf1",
+                "https://imgur.com/r/aww/XyZ9876",
+            ),
+            (
+                "https://streamable.com/e/abc123",
+                "https://streamable.com/e/xyz789",
+            ),
+            (
+                "https://streamable.com/o/abc123",
+                "https://streamable.com/o/xyz789",
+            ),
+            (
+                "https://open.spotify.com/embed/track/4uLU6hMCjMI75M1A2tKUQC",
+                "https://open.spotify.com/embed/track/7ouMYWpwJ422jRcDASZB7P",
+            ),
+            (
+                "https://open.spotify.com/user/alice/playlist/37i9dQZF1DXcBWIGoYBM5M",
+                "https://open.spotify.com/user/alice/playlist/37i9dQZF1DX0XUsuxWHRQd",
+            ),
         ];
         for (a, b) in pairs {
             assert!(!same(a, b), "{a} and {b} should differ");

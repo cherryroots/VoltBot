@@ -62,7 +62,12 @@ pub fn pictures(msg: &Message) -> Vec<Picture> {
             if let (Some(w), Some(h)) = (image.width, image.height) {
                 push(&mut found, small_url(proxy, w, h), &image.url);
             }
-        } else if let Some(thumb) = &embed.thumbnail {
+        } else if let Some(thumb) = &embed.thumbnail
+            && kind == "image"
+        {
+            // Only a direct image link's thumbnail is the picture. On a picture site, a preview
+            // without an image is a text post, and its thumbnail is the author's avatar or the
+            // subreddit's icon.
             let proxy = thumb.proxy_url.as_deref().unwrap_or(&thumb.url);
             if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
                 push(&mut found, small_url(proxy, w, h), &thumb.url);
@@ -186,6 +191,8 @@ mod tests {
                  "thumbnail": {"url": "https://i.ytimg.com/vi/abc/hq.jpg", "proxy_url": "https://media.discordapp.net/external/yt/hq.jpg", "width": 480, "height": 360}},
                 {"type": "gifv", "url": "https://klipy.com/gifs/dance",
                  "thumbnail": {"url": "https://static.klipy.com/a.webp", "width": 200, "height": 200}},
+                {"type": "rich", "url": "https://www.reddit.com/r/a/comments/b/text_post",
+                 "thumbnail": {"url": "https://styles.redditmedia.com/icon.png", "proxy_url": "https://media.discordapp.net/external/i/icon.png", "width": 256, "height": 256}},
                 {"type": "image", "url": "https://example.com/meme.png",
                  "thumbnail": {"url": "https://example.com/meme.png", "proxy_url": "https://media.discordapp.net/external/m/meme.png", "width": 300, "height": 300}}
             ]

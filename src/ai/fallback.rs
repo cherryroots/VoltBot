@@ -60,10 +60,17 @@ impl ApiError {
         // Claude says "Your credit balance is too low"; OpenAI says "You exceeded your
         // current quota, please check your plan and billing details".
         let message = self.message.to_lowercase();
-        if ["credit balance", "billing", "quota"]
-            .iter()
-            .any(|words| message.contains(words))
-        {
+        let out_of_credit = if self.status.as_u16() == 429 {
+            // A 429 is usually a rate limit, whose message can link to the billing page
+            // too, so only the out-of-quota wording counts.
+            message.contains("exceeded your current quota")
+                || message.contains("insufficient_quota")
+        } else {
+            ["credit balance", "billing", "quota"]
+                .iter()
+                .any(|words| message.contains(words))
+        };
+        if out_of_credit {
             return Some(Outage::OutOfCredit);
         }
         match self.status.as_u16() {
@@ -265,6 +272,15 @@ mod tests {
                 .into(),
         };
         assert_eq!(quota.outage(), Some(Outage::OutOfCredit));
+        // An OpenAI rate limit that mentions the billing page isn't out of credit.
+        let rate_limit = ApiError {
+            provider: "openai",
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            message: "Rate limit reached for requests. Visit \
+                      https://platform.openai.com/account/billing to increase it."
+                .into(),
+        };
+        assert_eq!(rate_limit.outage(), None);
     }
 
     #[test]

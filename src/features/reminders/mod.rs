@@ -219,22 +219,20 @@ impl Reminders {
             )));
         }
 
+        // Snoozing moves the delivered reminder (images and all) back into the queue. It only
+        // works once, so a double press or a retry can't make two reminders.
         let until = Utc::now().timestamp() + minutes * 60;
-        let new = NewReminder {
-            user_id: reminder.user_id,
-            channel_id: reminder.channel_id,
-            guild_id: reminder.guild_id,
-            message: reminder.message,
-            fire_at: until,
-            created_at: reminder.created_at,
-            source_message_id: reminder.source_message_id,
-            missing_images: reminder.missing_images,
-            images: reminder.images,
-        };
-        ctx.db.call(move |conn| Ok(store::add(conn, &new)?)).await?;
+        let user = reminder.user_id;
+        let snoozed = ctx
+            .db
+            .call(move |conn| Ok(store::snooze(conn, id, user, until)?))
+            .await?;
+        if !snoozed {
+            return Err(user_error("This reminder is already snoozed."));
+        }
         self.wake.notify_one();
 
-        // Swap the buttons for a "snoozed until" line, so it can't be snoozed twice.
+        // Swap the buttons for a "snoozed until" line.
         let response = CreateInteractionResponseMessage::new()
             .content(ui::snoozed(&i.message.content, until))
             .components(Vec::new());

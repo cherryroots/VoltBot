@@ -59,14 +59,18 @@ pub async fn run(ctx: BotCtx, channel: ChannelId, interval_secs: u64) {
         }
     };
     let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
+    // After a slow update, wait for the next tick instead of catching up with a burst.
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::task::spawn_blocking(svg::load_fonts);
     // The 15-minute slot of the last saved sample.
     let mut sampled = None;
 
     loop {
+        // biased: check shutdown first, so a due tick can't win and skip the OFFLINE picture.
         let stopping = tokio::select! {
-            _ = tick.tick() => false,
+            biased;
             _ = ctx.shutdown.cancelled() => true,
+            _ = tick.tick() => false,
         };
         let status = if stopping {
             offline(&ctx).await
@@ -142,32 +146,31 @@ fn is_unknown_message(err: &serenity::Error) -> bool {
 /// that up on its own, so a crashed bot is obvious even though it can't edit the message.
 async fn online(dashboard: Dashboard) -> Status {
     let content = format!("-# Updated <t:{}:R>", dashboard.now.timestamp());
+    // Built first, so it's there however drawing fails (even a panic).
+    let embed = online_embed(&dashboard);
     // Drawing takes some CPU and can read font files, so it runs on tokio's blocking threads.
-    let drawn = tokio::task::spawn_blocking(move || {
-        let png = svg::to_png(|| render::online_svg(&dashboard));
-        (png, dashboard)
-    })
-    .await;
+    let drawn =
+        tokio::task::spawn_blocking(move || svg::to_png(|| render::online_svg(&dashboard))).await;
     match drawn {
-        Ok((Ok(png), _)) => Status {
+        Ok(Ok(png)) => Status {
             content,
             picture: Some(CreateAttachment::bytes(png, "status.png")),
             embed: None,
         },
-        Ok((Err(err), dashboard)) => {
+        Ok(Err(err)) => {
             warn!("couldn't draw the status picture, showing the embed: {err:#}");
             Status {
                 content,
                 picture: None,
-                embed: Some(online_embed(&dashboard)),
+                embed: Some(embed),
             }
         }
         Err(err) => {
-            warn!("drawing the status picture failed: {err}");
+            warn!("drawing the status picture failed, showing the embed: {err}");
             Status {
                 content,
                 picture: None,
-                embed: None,
+                embed: Some(embed),
             }
         }
     }

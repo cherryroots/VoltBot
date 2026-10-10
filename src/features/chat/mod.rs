@@ -216,6 +216,33 @@ impl Chat {
         question_id: i64,
         reply: LiveReply,
     ) -> Result<()> {
+        // Registered first, before the slow work below, so a ❌ or a second 🔁 in the
+        // meantime sees this answer as running. A 🔁 starts with the old answer's
+        // messages; if another answer is already writing into them, leave it be.
+        let cancel = CancellationToken::new();
+        let message_ids = Arc::new(Mutex::new(reply.message_ids()));
+        {
+            let mut running = self.running.lock().unwrap();
+            let existing = reply.message_ids();
+            let busy = running.iter().any(|r| {
+                let ids = r.message_ids.lock().unwrap();
+                existing.iter().any(|id| ids.contains(id))
+            });
+            if busy {
+                return Ok(());
+            }
+            running.push(Running {
+                requester: asker.user,
+                cancel: cancel.clone(),
+                message_ids: message_ids.clone(),
+            });
+        }
+        // Takes the entry out again when this function ends, even by an error or a panic.
+        let _registered = Registered {
+            running: &self.running,
+            message_ids: message_ids.clone(),
+        };
+
         let chain = ctx
             .db
             .call(move |conn| store::chain(conn, question_id, history::MAX_TURNS))
@@ -244,13 +271,6 @@ impl Chat {
             add_context(&mut input, texts);
         }
 
-        let cancel = CancellationToken::new();
-        let message_ids = Arc::new(Mutex::new(Vec::new()));
-        self.running.lock().unwrap().push(Running {
-            requester: asker.user,
-            cancel: cancel.clone(),
-            message_ids: message_ids.clone(),
-        });
         let job = Job {
             asker: asker.clone(),
             reply,
@@ -259,10 +279,6 @@ impl Chat {
             message_ids: message_ids.clone(),
         };
         let outcome = answer::run(ctx, provider, job).await;
-        self.running
-            .lock()
-            .unwrap()
-            .retain(|r| !Arc::ptr_eq(&r.message_ids, &message_ids));
 
         match &outcome.end {
             End::Finished => info!("answered"),
@@ -349,6 +365,20 @@ impl Chat {
         }
         info!("answer deleted with ❌");
         Ok(())
+    }
+}
+
+/// Removes a running answer from the list when dropped.
+struct Registered<'a> {
+    running: &'a Mutex<Vec<Running>>,
+    message_ids: Arc<Mutex<Vec<MessageId>>>,
+}
+
+impl Drop for Registered<'_> {
+    fn drop(&mut self) {
+        // A poisoned lock only means another task panicked; the list is still usable.
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        running.retain(|r| !Arc::ptr_eq(&r.message_ids, &self.message_ids));
     }
 }
 

@@ -7,6 +7,7 @@
 //! was last posted to any of its targets, so a target added later joins the next one.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
 use chrono::Utc;
 use serde::Deserialize;
@@ -62,10 +63,10 @@ pub async fn post_due(ctx: &BotCtx) -> Result<()> {
         match server_of(ctx, channel).await {
             Ok(guild) => servers.entry(guild).or_default().push(channel),
             Err(err) => {
-                // Warned once a week, not every hour.
-                if due(posted_at(ctx, &[channel]).await?) {
+                // Remembered in memory, not saved as a post: a saved time would also delay
+                // the server's diary once the channel can be found again.
+                if should_warn(&mut WARNED.lock().unwrap(), id, now) {
                     warn!(channel = id, "can't post the diary there: {err:#}");
-                    set_posted(ctx, &[channel], now).await?;
                 }
             }
         }
@@ -82,6 +83,20 @@ pub async fn post_due(ctx: &BotCtx) -> Result<()> {
         set_posted(ctx, &channels, now).await?;
     }
     Ok(())
+}
+
+/// When we last warned about each diary channel we couldn't find.
+static WARNED: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
+
+/// Whether to warn about `channel` now: once a week, not every hour.
+fn should_warn(warned: &mut BTreeMap<u64, i64>, channel: u64, now: i64) -> bool {
+    let due = warned
+        .get(&channel)
+        .is_none_or(|&at| at <= now - EVERY_SECS);
+    if due {
+        warned.insert(channel, now);
+    }
+    due
 }
 
 /// The server a channel or thread is in.
@@ -239,6 +254,15 @@ mod tests {
         let text = render_changes(&many);
         assert!(text.chars().count() < MAX_CHANGES + 100);
         assert!(text.ends_with("view them if you need to]\n"));
+    }
+
+    #[test]
+    fn warns_about_a_missing_channel_once_a_week() {
+        let mut warned = BTreeMap::new();
+        assert!(should_warn(&mut warned, 1, 1000));
+        assert!(!should_warn(&mut warned, 1, 1000 + 3600));
+        assert!(should_warn(&mut warned, 2, 1000 + 3600));
+        assert!(should_warn(&mut warned, 1, 1000 + EVERY_SECS));
     }
 
     #[test]

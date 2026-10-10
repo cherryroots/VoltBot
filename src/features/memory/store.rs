@@ -118,16 +118,22 @@ pub fn files_under(
 }
 
 /// Server folders due for a reflection: changed since the last one, which was at least
-/// `every` seconds ago.
-pub fn due_reflections(conn: &Connection, now: i64, every: i64) -> rusqlite::Result<Vec<String>> {
+/// `every` seconds ago. Changes by `bot` (Vivy herself, like during a reflection) don't
+/// count, or every reflection would make the next one due.
+pub fn due_reflections(
+    conn: &Connection,
+    now: i64,
+    every: i64,
+    bot: u64,
+) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT c.scope FROM memory_changes c
          LEFT JOIN memory_reflections r ON r.scope = c.scope
-         WHERE c.scope LIKE 'server:%' AND (r.at IS NULL OR r.at <= ?1)
+         WHERE c.scope LIKE 'server:%' AND c.user_id != ?2 AND (r.at IS NULL OR r.at <= ?1)
          GROUP BY c.scope
          HAVING max(c.at) > coalesce(max(r.at), 0)",
     )?;
-    let rows = stmt.query_map([now - every], |row| row.get(0))?;
+    let rows = stmt.query_map(params![now - every, bot], |row| row.get(0))?;
     rows.collect()
 }
 
@@ -164,12 +170,18 @@ pub fn set_reflected(conn: &Connection, scope: &str, at: i64) -> rusqlite::Resul
     Ok(())
 }
 
-/// The newest version of `path` in any server's folder: (scope, content).
-pub fn newest_file(conn: &Connection, path: &str) -> rusqlite::Result<Option<(String, String)>> {
+/// The newest version of `path` that `author` wrote, in any server's folder: (scope,
+/// content). Versions someone else wrote (by asking Vivy in chat) are left out.
+pub fn newest_file(
+    conn: &Connection,
+    path: &str,
+    author: u64,
+) -> rusqlite::Result<Option<(String, String)>> {
     conn.query_row(
         "SELECT scope, content FROM memory_files
-         WHERE path = ?1 AND scope LIKE 'server:%' ORDER BY updated_at DESC LIMIT 1",
-        [path],
+         WHERE path = ?1 AND updated_by = ?2 AND scope LIKE 'server:%'
+         ORDER BY updated_at DESC LIMIT 1",
+        params![path, author],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
@@ -282,7 +294,10 @@ mod tests {
         save(&conn, "server:1", &Folder::new(), &one, 7, 100).unwrap();
         save(&conn, "dm:9", &Folder::new(), &one, 9, 100).unwrap();
         // DMs never reflect; the server does, since it changed.
-        assert_eq!(due_reflections(&conn, 200, day).unwrap(), vec!["server:1"]);
+        assert_eq!(
+            due_reflections(&conn, 200, day, 0).unwrap(),
+            vec!["server:1"]
+        );
         assert_eq!(
             changes_since_reflection(&conn, "server:1").unwrap(),
             vec![("/memories/a.md".to_string(), 7, 1)]
@@ -295,14 +310,27 @@ mod tests {
                 .is_empty()
         );
         // No changes since: not due, even a day later.
-        assert!(due_reflections(&conn, 200 + day, day).unwrap().is_empty());
+        assert!(
+            due_reflections(&conn, 200 + day, day, 0)
+                .unwrap()
+                .is_empty()
+        );
+        // Her own changes (bot id 5) don't make it due either.
+        let mut mine = one.clone();
+        mine.insert("/memories/vivy/mood.md".into(), "status: hi".into());
+        save(&conn, "server:1", &one, &mine, 5, 250).unwrap();
+        assert!(
+            due_reflections(&conn, 200 + day, day, 5)
+                .unwrap()
+                .is_empty()
+        );
         // A change, but less than a day after the last reflection: not yet.
-        let mut two = one.clone();
+        let mut two = mine.clone();
         two.insert("/memories/b.md".into(), "y".into());
-        save(&conn, "server:1", &one, &two, 7, 300).unwrap();
-        assert!(due_reflections(&conn, 400, day).unwrap().is_empty());
+        save(&conn, "server:1", &mine, &two, 7, 300).unwrap();
+        assert!(due_reflections(&conn, 400, day, 5).unwrap().is_empty());
         assert_eq!(
-            due_reflections(&conn, 200 + day, day).unwrap(),
+            due_reflections(&conn, 200 + day, day, 5).unwrap(),
             vec!["server:1"]
         );
     }
@@ -334,11 +362,21 @@ mod tests {
         )
         .unwrap();
         save(&conn, "dm:3", &Folder::new(), &mood("status: dm"), 3, 300).unwrap();
+        // Someone (user 4) got the chat to write a newer mood: not hers, so left out.
+        save(
+            &conn,
+            "server:3",
+            &Folder::new(),
+            &mood("status: hacked"),
+            4,
+            400,
+        )
+        .unwrap();
         assert_eq!(
-            newest_file(&conn, "/memories/vivy/mood.md").unwrap(),
+            newest_file(&conn, "/memories/vivy/mood.md", 0).unwrap(),
             Some(("server:2".to_string(), "status: new".to_string()))
         );
-        assert_eq!(newest_file(&conn, "/memories/none").unwrap(), None);
+        assert_eq!(newest_file(&conn, "/memories/none", 0).unwrap(), None);
 
         let mut gone = mood("status: old");
         gone.insert("/memories/a.md".into(), "a".into());

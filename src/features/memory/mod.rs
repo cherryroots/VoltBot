@@ -97,9 +97,10 @@ impl Feature for Memory {
     /// Her mood, what's on her mind and what she wonders about, from the mood file she
     /// rewrote last (the same one her Discord status comes from).
     async fn panels(&self, ctx: &BotCtx) -> Result<Vec<Panel>> {
+        let bot = ctx.bot_id.get();
         let newest = ctx
             .db
-            .call(|conn| Ok(store::newest_file(conn, reflect::MOOD_FILE)?))
+            .call(move |conn| Ok(store::newest_file(conn, reflect::MOOD_FILE, bot)?))
             .await?;
         let Some((_, mood)) = newest else {
             return Ok(Vec::new());

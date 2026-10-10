@@ -7,7 +7,8 @@
 //! - When a round is over, a player who bet less than 10% of their money loses 3% of it per
 //!   missing percentage point (up to 30%).
 //! - A player can bet on at most half of the options left, rounded up.
-//! - Under pool rules a player's bets in one round add up to at most half of their money.
+//! - Under pool rules a player's bets in one round add up to at most half of their money,
+//!   rounded up.
 //! - Payouts depend on the season's [`Rules`]. Classic (voltgpt's): a winning bet pays
 //!   `amount × (options − 1)`, where options are the wheel options left in that round.
 //!   Pool: every bet and tax of the round goes into a pot, which the bets on the winner
@@ -152,7 +153,12 @@ impl RoundLedger {
         }
         match self.rules {
             Rules::Classic => bet.amount * (self.options_left.len() as i64 - 1).max(0),
-            Rules::Pool => self.pot * bet.amount / self.total_on(winner) - bet.amount,
+            // In i128 so a big pot times a big bet can't overflow; the share fits back in
+            // i64 because it is at most the pot.
+            Rules::Pool => {
+                let share = self.pot as i128 * bet.amount as i128 / self.total_on(winner) as i128;
+                share as i64 - bet.amount
+            }
         }
     }
 
@@ -173,14 +179,15 @@ impl RoundLedger {
     }
 
     /// What `user` can still bet this round: the rest of their money under classic rules,
-    /// the rest of [`BET_CAP`]% of it under pool rules.
+    /// the rest of [`BET_CAP`]% of it under pool rules. The cap rounds up like a typed
+    /// percentage does, so "50%" always fits.
     pub fn usable(&self, user: u64) -> i64 {
         let Some(s) = self.standing(user) else {
             return 0;
         };
         let limit = match self.rules {
             Rules::Classic => s.money,
-            Rules::Pool => s.money * BET_CAP / 100,
+            Rules::Pool => (s.money * BET_CAP + 99) / 100,
         };
         (limit - s.bet).max(0)
     }
@@ -561,6 +568,23 @@ mod tests {
         assert!(check_bet(&s, ALICE, BOB, "51").is_err());
         assert_eq!(check_bet(&s, ALICE, CHARLIE, "10%"), Ok(10));
         assert!(check_bet(&s, ALICE, CHARLIE, "21%").is_err());
+    }
+
+    #[test]
+    fn pool_cap_allows_fifty_percent_of_odd_money() {
+        // Alice loses 11 of 100, so she starts round 2 with 89: 50% is 44.5, rounded up.
+        let mut s = season(
+            &[ALICE, BOB, CHARLIE, DANA],
+            vec![
+                round(1, Some(CHARLIE), &[ALICE], vec![bet(ALICE, BOB, 11)]),
+                round(2, None, &[], vec![]),
+            ],
+        );
+        s.rules = Rules::Pool;
+        assert_eq!(ledger(&s)[1].money(ALICE), 89);
+        assert_eq!(ledger(&s)[1].usable(ALICE), 45);
+        assert_eq!(check_bet(&s, ALICE, BOB, "50%"), Ok(45));
+        assert!(check_bet(&s, ALICE, BOB, "46").is_err());
     }
 
     #[test]

@@ -87,7 +87,8 @@ impl Screen {
 fn render(text: &str, status: Option<&str>) -> Vec<String> {
     let mut parts = split_message(text, DISCORD_LIMIT - STATUS_ROOM);
     if let Some(status) = status {
-        let line = format!("-# {status}");
+        // Cut to the room kept for it, so the last message stays under Discord's limit.
+        let line = format!("-# {}", shorten(status, STATUS_ROOM - 5));
         match parts.last_mut() {
             Some(last) => {
                 last.push('\n');

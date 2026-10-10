@@ -73,16 +73,13 @@ fn on_message(bot: &BotCtx, msg: &Message) {
         return;
     }
     let text = strip_mentions(&msg.content, bot.bot_id);
-    let Some((feature, rest)) = route_mention(&bot.features, &text) else {
+    // Only features that are on here can claim a mention, so a turned-off feature's
+    // prefix ("remind me ...") falls through to chat instead of getting no answer.
+    let allowed = enabled_features(bot, msg.guild_id, msg.channel_id);
+    let Some((feature, rest)) = route_mention(&allowed, &text) else {
         debug!("no feature claimed the mention {text:?}");
         return;
     };
-    if !bot
-        .gate(feature.name())
-        .allows(msg.guild_id, msg.channel_id)
-    {
-        return;
-    }
     let (bot2, feature2, msg2, rest) =
         (bot.clone(), feature.clone(), msg.clone(), rest.to_string());
     run(

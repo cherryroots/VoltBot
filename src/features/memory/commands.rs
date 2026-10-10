@@ -35,11 +35,12 @@ async fn show(
 ) -> Result<()> {
     let path = match path {
         Some(path) => folder::clean_path(&path).map_err(user_error)?,
-        None => own_folder(ctx),
+        // Like forget: your folder, or in DMs everything (it's all yours).
+        None => own_area(ctx),
     };
     let folder = load(ctx).await?;
     let text = dump(&folder, &path);
-    let reply = if text.is_empty() && path == own_folder(ctx) {
+    let reply = if text.is_empty() && path == own_area(ctx) {
         CreateReply::default().content("Vivy hasn't saved anything about you here.")
     } else if text.is_empty() {
         CreateReply::default().content(format!("There's nothing at {path}."))

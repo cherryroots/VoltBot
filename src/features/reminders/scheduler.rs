@@ -2,15 +2,16 @@
 //!
 //! It sends whatever is due, then sleeps until the next reminder (at most an hour). Adding or
 //! deleting a reminder wakes it early through `wake`, so it never sleeps past a new one.
-//! A reminder is only marked sent after Discord accepted it. If the send with images fails,
-//! it's sent again without them; if that fails too, it's retried later with a growing delay.
+//! A reminder is only marked sent after Discord accepted it. If Discord says the message with
+//! images is too big, it's sent again without them. Any other failed send is retried later
+//! with a growing delay.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context as _;
 use chrono::Utc;
-use serenity::all::{ChannelId, UserId};
+use serenity::all::{ChannelId, HttpError, UserId};
 use tokio::sync::Notify;
 use tracing::{Instrument as _, error, info, info_span, warn};
 
@@ -78,6 +79,7 @@ async fn deliver(ctx: &BotCtx, reminder: Reminder) -> Result<()> {
     // If the images were the problem (too big for the server now, say), send it without
     // them. The reminder links to the original message, which still has them.
     if let Err(err) = &sent
+        && too_big(err)
         && !reminder.images.is_empty()
     {
         warn!(
@@ -128,6 +130,17 @@ async fn deliver(ctx: &BotCtx, reminder: Reminder) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether Discord refused the message for being too big: HTTP 413, or Discord's error
+/// 40005 ("Request entity too large"). Other errors, like a timeout, aren't the images' fault.
+fn too_big(err: &serenity::Error) -> bool {
+    match err {
+        serenity::Error::Http(HttpError::UnsuccessfulRequest(response)) => {
+            response.status_code.as_u16() == 413 || response.error.code == 40005
+        }
+        _ => false,
+    }
 }
 
 /// How long to sleep when the next reminder is at `next`. At most an hour, so delivered

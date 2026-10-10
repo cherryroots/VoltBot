@@ -332,7 +332,7 @@ pub(super) async fn find_member(ctx: &BotCtx, guild: GuildId, query: &str) -> Re
 }
 
 /// "<@123>", "<@!123>" or "123" → the ID.
-fn parse_user_id(text: &str) -> Option<UserId> {
+pub(super) fn parse_user_id(text: &str) -> Option<UserId> {
     let digits = text
         .trim_start_matches("<@")
         .trim_start_matches('!')
@@ -446,7 +446,10 @@ fn parse_link(link: &str) -> Option<(Option<u64>, u64, u64)> {
     } else {
         Some(guild.parse().ok()?)
     };
-    Some((guild, channel.parse().ok()?, message.parse().ok()?))
+    // Discord IDs are never 0, and serenity panics on an ID of 0.
+    let channel: u64 = channel.parse().ok().filter(|id| *id != 0)?;
+    let message: u64 = message.parse().ok().filter(|id| *id != 0)?;
+    Some((guild, channel, message))
 }
 
 async fn message_from_link(ctx: &BotCtx, asker: &Asker, link: &str) -> Result<String> {
@@ -486,6 +489,11 @@ pub(super) async fn can_read(
     let Some(target) = channel.to_channel(&ctx.http).await?.guild() else {
         return Ok(false);
     };
+    // The link's server part is just text, so check the channel really is in the
+    // asker's server. Otherwise a link could reach into another server.
+    if target.guild_id != guild_id {
+        return Ok(false);
+    }
     // Threads use their parent channel's permissions. Private threads also need
     // membership, which isn't checked here, so they're refused.
     let target = match target.kind {
@@ -644,6 +652,7 @@ Category Voice:
         );
         assert_eq!(parse_link("https://example.com/channels/1/2/3"), None);
         assert_eq!(parse_link("https://discord.com/channels/1/2"), None);
+        assert_eq!(parse_link("https://discord.com/channels/1/0/0"), None);
     }
 
     #[test]

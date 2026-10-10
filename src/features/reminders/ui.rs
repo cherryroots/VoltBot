@@ -137,7 +137,10 @@ pub fn fired_message(reminder: &Reminder, now: i64, with_images: bool) -> Create
 
 /// The delivered reminder's text after a snooze button was pressed.
 pub fn snoozed(original: &str, until: i64) -> String {
-    format!("{original}\n-# 😴 Snoozed until <t:{until}:f>")
+    let line = format!("\n-# 😴 Snoozed until <t:{until}:f>");
+    // Discord allows 2000 characters, so cut the original to leave room for the line.
+    let room = 2000 - line.chars().count();
+    format!("{}{line}", shorten(original, room))
 }
 
 /// The `/reminders` list, with a menu to delete one. Discord menus hold at most 25 options.
@@ -241,6 +244,15 @@ mod tests {
         r.missing_images = 2;
         assert!(content(&fired_message(&r, 1000, true)).ends_with(" · [2 images missing]"));
         assert!(content(&fired_message(&r, 1000, false)).ends_with(" · [3 images missing]"));
+    }
+
+    #[test]
+    fn snoozed_fits_in_a_message() {
+        assert_eq!(snoozed("hi", 5), "hi\n-# 😴 Snoozed until <t:5:f>");
+        let long = "a".repeat(2000);
+        let text = snoozed(&long, 1_800_000_000);
+        assert_eq!(text.chars().count(), 2000);
+        assert!(text.ends_with("<t:1800000000:f>"));
     }
 
     #[test]

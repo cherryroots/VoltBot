@@ -120,6 +120,7 @@ pub async fn insert_bet(
     #[description = "Who the bet is on"] on: User,
     #[description = "How much was bet; 0 removes the bet"]
     #[min = 0]
+    #[max = 1_000_000_000]
     amount: i64,
     #[description = "Which round"]
     #[min = 1]
@@ -127,8 +128,9 @@ pub async fn insert_bet(
 ) -> Result<()> {
     require_admin(ctx)?;
     let guild = guild(ctx)?;
-    if amount < 0 {
-        return Err(user_error("The amount can't be negative."));
+    // Discord enforces the range too; this guards the ledger's math either way.
+    if !(0..=1_000_000_000).contains(&amount) {
+        return Err(user_error("The amount must be from 0 to 1,000,000,000."));
     }
     let bet = Bet {
         by: by.id.get(),

@@ -353,7 +353,13 @@ async fn shrink_image(data: Vec<u8>) -> Option<ModelImage> {
         if fits && data.len() <= MAX_IMAGE_BYTES {
             return None;
         }
-        let smaller = image.resize(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE, FilterType::Lanczos3);
+        // `resize` fills the bounds, so a picture that's only too many bytes would grow;
+        // that one is just saved again as JPEG, which is smaller.
+        let smaller = if fits {
+            image
+        } else {
+            image.resize(MAX_IMAGE_SIDE, MAX_IMAGE_SIDE, FilterType::Lanczos3)
+        };
         let mut out = std::io::Cursor::new(Vec::new());
         smaller
             .to_rgb8()
@@ -510,48 +516,26 @@ async fn read_answer(
     let mut collector = Collector::default();
     let mut pauses = 0;
     loop {
-        let mut parser = SseParser::default();
-        let mut stopped = false;
-        while !stopped {
-            let Some(chunk) = response.chunk().await? else {
-                bail!("Claude's stream ended before the answer did");
-            };
-            for event in parser.push(&chunk) {
-                let data: Value =
-                    serde_json::from_str(&event.data).context("Claude sent invalid JSON")?;
-                for chat_event in collector.push(&data)? {
-                    if events.send(Ok(chat_event)).await.is_err() {
-                        return Ok(None);
-                    }
-                }
-                stopped |= data["type"] == "message_stop";
-            }
-        }
-        let usage = collector.usage;
-        debug!(
-            "Claude used {} input tokens ({} read from cache, {} written to it) and wrote {}",
-            usage.input, usage.cache_read, usage.cache_write, usage.output
-        );
-        if let Some((spend, job)) = spend {
-            let model = collector.model.as_deref();
-            let model = model.or(body["model"].as_str()).unwrap_or_default();
-            let used = Used {
-                usd: price::cost(&usage, model),
-                input: usage.input,
-                cache_read: usage.cache_read,
-                cache_write: usage.cache_write,
-            };
-            spend.add("claude", job, used).await;
+        let read = read_response(&mut collector, &mut response, events).await;
+        // What the response used so far costs even when it was stopped or failed partway.
+        add_spend(spend, &collector, &body).await;
+        if !read? {
+            return Ok(None);
         }
 
         match collector.stop_reason.as_deref() {
             // A long run of built-in tools paused; send everything back to continue.
             Some("pause_turn") if pauses < MAX_PAUSES => {
-                pauses += 1;
-                body["messages"]
+                let messages = body["messages"]
                     .as_array_mut()
-                    .context("the request has no messages")?
-                    .push(json!({"role": "assistant", "content": collector.content}));
+                    .context("the request has no messages")?;
+                // The collector holds every block of the answer so far, so later pauses
+                // replace the assistant message the first one added instead of repeating it.
+                if pauses > 0 {
+                    messages.pop();
+                }
+                messages.push(json!({"role": "assistant", "content": collector.content}));
+                pauses += 1;
                 if let Some(id) = &collector.container {
                     set_container(&mut body, Some(id));
                 }
@@ -596,6 +580,57 @@ async fn read_answer(
         native: Value::Array(finished.content),
     };
     Ok(Some((done, container)))
+}
+
+/// Reads one streamed response into `collector`, passing its events on. Returns `false`
+/// when nobody is listening anymore (the answer was stopped).
+async fn read_response(
+    collector: &mut Collector,
+    response: &mut reqwest::Response,
+    events: &mpsc::Sender<anyhow::Result<ChatEvent>>,
+) -> anyhow::Result<bool> {
+    let mut parser = SseParser::default();
+    loop {
+        let Some(chunk) = response.chunk().await? else {
+            bail!("Claude's stream ended before the answer did");
+        };
+        for event in parser.push(&chunk) {
+            let data: Value =
+                serde_json::from_str(&event.data).context("Claude sent invalid JSON")?;
+            for chat_event in collector.push(&data)? {
+                if events.send(Ok(chat_event)).await.is_err() {
+                    return Ok(false);
+                }
+            }
+            if data["type"] == "message_stop" {
+                return Ok(true);
+            }
+        }
+    }
+}
+
+/// Logs what one response used and adds what it cost to [`Spend`].
+async fn add_spend(spend: Option<&(Spend, &'static str)>, collector: &Collector, body: &Value) {
+    let usage = collector.usage;
+    // Nothing arrived (it failed before it started), so there's nothing to add.
+    if usage == collect::Usage::default() {
+        return;
+    }
+    debug!(
+        "Claude used {} input tokens ({} read from cache, {} written to it) and wrote {}",
+        usage.input, usage.cache_read, usage.cache_write, usage.output
+    );
+    if let Some((spend, job)) = spend {
+        let model = collector.model.as_deref();
+        let model = model.or(body["model"].as_str()).unwrap_or_default();
+        let used = Used {
+            usd: price::cost(&usage, model),
+            input: usage.input,
+            cache_read: usage.cache_read,
+            cache_write: usage.cache_write,
+        };
+        spend.add("claude", job, used).await;
+    }
 }
 
 #[cfg(test)]
@@ -700,6 +735,25 @@ mod tests {
         let read = image::load_from_memory(&smaller.data).unwrap();
         assert_eq!((read.width(), read.height()), (2000, 500));
         assert_eq!(shrink_image(b"not a picture".to_vec()).await, None);
+
+        // Too many bytes but small enough sides: saved as JPEG at the same size. Random
+        // pixels keep the PNG big.
+        let mut seed = 1u32;
+        let noise = image::RgbImage::from_fn(1800, 1200, |_, _| {
+            // xorshift, a simple random number generator.
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let [r, g, b, _] = seed.to_le_bytes();
+            image::Rgb([r, g, b])
+        });
+        let mut png = std::io::Cursor::new(Vec::new());
+        noise.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = png.into_inner();
+        assert!(png.len() > MAX_IMAGE_BYTES);
+        let smaller = shrink_image(png).await.unwrap();
+        let read = image::load_from_memory(&smaller.data).unwrap();
+        assert_eq!((read.width(), read.height()), (1800, 1200));
     }
 
     #[test]

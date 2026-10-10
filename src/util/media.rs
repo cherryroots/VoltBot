@@ -21,6 +21,9 @@ use super::frames;
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 /// GIFs and videos bigger than this aren't downloaded. Discord's own upload limit is 100 MB.
 const MAX_VIDEO_BYTES: usize = 100 * 1024 * 1024;
+/// How long one download may take in all. The shared client only limits connecting, so
+/// without this a server that trickles bytes could hold up a reply forever.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MediaKind {
@@ -182,7 +185,10 @@ pub fn links(text: &str) -> Vec<&str> {
             let start = word.find("https://").or_else(|| word.find("http://"))?;
             let link = &word[start..];
             let link = link.split('>').next().unwrap_or(link);
-            Some(link.trim_end_matches([')', ']', '.', ',', '!', '?', '"', '\'']))
+            // Also markdown around the link: ||spoiler||, **bold**, `code`...
+            Some(link.trim_end_matches([
+                ')', ']', '.', ',', '!', '?', '"', '\'', '|', '*', '_', '~', '`',
+            ]))
         })
         .collect()
 }
@@ -210,7 +216,12 @@ pub async fn download(
     url: &str,
     max_bytes: usize,
 ) -> anyhow::Result<Vec<u8>> {
-    let mut response = client.get(url).send().await?.error_for_status()?;
+    let mut response = client
+        .get(url)
+        .timeout(DOWNLOAD_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?;
     if let Some(length) = response.content_length()
         && length > max_bytes as u64
     {
@@ -330,6 +341,14 @@ mod tests {
             ]
         );
         assert!(links("no links here").is_empty());
+        assert_eq!(
+            links("||https://x.com/a/status/123|| **https://b.com/c** `https://d.com/e`"),
+            [
+                "https://x.com/a/status/123",
+                "https://b.com/c",
+                "https://d.com/e"
+            ]
+        );
     }
 
     #[test]

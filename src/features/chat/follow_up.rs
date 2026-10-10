@@ -64,11 +64,9 @@ pub async fn schedule(ctx: &BotCtx, asker: &Asker, args: &Value, wake: &Notify) 
         return Err(user_error("`note` is empty."));
     }
     let user = match args["user"].as_str().map(str::trim) {
-        Some(id) if !id.is_empty() => id
-            .trim_start_matches("<@")
-            .trim_end_matches('>')
-            .parse::<u64>()
-            .map_err(|_| user_error("`user` must be a user ID."))?,
+        Some(id) if !id.is_empty() => super::tools::parse_user_id(id)
+            .ok_or_else(|| user_error("`user` must be a user ID."))?
+            .get(),
         _ => asker.user.get(),
     };
     let now = Utc::now().timestamp();

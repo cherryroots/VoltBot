@@ -43,7 +43,7 @@ pub fn spawn(ctx: &BotCtx) {
 }
 
 async fn run(ctx: BotCtx) {
-    restore_status(&ctx).await;
+    update_status(&ctx).await;
     loop {
         if let Err(err) = reflect_due(&ctx).await {
             error!("reflecting on memory: {err:#}");
@@ -62,10 +62,10 @@ async fn reflect_due(ctx: &BotCtx) -> Result<()> {
     if ctx.ai.chat().is_none() {
         return Ok(());
     }
-    let now = Utc::now().timestamp();
+    let (now, bot) = (Utc::now().timestamp(), ctx.bot_id.get());
     let due = ctx
         .db
-        .call(move |conn| Ok(store::due_reflections(conn, now, EVERY_SECS)?))
+        .call(move |conn| Ok(store::due_reflections(conn, now, EVERY_SECS, bot)?))
         .await?;
     for scope in due {
         let allowed = scope
@@ -75,12 +75,15 @@ async fn reflect_due(ctx: &BotCtx) -> Result<()> {
         if !allowed {
             continue;
         }
+        // The start time, not the end: edits people make while she reflects (which can
+        // take minutes) are then still new for the next reflection.
+        let started = Utc::now().timestamp();
         match reflect(ctx, &scope).await {
-            Ok(()) => update_status(ctx, &scope).await,
+            Ok(()) => update_status(ctx).await,
             Err(err) => warn!(scope, "reflection failed: {err:#}"),
         }
         // Done or failed, the next try is tomorrow.
-        let (at, done) = (Utc::now().timestamp(), scope.clone());
+        let (at, done) = (started, scope.clone());
         ctx.db
             .call(move |conn| Ok(store::set_reflected(conn, &done, at)?))
             .await?;
@@ -153,38 +156,23 @@ async fn reflect(ctx: &BotCtx, scope: &str) -> Result<()> {
     Ok(())
 }
 
-/// Sets her Discord status from her newest mood, at start. Presence is the same in every
-/// server, so the server that reflected last decides it.
-async fn restore_status(ctx: &BotCtx) {
+/// Sets her Discord status from the newest mood she wrote herself, at start and after each
+/// reflection. Presence is the same in every server, so the server that reflected last
+/// decides it. Only her own versions count: anyone can ask her in chat to write the file.
+async fn update_status(ctx: &BotCtx) {
+    let bot = ctx.bot_id.get();
     let newest = ctx
         .db
-        .call(|conn| Ok(store::newest_file(conn, MOOD_FILE)?))
+        .call(move |conn| Ok(store::newest_file(conn, MOOD_FILE, bot)?))
         .await;
     match newest {
         Ok(Some((_, mood))) => {
             if let Some(status) = parse_status(&mood) {
-                ctx.set_status(&status).await;
-            }
-        }
-        Ok(None) => {}
-        Err(err) => warn!("reading her mood: {err:#}"),
-    }
-}
-
-/// Sets her Discord status from the mood she just wrote in `scope`.
-async fn update_status(ctx: &BotCtx, scope: &str) {
-    let scope = scope.to_string();
-    let folder = ctx
-        .db
-        .call(move |conn| Ok(store::load(conn, &scope)?))
-        .await;
-    match folder {
-        Ok(folder) => {
-            if let Some(status) = folder.get(MOOD_FILE).and_then(|m| parse_status(m)) {
                 info!("status: {status}");
                 ctx.set_status(&status).await;
             }
         }
+        Ok(None) => {}
         Err(err) => warn!("reading her mood: {err:#}"),
     }
 }

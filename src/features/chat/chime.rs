@@ -197,7 +197,9 @@ pub async fn speak(
     let question = NewTurn {
         parent_id: None,
         role: Role::User,
-        author_id: asker.user.get(),
+        // Saved as the bot's own, because nobody asked: nobody can 🔁 or ❌ her line as
+        // if it were their answer (🔁 would run it as a normal answer and post "PASS").
+        author_id: ctx.bot_id.get(),
         channel_id: asker.channel.get(),
         parts: stored,
         written: None,

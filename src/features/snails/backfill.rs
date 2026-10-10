@@ -295,9 +295,10 @@ async fn read_page(
     let messages = match channel.messages(&ctx.http, request).await {
         Ok(messages) => messages,
         Err(err) => {
-            return Err(match http_status(&err) {
-                Some(403 | 404) => PageError::NoAccess(err.to_string()),
-                _ => PageError::Retry(err.into()),
+            return Err(if is_no_access(&err) {
+                PageError::NoAccess(err.to_string())
+            } else {
+                PageError::Retry(err.into())
             });
         }
     };
@@ -340,6 +341,12 @@ pub fn http_status(err: &serenity::Error) -> Option<u16> {
         serenity::Error::Http(HttpError::UnsuccessfulRequest(r)) => Some(r.status_code.as_u16()),
         _ => None,
     }
+}
+
+/// Whether Discord refused the request for good: any 4xx except 429 (slow down). Trying
+/// again won't help, unlike a network error or a 5xx.
+pub fn is_no_access(err: &serenity::Error) -> bool {
+    http_status(err).is_some_and(|s| (400..500).contains(&s) && s != 429)
 }
 
 #[cfg(test)]

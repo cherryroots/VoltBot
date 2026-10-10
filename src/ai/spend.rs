@@ -150,7 +150,8 @@ impl Spend {
                     failing = false;
                     self.set_admin_key(AdminKey::Working);
                     *self.last_read.lock().unwrap() = Some(LastRead { at: now, usd });
-                    let (month, budget) = (this_month(), self.budget);
+                    // The month the bill was read for, which may have ended during the read.
+                    let (month, budget) = (month_of(now), self.budget);
                     let result = self
                         .db
                         .call(move |conn| {
@@ -198,7 +199,12 @@ impl Spend {
 
 /// "2026-10".
 fn this_month() -> String {
-    Utc::now().format("%Y-%m").to_string()
+    month_of(Utc::now())
+}
+
+/// The month of `time`, like "2026-10".
+fn month_of(time: DateTime<Utc>) -> String {
+    time.format("%Y-%m").to_string()
 }
 
 /// Changes the month's total. Returns the new total, and the budget share to warn about
@@ -326,6 +332,13 @@ mod tests {
             save(&conn, "2026-11", "openai", Change::Add(500.0), 0.0).unwrap(),
             (500.0, None)
         );
+    }
+
+    #[test]
+    fn names_the_month() {
+        use chrono::TimeZone;
+        let last_second = Utc.with_ymd_and_hms(2026, 9, 30, 23, 59, 59).unwrap();
+        assert_eq!(month_of(last_second), "2026-09");
     }
 
     #[test]

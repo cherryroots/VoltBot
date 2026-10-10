@@ -201,7 +201,8 @@ async fn close_pictures(
     Ok(unique)
 }
 
-/// Reads a stored message again. None (and forgotten) if it was deleted.
+/// Reads a stored message again. None (and forgotten) if it was deleted; None (but kept) if
+/// the bot can't read it right now, like a channel it lost access to.
 async fn still_there(ctx: &BotCtx, posted: &Posted) -> Result<Option<Message>> {
     let channel = ChannelId::new(posted.channel);
     match channel
@@ -214,6 +215,13 @@ async fn still_there(ctx: &BotCtx, posted: &Posted) -> Result<Option<Message>> {
             ctx.db
                 .call(move |conn| Ok(store::forget(conn, id)?))
                 .await?;
+            Ok(None)
+        }
+        Err(err) if backfill::is_no_access(&err) => {
+            debug!(
+                message = posted.message,
+                "can't read an earlier message: {err}"
+            );
             Ok(None)
         }
         Err(err) => Err(err).context("reading an earlier message"),
