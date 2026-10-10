@@ -16,6 +16,7 @@
 //! - `face.rs`: her face, a picture per mood that becomes her avatar in each server
 //! - `banner.rs`: her banner, a picture per time of day
 //! - `diary.rs`: the weekly diary she posts in `diary_channels`
+//! - `retry.rs`: waiting a few hours before a failed reflection or diary tries again
 
 mod banner;
 mod commands;
@@ -24,6 +25,7 @@ mod face;
 mod folder;
 mod mood;
 mod reflect;
+mod retry;
 mod set_mood;
 mod store;
 mod tool;
@@ -116,7 +118,7 @@ impl Feature for Memory {
     async fn panels(&self, ctx: &BotCtx) -> Result<Vec<Panel>> {
         let newest = ctx
             .db
-            .call(|conn| Ok(store::newest_file(conn, reflect::MOOD_FILE)?))
+            .call(move |conn| Ok(store::newest_file(conn, reflect::MOOD_FILE)?))
             .await?;
         let Some((_, mood)) = newest else {
             return Ok(Vec::new());

@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serenity::all::{
-    ChannelId, ComponentInteraction, GuildId, Message, MessageId, ModalInteraction, Reaction,
-    UserId,
+    ChannelId, ComponentInteraction, GuildId, Message, MessageId, MessageUpdateEvent,
+    ModalInteraction, Reaction, UserId,
 };
 
 use super::config::Config;
@@ -101,9 +101,10 @@ pub trait Feature: Send + Sync + 'static {
     // ---- Events ----
 
     /// A message that mentions the bot and starts with one of [`Feature::mention_prefixes`].
-    /// `rest` is the text after the mention and the prefix.
-    async fn on_mention(&self, _ctx: &BotCtx, _msg: &Message, _rest: &str) -> Result<()> {
-        Ok(())
+    /// `rest` is the text after the mention and the prefix. Returning [`Mention::PassOn`]
+    /// hands the whole message to chat (the feature with the empty prefix) instead.
+    async fn on_mention(&self, _ctx: &BotCtx, _msg: &Message, _rest: &str) -> Result<Mention> {
+        Ok(Mention::PassOn)
     }
 
     /// Every message from a human, mention or not.
@@ -112,6 +113,22 @@ pub trait Feature: Send + Sync + 'static {
     }
 
     async fn on_reaction_add(&self, _ctx: &BotCtx, _reaction: &Reaction) -> Result<()> {
+        Ok(())
+    }
+
+    /// A message was edited, or Discord added a link preview to it later. The event only
+    /// holds the fields that changed; fetch the message for the rest.
+    async fn on_message_edit(&self, _ctx: &BotCtx, _event: &MessageUpdateEvent) -> Result<()> {
+        Ok(())
+    }
+
+    /// Messages were deleted (one, or several at once by a moderator).
+    async fn on_messages_deleted(
+        &self,
+        _ctx: &BotCtx,
+        _channel: ChannelId,
+        _messages: &[MessageId],
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -140,6 +157,16 @@ pub trait Feature: Send + Sync + 'static {
     async fn on_bot_event(&self, _ctx: &BotCtx, _event: &BotEvent) -> Result<()> {
         Ok(())
     }
+}
+
+/// What [`Feature::on_mention`] did with a mention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mention {
+    /// Answered it.
+    Handled,
+    /// Couldn't make sense of it, like "remind me what the movie was called": the dispatcher
+    /// gives the whole message to chat, which can answer or ask what was meant.
+    PassOn,
 }
 
 /// The person a chat tool runs for, and where they asked. Tools act as this person: they only

@@ -14,10 +14,21 @@ use super::media::MediaKind;
 
 /// Frames per second to take from short clips. Long ones get fewer, spread over the clip.
 const FPS: f64 = 3.0;
-/// How long ffmpeg may take for one file.
+/// How long ffmpeg (or ffprobe) may take for one file.
 const TIMEOUT: Duration = Duration::from_secs(60);
 /// Used when ffprobe can't tell how long the file is.
 const UNKNOWN_DURATION_SECS: f64 = 10.0;
+
+/// The files are from strangers, and ffmpeg guesses their format from the contents. Some
+/// formats it knows (playlists like HLS, `concat` lists) can tell it to open other files or
+/// URLs, so only the formats the bot needs are allowed (MP4/MOV, WebM/MKV, GIF), and only
+/// local files may be opened.
+const SAFE_INPUT: [&str; 4] = [
+    "-format_whitelist",
+    "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,gif",
+    "-protocol_whitelist",
+    "file",
+];
 
 /// How the frames of one file are laid out.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,7 +100,9 @@ pub async fn frame_grids(data: &[u8], layout: Layout) -> anyhow::Result<Vec<Vec<
     let output = dir.path().join("grid_%03d.png");
     let mut command = Command::new("ffmpeg");
     command
-        .args(["-hide_banner", "-loglevel", "error", "-i"])
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(SAFE_INPUT)
+        .arg("-i")
         .arg(&input)
         .args(["-vf", &filter, "-frames:v", &layout.max_grids.to_string()])
         .arg(&output)
@@ -122,13 +135,17 @@ pub async fn frame_grids(data: &[u8], layout: Layout) -> anyhow::Result<Vec<Vec<
 
 /// The length of a GIF or video in seconds, from ffprobe.
 async fn probe_duration(path: &std::path::Path) -> anyhow::Result<f64> {
-    let output = Command::new("ffprobe")
-        .args(["-v", "error", "-show_entries", "format=duration"])
+    let mut command = Command::new("ffprobe");
+    command
+        .args(["-v", "error"])
+        .args(SAFE_INPUT)
+        .args(["-show_entries", "format=duration"])
         .args(["-of", "default=noprint_wrappers=1:nokey=1"])
         .arg(path)
-        .kill_on_drop(true)
-        .output()
-        .await?;
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(TIMEOUT, command.output())
+        .await
+        .context("ffprobe took too long")??;
     let text = String::from_utf8_lossy(&output.stdout);
     text.trim()
         .parse()
@@ -209,5 +226,20 @@ mod tests {
     #[tokio::test]
     async fn garbage_is_an_error() {
         assert!(frame_grids(b"not a video", VIDEO).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn webm_and_mov_are_allowed() {
+        for extension in ["webm", "mov"] {
+            let clip = test_clip(1, extension).await;
+            assert!(frame_grids(&clip, VIDEO).await.is_ok(), "{extension}");
+        }
+    }
+
+    #[tokio::test]
+    async fn playlists_are_refused() {
+        // An HLS playlist would make ffmpeg fetch the file it names.
+        let playlist = b"#EXTM3U\n#EXTINF:1,\nhttp://127.0.0.1:1/x.ts\n#EXT-X-ENDLIST\n";
+        assert!(frame_grids(playlist, VIDEO).await.is_err());
     }
 }

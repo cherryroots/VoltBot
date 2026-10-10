@@ -2,7 +2,8 @@
 //!
 //! - A message that mentions the bot goes to the feature with the longest matching mention
 //!   prefix ("remind me" beats "remind"). An empty prefix matches everything, so a feature
-//!   that declares `""` (chat, later) gets every mention nobody else claimed.
+//!   that declares `""` (chat) gets every mention nobody else claimed, and every mention a
+//!   feature passed on ([`Mention::PassOn`]).
 //! - Every message also goes to every feature's `on_message`, and every reaction to
 //!   `on_reaction_add`.
 //! - Buttons, select menus and modals have IDs like `reminders:snooze:12:10`. The part before
@@ -21,18 +22,35 @@ use poise::{BoxFuture, CreateReply, FrameworkError};
 use serenity::all::{
     ChannelId, ComponentInteraction, CreateAllowedMentions, CreateInteractionResponse,
     CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage, FullEvent,
-    GuildId, Interaction, Message, MessageId, ModalInteraction, Reaction, UserId,
+    GuildId, Interaction, Message, MessageId, MessageUpdateEvent, ModalInteraction, Reaction,
+    UserId,
 };
 use tracing::{Instrument as _, Span, debug, error, info, info_span, warn};
 
-use super::errors::{is_user_error, user_message};
-use super::{BotCtx, Context, Error, Feature, Result};
+use super::errors::{is_user_error, user_error, user_message};
+use super::{BotCtx, Context, Error, Feature, Mention, Result};
 
 /// Called by poise for every gateway event.
 pub async fn handle_event(event: &FullEvent, bot: &BotCtx) -> Result<()> {
     match event {
         FullEvent::Message { new_message } => on_message(bot, new_message),
         FullEvent::ReactionAdd { add_reaction } => on_reaction_add(bot, add_reaction),
+        FullEvent::MessageUpdate { event, .. } => on_message_edit(bot, event),
+        FullEvent::MessageDelete {
+            channel_id,
+            deleted_message_id,
+            guild_id,
+        } => on_messages_deleted(bot, *guild_id, *channel_id, vec![*deleted_message_id]),
+        FullEvent::MessageDeleteBulk {
+            channel_id,
+            multiple_deleted_messages_ids,
+            guild_id,
+        } => on_messages_deleted(
+            bot,
+            *guild_id,
+            *channel_id,
+            multiple_deleted_messages_ids.clone(),
+        ),
         FullEvent::InteractionCreate { interaction } => match interaction {
             Interaction::Component(i) => on_component(bot, i).await,
             Interaction::Modal(i) => on_modal(bot, i).await,
@@ -44,6 +62,12 @@ pub async fn handle_event(event: &FullEvent, bot: &BotCtx) -> Result<()> {
             static SEEN: AtomicBool = AtomicBool::new(false);
             if SEEN.swap(true, Ordering::Relaxed) {
                 info!(target: "lifecycle", "🔌 Reconnected to Discord with a new session");
+            } else {
+                // The config is read before logging starts, so its warnings wait until now.
+                let names: Vec<&str> = bot.features.iter().map(|f| f.name()).collect();
+                for warning in bot.config.startup_warnings(&names) {
+                    warn!("{warning}");
+                }
             }
         }
         FullEvent::Resume { .. } => info!(target: "lifecycle", "🔌 Reconnected to Discord"),
@@ -73,16 +97,18 @@ fn on_message(bot: &BotCtx, msg: &Message) {
         return;
     }
     let text = strip_mentions(&msg.content, bot.bot_id);
-    let Some((feature, rest)) = route_mention(&bot.features, &text) else {
+    // Only features that are on here can claim a mention, so a turned-off feature's
+    // prefix ("remind me ...") falls through to chat instead of getting no answer.
+    let allowed = enabled_features(bot, msg.guild_id, msg.channel_id);
+    let Some((feature, rest)) = route_mention(&allowed, &text) else {
         debug!("no feature claimed the mention {text:?}");
         return;
     };
-    if !bot
-        .gate(feature.name())
-        .allows(msg.guild_id, msg.channel_id)
-    {
-        return;
-    }
+    // Chat, which gets the mentions a feature passes on.
+    let fallback = allowed
+        .iter()
+        .find(|f| f.mention_prefixes().contains(&"") && f.name() != feature.name())
+        .cloned();
     let (bot2, feature2, msg2, rest) =
         (bot.clone(), feature.clone(), msg.clone(), rest.to_string());
     run(
@@ -90,7 +116,26 @@ fn on_message(bot: &BotCtx, msg: &Message) {
         feature.name(),
         message_span(feature.name(), &msg),
         ReplyTo::Message(msg.channel_id, msg.id),
-        async move { feature2.on_mention(&bot2, &msg2, &rest).await },
+        async move {
+            if feature2.on_mention(&bot2, &msg2, &rest).await? == Mention::Handled {
+                return Ok(());
+            }
+            let Some(fallback) = fallback else {
+                // Chat is off here, so nobody else can answer it.
+                return Err(user_error("Sorry, I couldn't make sense of that."));
+            };
+            info!(
+                "{} passed the mention on to {}",
+                feature2.name(),
+                fallback.name()
+            );
+            // The whole text, prefix included: "remind me what the movie was called".
+            fallback
+                .on_mention(&bot2, &msg2, &text)
+                .instrument(message_span(fallback.name(), &msg2))
+                .await?;
+            Ok(())
+        },
     );
 }
 
@@ -115,6 +160,51 @@ fn on_reaction_add(bot: &BotCtx, reaction: &Reaction) {
     }
 }
 
+fn on_message_edit(bot: &BotCtx, event: &MessageUpdateEvent) {
+    // The bot's own edits (streaming answers) come here too; nobody needs those.
+    if event.author.as_ref().is_some_and(|a| a.bot) {
+        return;
+    }
+    let event = Arc::new(event.clone());
+    for feature in enabled_features(bot, event.guild_id, event.channel_id) {
+        let span = info_span!(
+            "message_edit",
+            feature = feature.name(),
+            guild = event.guild_id.map(|g| g.get()),
+            channel = event.channel_id.get(),
+            message_id = event.id.get(),
+        );
+        let (bot2, event2) = (bot.clone(), event.clone());
+        run(bot, feature.name(), span, ReplyTo::Nobody, async move {
+            feature.on_message_edit(&bot2, &event2).await
+        });
+    }
+}
+
+fn on_messages_deleted(
+    bot: &BotCtx,
+    guild: Option<GuildId>,
+    channel: ChannelId,
+    messages: Vec<MessageId>,
+) {
+    let messages = Arc::new(messages);
+    for feature in enabled_features(bot, guild, channel) {
+        let span = info_span!(
+            "messages_deleted",
+            feature = feature.name(),
+            guild = guild.map(|g| g.get()),
+            channel = channel.get(),
+            count = messages.len(),
+        );
+        let (bot2, messages2) = (bot.clone(), messages.clone());
+        run(bot, feature.name(), span, ReplyTo::Nobody, async move {
+            feature
+                .on_messages_deleted(&bot2, channel, &messages2)
+                .await
+        });
+    }
+}
+
 async fn on_component(bot: &BotCtx, i: &ComponentInteraction) {
     let Some((feature, action)) = route_custom_id(bot, &i.data.custom_id) else {
         // Most likely a button on a message from voltgpt.
@@ -122,7 +212,7 @@ async fn on_component(bot: &BotCtx, i: &ComponentInteraction) {
         return;
     };
     let reply = ReplyTo::Component(Box::new(i.clone()));
-    if !bot.gate(feature.name()).allows(i.guild_id, i.channel_id) {
+    if !bot.allows(feature.name(), i.guild_id, i.channel_id) {
         tell_user(bot, &reply, TURNED_OFF).await;
         return;
     }
@@ -147,7 +237,7 @@ async fn on_modal(bot: &BotCtx, i: &ModalInteraction) {
         tell_user(bot, &reply, STALE).await;
         return;
     };
-    if !bot.gate(feature.name()).allows(i.guild_id, i.channel_id) {
+    if !bot.allows(feature.name(), i.guild_id, i.channel_id) {
         tell_user(bot, &reply, TURNED_OFF).await;
         return;
     }
@@ -304,7 +394,7 @@ fn enabled_features(
 ) -> Vec<Arc<dyn Feature>> {
     bot.features
         .iter()
-        .filter(|f| bot.gate(f.name()).allows(guild, channel))
+        .filter(|f| bot.allows(f.name(), guild, channel))
         .cloned()
         .collect()
 }
@@ -370,10 +460,7 @@ pub fn command_check(ctx: Context<'_>) -> BoxFuture<'_, Result<bool>> {
         let Some(feature) = ctx.command().category.as_deref() else {
             return Ok(true);
         };
-        Ok(ctx
-            .data()
-            .gate(feature)
-            .allows(ctx.guild_id(), ctx.channel_id()))
+        Ok(ctx.data().allows(feature, ctx.guild_id(), ctx.channel_id()))
     })
 }
 

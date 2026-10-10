@@ -19,6 +19,30 @@ pub struct Picture {
     pub original: String,
 }
 
+impl Picture {
+    /// Host and path of the original file, without the query. Discord signs its CDN links
+    /// with a query that expires and changes on every read, so this is what stays the same.
+    pub fn source(&self) -> String {
+        match Url::parse(&self.original) {
+            Ok(url) => format!("{}{}", url.host_str().unwrap_or(""), url.path()),
+            Err(_) => self.original.clone(),
+        }
+    }
+
+    /// Who serves the original, like `cdn.discordapp.com` or `pbs.twimg.com`.
+    pub fn host(&self) -> String {
+        Url::parse(&self.original)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+/// Whether a message could hold anything to index: links, attachments or previews.
+pub fn has_content(msg: &Message) -> bool {
+    !message_links(msg).is_empty() || !msg.attachments.is_empty() || !msg.embeds.is_empty()
+}
+
 /// The links in a message's text.
 pub fn message_links(msg: &Message) -> Vec<String> {
     let mut found = Vec::new();
@@ -62,7 +86,12 @@ pub fn pictures(msg: &Message) -> Vec<Picture> {
             if let (Some(w), Some(h)) = (image.width, image.height) {
                 push(&mut found, small_url(proxy, w, h), &image.url);
             }
-        } else if let Some(thumb) = &embed.thumbnail {
+        } else if let Some(thumb) = &embed.thumbnail
+            && kind == "image"
+        {
+            // Only a direct image link's thumbnail is the picture. On a picture site, a preview
+            // without an image is a text post, and its thumbnail is the author's avatar or the
+            // subreddit's icon.
             let proxy = thumb.proxy_url.as_deref().unwrap_or(&thumb.url);
             if let (Some(w), Some(h)) = (thumb.width, thumb.height) {
                 push(&mut found, small_url(proxy, w, h), &thumb.url);
@@ -186,6 +215,8 @@ mod tests {
                  "thumbnail": {"url": "https://i.ytimg.com/vi/abc/hq.jpg", "proxy_url": "https://media.discordapp.net/external/yt/hq.jpg", "width": 480, "height": 360}},
                 {"type": "gifv", "url": "https://klipy.com/gifs/dance",
                  "thumbnail": {"url": "https://static.klipy.com/a.webp", "width": 200, "height": 200}},
+                {"type": "rich", "url": "https://www.reddit.com/r/a/comments/b/text_post",
+                 "thumbnail": {"url": "https://styles.redditmedia.com/icon.png", "proxy_url": "https://media.discordapp.net/external/i/icon.png", "width": 256, "height": 256}},
                 {"type": "image", "url": "https://example.com/meme.png",
                  "thumbnail": {"url": "https://example.com/meme.png", "proxy_url": "https://media.discordapp.net/external/m/meme.png", "width": 300, "height": 300}}
             ]
@@ -194,6 +225,8 @@ mod tests {
             message_links(&msg),
             ["https://fxtwitter.com/a/status/1", "https://youtu.be/abc"]
         );
+        assert!(has_content(&msg));
+        assert!(!has_content(&message(json!({"content": "just text"}))));
         let found: Vec<String> = pictures(&msg).into_iter().map(|p| p.original).collect();
         assert_eq!(
             found,
@@ -203,5 +236,18 @@ mod tests {
                 "https://example.com/meme.png",
             ]
         );
+    }
+
+    #[test]
+    fn picture_source_ignores_the_signature() {
+        let picture = Picture {
+            url: String::new(),
+            original: "https://cdn.discordapp.com/attachments/2/10/cat.png?ex=1&hm=2".into(),
+        };
+        assert_eq!(
+            picture.source(),
+            "cdn.discordapp.com/attachments/2/10/cat.png"
+        );
+        assert_eq!(picture.host(), "cdn.discordapp.com");
     }
 }

@@ -40,6 +40,12 @@ impl Db {
         F: FnOnce(&mut Connection) -> anyhow::Result<T> + Send + 'static,
         T: Send + 'static,
     {
+        // A panic would end the database thread for good, and every later call would fail
+        // until a restart. Catch it here and turn it into a normal error instead.
+        let f = move |conn: &mut Connection| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(conn)))
+                .unwrap_or_else(|_| Err(anyhow!("the database code panicked")))
+        };
         self.conn.call(f).await.map_err(|err| match err {
             tokio_rusqlite::Error::Error(err) => err,
             _ => anyhow!("the database connection is closed"),

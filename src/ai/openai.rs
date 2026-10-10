@@ -65,7 +65,7 @@ fn fits_sandbox(file: &ModelFile) -> bool {
 
 /// `[ai.openai]` in config.toml.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct OpenAiConfig {
     pub model: String,
     /// "none", "low", "medium", "high" or "xhigh".
@@ -194,10 +194,8 @@ impl OpenAi {
     async fn responses(&self, body: &Value) -> anyhow::Result<reqwest::Response> {
         let mut waits = RETRY_WAITS.iter();
         loop {
-            let response = self
-                .post("/responses")
-                .json(body)
-                .send()
+            let request = self.post("/responses").json(body);
+            let response = super::fallback::send(request)
                 .await
                 .context("couldn't reach OpenAI")?;
             let status = response.status();
@@ -477,8 +475,11 @@ impl ChatProvider for OpenAi {
                 let chunk = match response.chunk().await {
                     Ok(Some(chunk)) => chunk,
                     Ok(None) => break,
+                    // Also a stream that sent nothing for a while (the HTTP client's read
+                    // timeout, see main.rs), which the fallback counts as down.
                     Err(err) => {
-                        let _ = sender.send(Err(err.into())).await;
+                        let err = anyhow::Error::new(err).context("reading OpenAI's answer failed");
+                        let _ = sender.send(Err(err)).await;
                         return;
                     }
                 };

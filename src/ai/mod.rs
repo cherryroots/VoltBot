@@ -204,7 +204,7 @@ pub trait ChatProvider: Send + Sync {
 
 /// `[ai]` in config.toml: which provider chats, and one section per provider.
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct AiConfig {
     /// Which provider chats. Only this one's key is read from `.env`.
     pub provider: Provider,

@@ -72,7 +72,9 @@ pub fn to_png(build: impl Fn() -> String) -> anyhow::Result<Vec<u8>> {
     PLAIN.set(true);
     let svg = build();
     PLAIN.set(false);
-    png(&svg)
+    // If it panics again, return an error so the caller can show something else.
+    std::panic::catch_unwind(|| png(&svg))
+        .unwrap_or_else(|_| Err(anyhow::anyhow!("resvg panicked drawing the picture")))
 }
 
 /// Renders SVG text to PNG bytes.
@@ -244,8 +246,14 @@ fn has_char(db: &fontdb::Database, face: fontdb::ID, c: char) -> bool {
     .is_some()
 }
 
-/// Escapes text for SVG.
+/// Escapes text for SVG. Control characters XML doesn't allow (all but tab and line
+/// breaks) are dropped, since resvg can't read a picture that has them.
 pub fn esc(text: &str) -> String {
+    let forbidden = |c: &char| {
+        matches!(c, '\0'..='\u{8}' | '\u{B}' | '\u{C}' | '\u{E}'..='\u{1F}')
+            || matches!(c, '\u{FFFE}' | '\u{FFFF}')
+    };
+    let text: String = text.chars().filter(|c| !forbidden(c)).collect();
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
@@ -393,6 +401,12 @@ mod tests {
         .unwrap();
         assert!(png.starts_with(b"\x89PNG"));
         assert!(svg.finish().contains("Hello &lt;world&gt;"));
+    }
+
+    #[test]
+    fn escapes_and_drops_control_characters() {
+        assert_eq!(esc("a\u{0}b\u{1B}c\td\n<"), "abc\td\n&lt;");
+        assert!(png(&format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"><text>{}</text></svg>", esc("x\u{7}"))).is_ok());
     }
 
     #[test]

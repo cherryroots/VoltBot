@@ -45,8 +45,10 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
     let count = game.season.rounds.len();
     let index = match args["round"].as_i64() {
         None => count - 1,
-        Some(number) => usize::try_from(number - 1)
-            .ok()
+        // The model picks the number, so it can be anything: checked_sub instead of - 1.
+        Some(number) => number
+            .checked_sub(1)
+            .and_then(|n| usize::try_from(n).ok())
             .filter(|&n| n < count)
             .ok_or_else(|| user_error(format!("The rounds are 1 to {count}.")))?,
     };

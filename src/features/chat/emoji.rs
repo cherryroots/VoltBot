@@ -158,7 +158,7 @@ async fn describe(ctx: &BotCtx, emoji: &Emoji) -> Result<String> {
     };
     let mut parts = vec![Part::Text(format!("The emoji :{}:", emoji.name))];
     parts.extend(
-        media::load_for_model(&ctx.web, &media)
+        media::load_for_model(&media)
             .await?
             .into_iter()
             .map(Part::Image),
