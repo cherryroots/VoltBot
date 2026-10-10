@@ -201,10 +201,20 @@ pub trait ChatProvider: Send + Sync {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AiConfig {
-    /// "claude" or "openai". Left out: Claude when its key is set, otherwise OpenAI.
-    pub provider: Option<String>,
+    /// Which provider chats. Only this one's key is read from `.env`.
+    pub provider: Provider,
     pub openai: OpenAiConfig,
     pub claude: ClaudeConfig,
+}
+
+/// `provider = "openai"` or `provider = "claude"` under `[ai]`. Any other value stops the
+/// bot at startup with a config error. Left out, it's OpenAI.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Openai,
+    Claude,
 }
 
 /// The AI services the bot has, set up from `.env` and `config.toml` at startup.

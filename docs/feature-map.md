@@ -7,7 +7,7 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 | Topic | Decision |
 |---|---|
 | Discord library | `serenity` + `poise` (poise handles slash commands, serenity handles raw events) |
-| AI provider | OpenAI first, behind a provider trait. Claude next, through the plain Messages API (not the Agent SDK), then maybe Gemini. Claude is the default when its key is set |
+| AI provider | OpenAI first, behind a provider trait. Claude next, through the plain Messages API (not the Agent SDK), then maybe Gemini. `provider` under `[ai]` picks which one chats |
 | Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` behind `tokio-rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, named after it (`reminders`, `reminder_images`, `wheel_*`, `chat_turns`), and its own migrations, recorded in a shared `schema_migrations` table. Core tables shared by all features: `user_settings`, `legacy_imports` |
 | Config | `.env` for secrets, `config.toml` for everything else (admin IDs, per-feature settings and guild/channel gating that Go hardcodes) |
 | Async runtime | `tokio` (serenity already uses it) |
@@ -193,7 +193,7 @@ Prompt caching: the system prompt is fully static. The Go bot appended the curre
 
 Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and deletes a finished one, and 🔁 regenerates it from the same input, editing the old answer's messages in place. Only the person who asked can use them. The bot removes the 🔁 again, so it can be used for the next try.
 
-Config: model name, reasoning effort, verbosity and service tier come from `[ai.openai]` in `config.toml`, not constants in code, and Claude's model, effort, output limit, code execution, skills, memory tool and fallbacks from `[ai.claude]`. The keys are `ANTHROPIC_API_KEY` and `OPENAI_TOKEN` in `.env` (with an optional `OPENAI_BASE`). `provider` under `[ai]` picks one; left out, Claude is used when its key is set. Without a key chat answers that it is turned off.
+Config: model name, reasoning effort, verbosity and service tier come from `[ai.openai]` in `config.toml`, not constants in code, and Claude's model, effort, output limit, code execution, skills, memory tool and fallbacks from `[ai.claude]`. The keys are `ANTHROPIC_API_KEY` and `OPENAI_TOKEN` in `.env` (with an optional `OPENAI_BASE`). `provider` under `[ai]` picks one (`"claude"` or `"openai"`, OpenAI when left out); only that provider's key is read, so having both keys in `.env` changes nothing. Without a key chat answers that it is turned off.
 
 GIFs from Discord's picker (Klipy since Tenor's API closed, also Giphy) are a link to the GIF's page plus a `gifv` embed with an MP4 `video` and a still `thumbnail`; `util::media` reads the MP4 and skips the still, whatever the provider. Discord can add link previews in a later message update, so if a mention has links but no embeds yet, chat waits two seconds and fetches the message again before reading its media.
 

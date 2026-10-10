@@ -21,9 +21,9 @@ old_database = "old.db"
 discord_level = "warn"
 
 [ai]
-# Which provider chats: "claude" or "openai". Left out, it's Claude when ANTHROPIC_API_KEY is
-# set in .env, otherwise OpenAI.
-# provider = "claude"
+# Which provider chats: "claude" or "openai" (left out: "openai"). Only that provider's key
+# in .env is used.
+provider = "claude"
 
 # Claude settings. The key goes in .env (ANTHROPIC_API_KEY).
 [ai.claude]

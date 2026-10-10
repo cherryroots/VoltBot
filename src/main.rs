@@ -212,49 +212,31 @@ async fn register_commands(
     Ok(())
 }
 
-/// Sets up the AI provider for chat: the one `provider` under `[ai]` names, otherwise
-/// Claude when its key is in `.env`, otherwise OpenAI.
+/// Sets up the AI provider for chat: the one `provider` under `[ai]` names. Chat is off
+/// when that provider's key is missing from `.env`.
 fn ai_from_env(config: &Config, web: &reqwest::Client) -> ai::Ai {
     let key = |name: &str| {
-        std::env::var(name)
+        let key = std::env::var(name)
             .ok()
             .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty())
+            .filter(|k| !k.is_empty());
+        if key.is_none() {
+            warn!("{name} is not set in .env, so chat is off");
+        }
+        key
     };
-    let claude_key = key("ANTHROPIC_API_KEY");
-    let openai_key = key("OPENAI_TOKEN");
-    let choice = match config.ai.provider.as_deref() {
-        Some(choice) => choice,
-        None if claude_key.is_some() => "claude",
-        None => "openai",
-    };
-    let chat: Option<Arc<dyn ai::ChatProvider>> = match (choice, claude_key, openai_key) {
-        ("claude", Some(key), _) => Some(Arc::new(ai::Claude::new(
-            web.clone(),
-            key,
-            config.ai.claude.clone(),
-        ))),
-        ("openai", _, Some(key)) => {
+    let chat: Option<Arc<dyn ai::ChatProvider>> = match config.ai.provider {
+        ai::Provider::Claude => key("ANTHROPIC_API_KEY")
+            .map(|key| Arc::new(ai::Claude::new(web.clone(), key, config.ai.claude.clone())) as _),
+        ai::Provider::Openai => key("OPENAI_TOKEN").map(|key| {
             let base = std::env::var("OPENAI_BASE").ok();
-            Some(Arc::new(ai::OpenAi::new(
+            Arc::new(ai::OpenAi::new(
                 web.clone(),
                 key,
                 base.as_deref(),
                 config.ai.openai.clone(),
-            )))
-        }
-        ("claude", None, _) => {
-            warn!("ANTHROPIC_API_KEY is not set, so chat is off");
-            None
-        }
-        ("openai", _, None) => {
-            warn!("OPENAI_TOKEN is not set, so chat is off");
-            None
-        }
-        (other, _, _) => {
-            warn!("[ai] provider = {other:?} isn't \"claude\" or \"openai\", so chat is off");
-            None
-        }
+            )) as _
+        }),
     };
     if let Some(chat) = &chat {
         info!("chat uses {} ({})", chat.name(), chat.model());

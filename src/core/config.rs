@@ -194,6 +194,16 @@ mod tests {
     }
 
     #[test]
+    fn ai_provider() {
+        use crate::ai::Provider;
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.ai.provider, Provider::Openai);
+        let claude = Config::parse("[ai]\nprovider = \"claude\"").unwrap();
+        assert_eq!(claude.ai.provider, Provider::Claude);
+        assert!(Config::parse("[ai]\nprovider = \"gemini\"").is_err());
+    }
+
+    #[test]
     fn feature_settings() {
         #[derive(Deserialize, Default)]
         #[serde(default)]
