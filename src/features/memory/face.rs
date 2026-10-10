@@ -6,9 +6,12 @@
 //! Without `faces_dir` (or with an empty folder) nothing here happens, and the reflection
 //! isn't asked for a face.
 
+use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::Duration;
 
 use anyhow::Context as _;
 use base64::Engine as _;
@@ -27,7 +30,7 @@ const AVATAR_SIZE: u32 = 512;
 /// Banners are scaled down to fit this width (and height).
 const BANNER_SIZE: u32 = 1500;
 /// The shortest time between two changes of one picture in one server, so a lively conversation
-/// can't run into Discord's limits. A face skipped for this waits for the next mood change.
+/// can't run into Discord's limits. A face held back by this is tried again when the time is up.
 const MIN_GAP_SECS: i64 = 10 * 60;
 
 /// The face on the control panel, in pixels (drawn at half this size, for sharpness).
@@ -178,9 +181,41 @@ pub async fn update(ctx: &BotCtx, scope: &str, mood: &str) {
         return;
     };
     let path = dir.join(format!("{face}.png"));
-    if let Err(err) = set_picture(ctx, guild, Slot::Avatar, path, &face).await {
-        warn!(%guild, face, "changing her face: {err:#}");
+    match set_picture(ctx, guild, Slot::Avatar, path, &face).await {
+        Ok(Some(wait)) => retry_later(ctx, scope, wait),
+        Ok(None) => {}
+        Err(err) => warn!(%guild, face, "changing her face: {err:#}"),
     }
+}
+
+/// Servers with a face change waiting for the 10 minutes to pass.
+static WAITING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
+
+/// Tries the face of `scope` again in `wait` seconds, with her mood as it is then. One
+/// waiting try per server is enough: it reads the newest mood.
+fn retry_later(ctx: &BotCtx, scope: &str, wait: i64) {
+    if !WAITING.lock().unwrap().insert(scope.to_string()) {
+        return;
+    }
+    let (ctx, scope) = (ctx.clone(), scope.to_string());
+    ctx.tasks.clone().spawn(async move {
+        let wait = Duration::from_secs(wait.max(0) as u64 + 5);
+        tokio::select! {
+            () = tokio::time::sleep(wait) => {}
+            () = ctx.shutdown.cancelled() => return,
+        }
+        WAITING.lock().unwrap().remove(&scope);
+        let owned = scope.clone();
+        let mood = ctx
+            .db
+            .call(move |conn| Ok(store::load(conn, &owned)?.remove(reflect::MOOD_FILE)))
+            .await;
+        match mood {
+            Ok(Some(mood)) => Box::pin(update(&ctx, &scope, &mood)).await,
+            Ok(None) => {}
+            Err(err) => warn!(scope, "reading her mood: {err:#}"),
+        }
+    });
 }
 
 /// A picture on her profile in a server.
@@ -209,14 +244,15 @@ impl Slot {
 }
 
 /// Sets the picture at `path` (named `name`, like "happy") in `slot` of her profile in
-/// `guild`, unless it's already there or that slot changed in the last 10 minutes.
+/// `guild`, unless it's already there. When that slot changed in the last 10 minutes it's
+/// left alone, and the result is how many seconds are left to wait.
 pub async fn set_picture(
     ctx: &BotCtx,
     guild: GuildId,
     slot: Slot,
     path: PathBuf,
     name: &str,
-) -> Result<()> {
+) -> Result<Option<i64>> {
     let crop = match slot {
         Slot::Avatar => crop(ctx),
         Slot::Banner => None,
@@ -230,11 +266,12 @@ pub async fn set_picture(
         .await?;
     if let Some((current, at)) = current {
         if current == print {
-            return Ok(());
+            return Ok(None);
         }
-        if Utc::now().timestamp() - at < MIN_GAP_SECS {
-            info!(%guild, name, "{} changed less than 10 minutes ago, keeping it for now", slot.field());
-            return Ok(());
+        let since = Utc::now().timestamp() - at;
+        if since < MIN_GAP_SECS {
+            info!(%guild, name, "{} changed less than 10 minutes ago, changing it later", slot.field());
+            return Ok(Some(MIN_GAP_SECS - since));
         }
     }
 
@@ -257,7 +294,7 @@ pub async fn set_picture(
             )?)
         })
         .await?;
-    Ok(())
+    Ok(None)
 }
 
 /// At start: puts each server's face back in step with its mood file, for a face picked
