@@ -212,13 +212,10 @@ fn retry_later(ctx: &BotCtx, scope: &str, wait: i64) {
         if !allowed {
             return;
         }
-        let (owned, bot) = (scope.clone(), ctx.bot_id.get());
+        let owned = scope.clone();
         let mood = ctx
             .db
-            .call(move |conn| {
-                let moods = store::every_file(conn, reflect::MOOD_FILE, bot)?;
-                Ok(moods.into_iter().find(|(s, _)| *s == owned).map(|(_, m)| m))
-            })
+            .call(move |conn| Ok(store::load(conn, &owned)?.remove(reflect::MOOD_FILE)))
             .await;
         match mood {
             Ok(Some(mood)) => Box::pin(update(&ctx, &scope, &mood)).await,
@@ -315,10 +312,9 @@ pub async fn sync_all(ctx: &BotCtx) {
     if names(ctx).is_empty() {
         return;
     }
-    let bot = ctx.bot_id.get();
     let moods = ctx
         .db
-        .call(move |conn| Ok(store::every_file(conn, reflect::MOOD_FILE, bot)?))
+        .call(|conn| Ok(store::every_file(conn, reflect::MOOD_FILE)?))
         .await;
     let moods = match moods {
         Ok(moods) => moods,

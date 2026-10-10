@@ -73,11 +73,10 @@ pub async fn check_due(ctx: &BotCtx) -> Result<()> {
     let every = 86_400 / i64::from(settings.mood_checks_per_day);
     let now = Utc::now().timestamp();
 
-    let bot = ctx.bot_id.get();
     let moods = ctx
         .db
-        .call(move |conn| {
-            let moods = store::every_file(conn, reflect::MOOD_FILE, bot)?;
+        .call(|conn| {
+            let moods = store::every_file(conn, reflect::MOOD_FILE)?;
             let mut checked = HashMap::new();
             for (scope, _) in &moods {
                 checked.insert(scope.clone(), store::mood_checked_at(conn, scope)?);
