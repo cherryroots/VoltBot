@@ -45,9 +45,10 @@ pub async fn update_all(ctx: &BotCtx) {
     if !path.exists() {
         return;
     }
+    let bot = ctx.bot_id.get();
     let moods = ctx
         .db
-        .call(|conn| Ok(store::every_file(conn, reflect::MOOD_FILE)?))
+        .call(move |conn| Ok(store::every_file(conn, reflect::MOOD_FILE, bot)?))
         .await;
     let scopes = match moods {
         Ok(moods) => moods.into_iter().map(|(scope, _)| scope),

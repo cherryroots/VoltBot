@@ -82,7 +82,9 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
     };
 
     let scope = store::scope(Some(guild.get()), asker.user.get());
-    let (owned, user) = (scope.clone(), asker.user.get());
+    // Saved as the bot, like the reflection and the mood checks: only her own mood files
+    // set her status, face and banner.
+    let (owned, bot) = (scope.clone(), ctx.bot_id.get());
     let (mood, status) = (args.mood, args.status);
     ctx.db
         .call(move |conn| {
@@ -96,12 +98,12 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
                 file = set_line(&file, "face", face);
             }
             after.insert(reflect::MOOD_FILE.to_string(), file);
-            store::save(&tx, &owned, &before, &after, user, Utc::now().timestamp())?;
+            store::save(&tx, &owned, &before, &after, bot, Utc::now().timestamp())?;
             tx.commit()?;
             Ok(())
         })
         .await?;
-    info!(scope, "changed her mood in a conversation");
+    info!(scope, user = %asker.user, "changed her mood in a conversation");
     reflect::apply_mood(ctx, &scope).await;
     Ok("Your mood is updated.".to_string())
 }

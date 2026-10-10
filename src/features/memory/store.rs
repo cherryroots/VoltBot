@@ -191,13 +191,19 @@ pub fn newest_file(conn: &Connection, path: &str) -> rusqlite::Result<Option<(St
     .optional()
 }
 
-/// `path` in every server's folder that has it: (scope, content).
-pub fn every_file(conn: &Connection, path: &str) -> rusqlite::Result<Vec<(String, String)>> {
+/// `path` in every server's folder where `author` wrote it last: (scope, content). For her
+/// mood file, `author` is the bot, so a member who asks the memory tool to rewrite it
+/// can't set her face or banner.
+pub fn every_file(
+    conn: &Connection,
+    path: &str,
+    author: u64,
+) -> rusqlite::Result<Vec<(String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT scope, content FROM memory_files
-         WHERE path = ?1 AND scope LIKE 'server:%' ORDER BY scope",
+         WHERE path = ?1 AND updated_by = ?2 AND scope LIKE 'server:%' ORDER BY scope",
     )?;
-    let rows = stmt.query_map([path], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    let rows = stmt.query_map(params![path, author], |row| Ok((row.get(0)?, row.get(1)?)))?;
     rows.collect()
 }
 
@@ -437,11 +443,17 @@ mod tests {
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), Some(1000));
 
         assert_eq!(
-            every_file(&conn, "/memories/vivy/mood.md").unwrap(),
+            every_file(&conn, "/memories/vivy/mood.md", 0).unwrap(),
             vec![
                 ("server:1".to_string(), "status: old".to_string()),
                 ("server:2".to_string(), "status: new".to_string()),
             ]
+        );
+        // Written by someone else: not hers.
+        assert!(
+            every_file(&conn, "/memories/vivy/mood.md", 7)
+                .unwrap()
+                .is_empty()
         );
     }
 
