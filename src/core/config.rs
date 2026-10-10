@@ -52,7 +52,7 @@ impl Default for Config {
         Config {
             admins: Vec::new(),
             main_server: None,
-            database: "voltbot.db".to_string(),
+            database: "vivy.db".to_string(),
             old_database: "old.db".to_string(),
             logging: LoggingConfig::default(),
             ai: crate::ai::AiConfig::default(),

@@ -227,7 +227,7 @@ pub async fn with_previews(http: &Http, msg: &Message) -> Message {
 /// a proxy, the bot can't see which address a name really leads to.
 static SAFE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
-        .user_agent(concat!("VoltBot/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Vivy/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         // Same as the main client in main.rs: a server that goes quiet this long fails.
         .read_timeout(Duration::from_secs(5 * 60))

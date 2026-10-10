@@ -1,6 +1,6 @@
-# VoltBot
+# Vivy
 
-VoltBot is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://github.com/cherryroots/voltgpt), the Go bot behind "Vivy", ported one feature at a time.
+Vivy is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://github.com/cherryroots/voltgpt), the older Go bot, ported one feature at a time.
 
 ## Goals
 
@@ -44,50 +44,50 @@ Reminders understand `@Vivy remind me in 2h30m to …`, `at 16:30 CET`, `tomorro
 You need [Rust](https://rustup.rs) (stable) and `ffmpeg` (used to read video frames). Optionally install `fonts-noto-color-emoji` and `fonts-noto-core` (and `fonts-noto-extra` for rarer scripts), so emoji and fancy letters in names show up in the movie wheel picture; restart the bot after installing fonts. The log warns once about each character no installed font has.
 
 ```bash
-git clone https://github.com/cherryroots/VoltBot.git
-cd VoltBot
+git clone https://github.com/cherryroots/Vivy.git
+cd Vivy
 cargo build --release
 ```
 
-The binary is `target/release/voltbot`.
+The binary is `target/release/vivy`.
 
 ### 3. Install
 
 ```bash
-sudo useradd --system --home /opt/voltbot --shell /usr/sbin/nologin voltbot
-sudo mkdir -p /opt/voltbot
-sudo cp target/release/voltbot /opt/voltbot/
-sudo cp config.example.toml /opt/voltbot/config.toml
-sudo cp .env.example /opt/voltbot/.env
-sudo chown -R voltbot:voltbot /opt/voltbot
-sudo chmod 600 /opt/voltbot/.env
+sudo useradd --system --home /opt/vivy --shell /usr/sbin/nologin vivy
+sudo mkdir -p /opt/vivy
+sudo cp target/release/vivy /opt/vivy/
+sudo cp config.example.toml /opt/vivy/config.toml
+sudo cp .env.example /opt/vivy/.env
+sudo chown -R vivy:vivy /opt/vivy
+sudo chmod 600 /opt/vivy/.env
 ```
 
-Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`, and `ANTHROPIC_API_KEY` or `OPENAI_TOKEN` for chat, matching `provider` under `[ai]`, and the other one too if `fallback` names it) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
+Fill in `/opt/vivy/.env` (the secret `DISCORD_TOKEN`, and `ANTHROPIC_API_KEY` or `OPENAI_TOKEN` for chat, matching `provider` under `[ai]`, and the other one too if `fallback` names it) and `/opt/vivy/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
 
-**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders and the running movie wheel game, each only once, then renames the file to `old.db.imported`. voltgpt's wheel had no server, so set `main_server` in `config.toml` first: the game is imported into that server, and the import waits until it is set. If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
+**Coming from voltgpt:** copy its `voltgpt.db` to `/opt/vivy/old.db` before the first start. The bot imports the reminders and the running movie wheel game, each only once, then renames the file to `old.db.imported`. voltgpt's wheel had no server, so set `main_server` in `config.toml` first: the game is imported into that server, and the import waits until it is set. If Vivy reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
 
 ### 4. Run with systemd
 
 ```bash
-sudo cp deploy/voltbot.service /etc/systemd/system/
+sudo cp deploy/vivy.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now voltbot
+sudo systemctl enable --now vivy
 ```
 
 ### 5. Check on it
 
 - **Discord:** the status channel has a message that refreshes every minute with uptime, the AI provider and model (with any fallback, and Claude's spend this month), errors and per-feature stats, and the log channel gets warnings, errors, and start and stop notices.
-- **Service state:** `systemctl status voltbot`
-- **Full logs:** `journalctl -u voltbot -f`. Set `RUST_LOG` in the service file to change the level, for example `RUST_LOG=info,voltbot::features::chat=debug`.
+- **Service state:** `systemctl status vivy`
+- **Full logs:** `journalctl -u vivy -f`. Set `RUST_LOG` in the service file to change the level, for example `RUST_LOG=info,vivy::features::chat=debug`.
 
 ### Updating
 
 ```bash
 git pull
 cargo build --release
-sudo install -o voltbot -g voltbot target/release/voltbot /opt/voltbot/voltbot
-sudo systemctl restart voltbot
+sudo install -o vivy -g vivy target/release/vivy /opt/vivy/vivy
+sudo systemctl restart vivy
 ```
 
 Database migrations run automatically on start.

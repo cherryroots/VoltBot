@@ -15,7 +15,7 @@ use super::Feature;
 use super::config::Config;
 use super::db::Db;
 
-/// Every part VoltBot will import. A part whose feature isn't ported yet stays pending, and
+/// Every part Vivy will import. A part whose feature isn't ported yet stays pending, and
 /// `old.db` is kept until it is done.
 pub const PARTS: &[&str] = &["reminders", "wheel"];
 
@@ -143,7 +143,7 @@ mod tests {
     fn setup() -> (Connection, PathBuf) {
         let mut conn = Connection::open_in_memory().unwrap();
         migrate(&mut conn, "core", CORE_MIGRATIONS).unwrap();
-        let dir = std::env::temp_dir().join(format!("voltbot-legacy-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vivy-legacy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(format!("old-{:?}.db", std::thread::current().id()));
         let _ = std::fs::remove_file(&path);

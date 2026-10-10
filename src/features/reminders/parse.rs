@@ -608,7 +608,7 @@ mod tests {
             ("in 7 days workout", TimeDelta::days(7), "workout"),
             ("in 1y update CV", TimeDelta::days(365), "update CV"),
             ("in 2 years tax", TimeDelta::days(730), "tax"),
-            // New in VoltBot.
+            // New in Vivy.
             ("in 1 week 2 days stretch", TimeDelta::days(9), "stretch"),
             (
                 "in 1 week and 2 days stretch",
