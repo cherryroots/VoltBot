@@ -12,11 +12,13 @@
 //! - `reflect.rs`: the daily reflection, where Vivy tidies her memory and updates her own notes
 //!   and mood (which sets her Discord status)
 //! - `diary.rs`: the weekly diary she posts in `diary_channels`
+//! - `retry.rs`: waiting a few hours before a failed reflection or diary tries again
 
 mod commands;
 mod diary;
 mod folder;
 mod reflect;
+mod retry;
 mod store;
 mod tool;
 
@@ -99,7 +101,7 @@ impl Feature for Memory {
     async fn panels(&self, ctx: &BotCtx) -> Result<Vec<Panel>> {
         let newest = ctx
             .db
-            .call(|conn| Ok(store::newest_file(conn, reflect::MOOD_FILE)?))
+            .call(move |conn| Ok(store::newest_file(conn, reflect::MOOD_FILE)?))
             .await?;
         let Some((_, mood)) = newest else {
             return Ok(Vec::new());

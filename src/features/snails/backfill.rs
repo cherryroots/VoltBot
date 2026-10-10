@@ -4,6 +4,11 @@
 //! channel, 100 messages at a time from the newest back, and saves its place after every page,
 //! so pausing, restarting the bot or a network failure never loses work. A crawl an admin
 //! started (and didn't pause) carries on when the bot restarts.
+//!
+//! On every start, channels the backfill has read before are caught up: what was posted
+//! there while the bot was offline is read (from the newest message read or saved, forward)
+//! and checked like new messages. That's not a backfill start; channels never crawled stay
+//! untouched until an admin starts one.
 
 use std::collections::HashSet;
 use std::sync::{LazyLock, Mutex};
@@ -18,7 +23,8 @@ use serenity::futures::stream::{self, StreamExt};
 use tracing::{debug, info, warn};
 
 use super::index;
-use super::store::{self, CrawlStatus};
+use super::store::{self, CrawlStatus, HostFailures};
+use super::{check, collect};
 use crate::core::{BotCtx, Context, Result, user_error};
 
 /// Messages indexed at the same time. Each downloads its pictures from Discord's media proxy.
@@ -87,11 +93,18 @@ pub async fn snail_backfill(
                 .to_string()
         }
         Action::Status => {
-            let status = bot
+            let (status, failures) = bot
                 .db
-                .call(move |conn| Ok(store::crawl_status(conn, g)?))
+                .call(move |conn| {
+                    Ok((
+                        store::crawl_status(conn, g)?,
+                        store::failures_by_host(conn, g)?,
+                    ))
+                })
                 .await?;
-            describe(&status)
+            let mut text = describe(&status);
+            text.push_str(&describe_failures(&failures));
+            text
         }
     };
     ctx.say(text).await?;
@@ -115,6 +128,43 @@ fn describe(s: &CrawlStatus) -> String {
     );
     if s.failed > 0 {
         text.push_str(&format!("\n{} couldn't be read (no access).", s.failed));
+    }
+    text
+}
+
+/// Hosts shown in the failed pictures list.
+const MAX_HOSTS: usize = 10;
+
+/// The failed pictures grouped by host, so a provider with trouble stands out. Empty when
+/// nothing failed.
+fn describe_failures(hosts: &[HostFailures]) -> String {
+    if hosts.is_empty() {
+        return String::new();
+    }
+    let waiting: u64 = hosts.iter().map(|h| h.waiting).sum();
+    let given_up: u64 = hosts.iter().map(|h| h.given_up).sum();
+    let mut text = format!(
+        "\n\n**Pictures that failed to download:** {waiting} waiting to retry, \
+         {given_up} given up"
+    );
+    for h in hosts.iter().take(MAX_HOSTS) {
+        let mut error: String = h.error.chars().take(80).collect();
+        if error.len() < h.error.len() {
+            error.push('…');
+        }
+        text.push_str(&format!(
+            "\n- `{}`: {}{} (last error: {error})",
+            h.host,
+            h.waiting + h.given_up,
+            if h.given_up > 0 {
+                format!(", {} given up", h.given_up)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    if hosts.len() > MAX_HOSTS {
+        text.push_str(&format!("\n…and {} more hosts.", hosts.len() - MAX_HOSTS));
     }
     text
 }
@@ -295,14 +345,16 @@ async fn read_page(
     let messages = match channel.messages(&ctx.http, request).await {
         Ok(messages) => messages,
         Err(err) => {
-            return Err(match http_status(&err) {
-                Some(403 | 404) => PageError::NoAccess(err.to_string()),
-                _ => PageError::Retry(err.into()),
+            return Err(if is_no_access(&err) {
+                PageError::NoAccess(err.to_string())
+            } else {
+                PageError::Retry(err.into())
             });
         }
     };
     // Newest first, so the last one is where the next page starts.
     let oldest = messages.last().map(|m| m.id.get());
+    let newest = messages.first().map(|m| m.id.get());
     let finished = messages.len() < PAGE as usize;
     let jobs: Vec<_> = messages
         .iter()
@@ -326,6 +378,10 @@ async fn read_page(
     let (id, count) = (channel.get(), messages.len());
     ctx.db
         .call(move |conn| {
+            if let Some(newest) = newest {
+                // Where the startup catch-up starts.
+                store::crawl_newest(conn, id, newest)?;
+            }
             Ok(store::crawl_progress(
                 conn, id, oldest, count, pictures, finished,
             )?)
@@ -335,11 +391,110 @@ async fn read_page(
     Ok(())
 }
 
+// ---- Startup catch-up ----
+
+/// Catches up every server with backfill history, one after another, in the background.
+pub fn spawn_catch_up(ctx: &BotCtx, guilds: Vec<GuildId>) {
+    let ctx = ctx.clone();
+    ctx.tasks.clone().spawn(async move {
+        for guild in guilds {
+            if let Err(err) = catch_up(&ctx, guild).await {
+                warn!(guild = guild.get(), "snail catch-up stopped: {err:#}");
+            }
+        }
+    });
+}
+
+/// Reads what was posted while the bot was offline in a server's crawled channels.
+async fn catch_up(ctx: &BotCtx, guild: GuildId) -> Result<()> {
+    let g = guild.get();
+    let channels = ctx
+        .db
+        .call(move |conn| Ok(store::catch_up_channels(conn, g)?))
+        .await?;
+    let mut total = 0;
+    for (channel, after) in channels {
+        if ctx.shutdown.is_cancelled() {
+            return Ok(());
+        }
+        let channel = ChannelId::new(channel);
+        if !ctx.allows("snails", Some(guild), channel) {
+            continue;
+        }
+        match catch_up_channel(ctx, guild, channel, after).await {
+            Ok(read) => total += read,
+            Err(err) => match err.downcast_ref::<serenity::Error>() {
+                // Deleted, or the bot lost access: nothing to catch up.
+                Some(e) if is_no_access(e) => {
+                    debug!(channel = channel.get(), "snail catch-up skipped: {err}")
+                }
+                _ => warn!(channel = channel.get(), "snail catch-up failed: {err:#}"),
+            },
+        }
+    }
+    if total > 0 {
+        info!(
+            guild = g,
+            messages = total,
+            "snail catch-up read the missed messages"
+        );
+    }
+    Ok(())
+}
+
+/// Reads one channel forward from `after`, oldest first so a repost inside the missed
+/// stretch still finds its original. Saves its place after every page. Returns how many
+/// messages it read.
+async fn catch_up_channel(
+    ctx: &BotCtx,
+    guild: GuildId,
+    channel: ChannelId,
+    mut after: u64,
+) -> anyhow::Result<usize> {
+    let mut read = 0;
+    loop {
+        let request = GetMessages::new().after(after).limit(PAGE);
+        let mut page = channel.messages(&ctx.http, request).await?;
+        // Discord sends the page newest first.
+        page.sort_by_key(|m| m.id);
+        let Some(last) = page.last().map(|m| m.id.get()) else {
+            return Ok(read);
+        };
+        for msg in &page {
+            if ctx.shutdown.is_cancelled() {
+                return Ok(read);
+            }
+            if msg.author.bot || !collect::has_content(msg) {
+                continue;
+            }
+            // Missed messages are new messages, so they're checked for snails too.
+            if let Err(err) = check::on_new_message(ctx, guild, msg).await {
+                debug!(message = msg.id.get(), "couldn't index: {err:#}");
+            }
+        }
+        read += page.len();
+        after = last;
+        let id = channel.get();
+        ctx.db
+            .call(move |conn| Ok(store::crawl_newest(conn, id, last)?))
+            .await?;
+        if page.len() < PAGE as usize {
+            return Ok(read);
+        }
+    }
+}
+
 pub fn http_status(err: &serenity::Error) -> Option<u16> {
     match err {
         serenity::Error::Http(HttpError::UnsuccessfulRequest(r)) => Some(r.status_code.as_u16()),
         _ => None,
     }
+}
+
+/// Whether Discord refused the request for good: any 4xx except 429 (slow down). Trying
+/// again won't help, unlike a network error or a 5xx.
+pub fn is_no_access(err: &serenity::Error) -> bool {
+    http_status(err).is_some_and(|s| (400..500).contains(&s) && s != 429)
 }
 
 #[cfg(test)]
@@ -360,5 +515,29 @@ mod tests {
         s.failed = 1;
         let text = describe(&s);
         assert!(text.contains("finished") && text.contains("1 couldn't be read"));
+    }
+
+    #[test]
+    fn failures_text() {
+        assert_eq!(describe_failures(&[]), "");
+        let hosts = vec![
+            HostFailures {
+                host: "pbs.twimg.com".into(),
+                waiting: 3,
+                given_up: 2,
+                error: "HTTP status client error (403 Forbidden)".into(),
+            },
+            HostFailures {
+                host: "cdn.discordapp.com".into(),
+                waiting: 1,
+                given_up: 0,
+                error: "x".repeat(100),
+            },
+        ];
+        let text = describe_failures(&hosts);
+        assert!(text.contains("4 waiting to retry, 2 given up"), "{text}");
+        assert!(text.contains("`pbs.twimg.com`: 5, 2 given up (last error: HTTP"));
+        assert!(text.contains("`cdn.discordapp.com`: 1 (last error: "));
+        assert!(text.contains('…'));
     }
 }

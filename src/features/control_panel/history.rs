@@ -43,6 +43,25 @@ pub fn record(conn: &Connection, at: i64, values: &[(String, f64)]) -> rusqlite:
     Ok(())
 }
 
+/// What the graphs need: every sample of the last 7 days (the system tiles show a day,
+/// the feature cards a week), and the spend samples since `month_start` for the spend
+/// graph. Loading a whole month of everything every minute would be wasted work.
+pub fn load_for_graphs(conn: &Connection, now: i64, month_start: i64) -> rusqlite::Result<History> {
+    let mut history = load(conn, now - 7 * 86_400)?;
+    let mut statement = conn.prepare_cached(
+        "SELECT at, value FROM control_panel_samples WHERE name = ?1 AND at >= ?2 ORDER BY at",
+    )?;
+    let spend = statement
+        .query_map(params![SPEND, month_start], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if !spend.is_empty() {
+        history.insert(SPEND.to_string(), spend);
+    }
+    Ok(history)
+}
+
 /// Every sample since `since`.
 pub fn load(conn: &Connection, since: i64) -> rusqlite::Result<History> {
     let mut statement = conn.prepare_cached(
@@ -80,5 +99,22 @@ mod tests {
         let history = load(&conn, 0).unwrap();
         assert_eq!(history["a"], vec![(10 * day, 2.0), (40 * day, 3.0)]);
         assert!(!history.contains_key("b"));
+    }
+
+    #[test]
+    fn loads_a_week_of_everything_and_the_month_of_spend() {
+        let conn = test_connection("control_panel", MIGRATIONS);
+        let day = 86_400;
+        let now = 30 * day;
+        for at in [10 * day, 20 * day, 29 * day] {
+            record(&conn, at, &[("a".into(), 1.0), (SPEND.into(), 2.0)]).unwrap();
+        }
+        // The month started on day 15: spend from then, the rest only from day 23.
+        let history = load_for_graphs(&conn, now, 15 * day).unwrap();
+        assert_eq!(history["a"], vec![(29 * day, 1.0)]);
+        assert_eq!(history[SPEND], vec![(20 * day, 2.0), (29 * day, 2.0)]);
+        // A month that started less than a week ago still gets its spend.
+        let history = load_for_graphs(&conn, now, 28 * day).unwrap();
+        assert_eq!(history[SPEND], vec![(29 * day, 2.0)]);
     }
 }

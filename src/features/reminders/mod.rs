@@ -37,7 +37,7 @@ use self::store::{Image, NewReminder};
 use self::ui::Action;
 use crate::ai::ToolDef;
 use crate::core::{
-    Asker, BotCtx, Command, Feature, LegacyImport, Result, Stat, settings, user_error,
+    Asker, BotCtx, Command, Feature, LegacyImport, Mention, Result, Stat, settings, user_error,
 };
 
 #[derive(Default)]
@@ -108,13 +108,31 @@ impl Feature for Reminders {
     }
 
     /// "@Vivy remind me in 2h to check the oven": `rest` is "in 2h to check the oven".
-    async fn on_mention(&self, ctx: &BotCtx, msg: &Message, rest: &str) -> Result<()> {
-        let parsed = parse::parse_reminder(rest)
-            .map_err(|err| user_error(format!("{err}\n{}", ui::HELP)))?;
+    ///
+    /// When no reminder can be made from it ("remind me what the movie was called", a time
+    /// that has passed, no text), the message goes to chat instead, which can answer it or
+    /// help set the reminder up with its reminder tools.
+    async fn on_mention(&self, ctx: &BotCtx, msg: &Message, rest: &str) -> Result<Mention> {
+        let parsed = match parse::parse_reminder(rest) {
+            Ok(parsed) if !parsed.message.is_empty() => parsed,
+            Ok(_) => {
+                info!("no reminder text; passing the mention on");
+                return Ok(Mention::PassOn);
+            }
+            Err(err) => {
+                info!("not a reminder ({err}); passing the mention on");
+                return Ok(Mention::PassOn);
+            }
+        };
         let saved_zone = settings::timezone(&ctx.db, msg.author.id).await?;
-        let fire_at = parse::resolve(&parsed.when, Utc::now(), saved_zone.unwrap_or(Tz::UTC))
-            .map_err(user_error)?
-            .timestamp();
+        let fire_at = match parse::resolve(&parsed.when, Utc::now(), saved_zone.unwrap_or(Tz::UTC))
+        {
+            Ok(at) => at.timestamp(),
+            Err(err) => {
+                info!("can't set that reminder ({err}); passing the mention on");
+                return Ok(Mention::PassOn);
+            }
+        };
 
         // Only keep what the bot can upload again in this server, which depends on its boosts.
         let tier = msg
@@ -152,7 +170,7 @@ impl Feature for Reminders {
             .reference_message(msg)
             .allowed_mentions(CreateAllowedMentions::new());
         msg.channel_id.send_message(&ctx.http, reply).await?;
-        Ok(())
+        Ok(Mention::Handled)
     }
 
     async fn on_component(
@@ -219,22 +237,20 @@ impl Reminders {
             )));
         }
 
+        // Snoozing moves the delivered reminder (images and all) back into the queue. It only
+        // works once, so a double press or a retry can't make two reminders.
         let until = Utc::now().timestamp() + minutes * 60;
-        let new = NewReminder {
-            user_id: reminder.user_id,
-            channel_id: reminder.channel_id,
-            guild_id: reminder.guild_id,
-            message: reminder.message,
-            fire_at: until,
-            created_at: reminder.created_at,
-            source_message_id: reminder.source_message_id,
-            missing_images: reminder.missing_images,
-            images: reminder.images,
-        };
-        ctx.db.call(move |conn| Ok(store::add(conn, &new)?)).await?;
+        let user = reminder.user_id;
+        let snoozed = ctx
+            .db
+            .call(move |conn| Ok(store::snooze(conn, id, user, until)?))
+            .await?;
+        if !snoozed {
+            return Err(user_error("This reminder is already snoozed."));
+        }
         self.wake.notify_one();
 
-        // Swap the buttons for a "snoozed until" line, so it can't be snoozed twice.
+        // Swap the buttons for a "snoozed until" line.
         let response = CreateInteractionResponseMessage::new()
             .content(ui::snoozed(&i.message.content, until))
             .components(Vec::new());

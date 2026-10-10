@@ -118,16 +118,22 @@ pub fn files_under(
 }
 
 /// Server folders due for a reflection: changed since the last one, which was at least
-/// `every` seconds ago.
-pub fn due_reflections(conn: &Connection, now: i64, every: i64) -> rusqlite::Result<Vec<String>> {
+/// `every` seconds ago. Changes by `bot` (Vivy herself, like during a reflection) don't
+/// count, or every reflection would make the next one due.
+pub fn due_reflections(
+    conn: &Connection,
+    now: i64,
+    every: i64,
+    bot: u64,
+) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT c.scope FROM memory_changes c
          LEFT JOIN memory_reflections r ON r.scope = c.scope
-         WHERE c.scope LIKE 'server:%' AND (r.at IS NULL OR r.at <= ?1)
+         WHERE c.scope LIKE 'server:%' AND c.user_id != ?2 AND (r.at IS NULL OR r.at <= ?1)
          GROUP BY c.scope
          HAVING max(c.at) > coalesce(max(r.at), 0)",
     )?;
-    let rows = stmt.query_map([now - every], |row| row.get(0))?;
+    let rows = stmt.query_map(params![now - every, bot], |row| row.get(0))?;
     rows.collect()
 }
 
@@ -164,11 +170,30 @@ pub fn set_reflected(conn: &Connection, scope: &str, at: i64) -> rusqlite::Resul
     Ok(())
 }
 
-/// The newest version of `path` in any server's folder: (scope, content).
+/// Deletes logged changes from before `before`, to keep `memory_changes` from growing
+/// forever. A server's changes since its last reflection stay however old they are: the
+/// next reflection still lists them (and a server that never reflected keeps them all).
+pub fn prune_changes(conn: &Connection, before: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM memory_changes
+         WHERE at < ?1 AND (
+            scope NOT LIKE 'server:%'
+            OR at <= coalesce(
+                (SELECT r.at FROM memory_reflections r WHERE r.scope = memory_changes.scope),
+                0
+            )
+         )",
+        [before],
+    )
+}
+
+/// The newest version of `path` in any server's folder: (scope, content). Whoever asked
+/// for it, Vivy decided to write it through the memory tool, so every version counts.
 pub fn newest_file(conn: &Connection, path: &str) -> rusqlite::Result<Option<(String, String)>> {
     conn.query_row(
         "SELECT scope, content FROM memory_files
-         WHERE path = ?1 AND scope LIKE 'server:%' ORDER BY updated_at DESC LIMIT 1",
+         WHERE path = ?1 AND scope LIKE 'server:%'
+         ORDER BY updated_at DESC LIMIT 1",
         [path],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
@@ -282,7 +307,10 @@ mod tests {
         save(&conn, "server:1", &Folder::new(), &one, 7, 100).unwrap();
         save(&conn, "dm:9", &Folder::new(), &one, 9, 100).unwrap();
         // DMs never reflect; the server does, since it changed.
-        assert_eq!(due_reflections(&conn, 200, day).unwrap(), vec!["server:1"]);
+        assert_eq!(
+            due_reflections(&conn, 200, day, 0).unwrap(),
+            vec!["server:1"]
+        );
         assert_eq!(
             changes_since_reflection(&conn, "server:1").unwrap(),
             vec![("/memories/a.md".to_string(), 7, 1)]
@@ -295,14 +323,27 @@ mod tests {
                 .is_empty()
         );
         // No changes since: not due, even a day later.
-        assert!(due_reflections(&conn, 200 + day, day).unwrap().is_empty());
+        assert!(
+            due_reflections(&conn, 200 + day, day, 0)
+                .unwrap()
+                .is_empty()
+        );
+        // Her own changes (bot id 5) don't make it due either.
+        let mut mine = one.clone();
+        mine.insert("/memories/vivy/mood.md".into(), "status: hi".into());
+        save(&conn, "server:1", &one, &mine, 5, 250).unwrap();
+        assert!(
+            due_reflections(&conn, 200 + day, day, 5)
+                .unwrap()
+                .is_empty()
+        );
         // A change, but less than a day after the last reflection: not yet.
-        let mut two = one.clone();
+        let mut two = mine.clone();
         two.insert("/memories/b.md".into(), "y".into());
-        save(&conn, "server:1", &one, &two, 7, 300).unwrap();
-        assert!(due_reflections(&conn, 400, day).unwrap().is_empty());
+        save(&conn, "server:1", &mine, &two, 7, 300).unwrap();
+        assert!(due_reflections(&conn, 400, day, 5).unwrap().is_empty());
         assert_eq!(
-            due_reflections(&conn, 200 + day, day).unwrap(),
+            due_reflections(&conn, 200 + day, day, 5).unwrap(),
             vec!["server:1"]
         );
     }
@@ -333,6 +374,7 @@ mod tests {
             200,
         )
         .unwrap();
+        // DM folders don't count.
         save(&conn, "dm:3", &Folder::new(), &mood("status: dm"), 3, 300).unwrap();
         assert_eq!(
             newest_file(&conn, "/memories/vivy/mood.md").unwrap(),
@@ -353,6 +395,34 @@ mod tests {
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), None);
         set_diary_posted(&conn, 5, 1000).unwrap();
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), Some(1000));
+    }
+
+    #[test]
+    fn prunes_old_changes_but_not_unreflected_ones() {
+        let conn = db();
+        let mut one = Folder::new();
+        one.insert("/memories/a.md".into(), "x".into());
+        for scope in ["server:1", "server:2", "dm:3"] {
+            save(&conn, scope, &Folder::new(), &one, 7, 100).unwrap();
+        }
+        save(&conn, "server:1", &one, &Folder::new(), 7, 500).unwrap();
+        // Server 1 reflected at 200: its change at 100 can go, the one at 500 stays.
+        // Server 2 never reflected, so it keeps everything; the DM has no reflections.
+        set_reflected(&conn, "server:1", 200).unwrap();
+        assert_eq!(prune_changes(&conn, 1000).unwrap(), 2);
+        let left: Vec<(String, i64)> = conn
+            .prepare("SELECT scope, at FROM memory_changes ORDER BY scope, at")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            left,
+            vec![("server:1".to_string(), 500), ("server:2".to_string(), 100)]
+        );
+        // Nothing is older than the cutoff: nothing goes.
+        assert_eq!(prune_changes(&conn, 50).unwrap(), 0);
     }
 
     #[test]

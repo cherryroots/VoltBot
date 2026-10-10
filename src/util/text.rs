@@ -11,7 +11,7 @@ const MAX_TEXT_BYTES: usize = 200 * 1024;
 
 /// The text attachments (`.txt`, `.md`, code files...) of a message, downloaded and tagged.
 /// Empty when there are none. Files that fail to download are skipped with a warning.
-pub async fn attachment_text(client: &reqwest::Client, msg: &Message) -> String {
+pub async fn attachment_text(msg: &Message) -> String {
     let mut blocks = Vec::new();
     let text_files = msg.attachments.iter().filter(|a| {
         a.content_type
@@ -19,7 +19,7 @@ pub async fn attachment_text(client: &reqwest::Client, msg: &Message) -> String 
             .is_some_and(|t| t.starts_with("text/"))
     });
     for attachment in text_files {
-        match download(client, &attachment.url, MAX_TEXT_BYTES).await {
+        match download(&attachment.url, MAX_TEXT_BYTES).await {
             Ok(data) => blocks.push(format!(
                 "<attachment>\n<name>{}</name>\n<text>\n{}\n</text>\n</attachment>",
                 attachment.filename,

@@ -47,6 +47,10 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
     let web = reqwest::Client::builder()
         .user_agent(concat!("VoltBot/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
+        // A response that sends nothing for this long fails instead of hanging forever.
+        // Generous, since AI streams can go quiet while the model thinks (Claude sends a
+        // ping now and then). Links from messages are downloaded with `media::safe_client`.
+        .read_timeout(Duration::from_secs(5 * 60))
         .build()
         .context("creating the HTTP client")?;
 
@@ -57,6 +61,8 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
     let migration_features = features.clone();
     db.call(move |conn| {
         db::migrate(conn, "core", db::CORE_MIGRATIONS)?;
+        // Claude's saved uploads (see ai/claude/uploads.rs).
+        db::migrate(conn, "claude", ai::claude::UPLOAD_MIGRATIONS)?;
         for feature in migration_features.iter() {
             db::migrate(conn, feature.name(), feature.migrations())?;
         }
@@ -84,7 +90,7 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
     let mut commands = Vec::new();
     for feature in features.iter() {
         for mut command in feature.commands() {
-            command.category = Some(feature.name().into());
+            set_category(&mut command, feature.name());
             commands.push(command);
         }
     }
@@ -152,7 +158,12 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
                     );
                 }
 
-                register_commands(ctx, ready, framework).await?;
+                // `setup` only ever runs once, so if it failed the bot would stay online
+                // but never answer. Slash commands failing to register isn't worth that:
+                // the ones from the last start keep working.
+                if let Err(err) = register_commands(ctx, ready, framework).await {
+                    error!("{err:#}");
+                }
                 dispatcher::spawn_bot_events(&bot);
 
                 let mut started = Vec::new();
@@ -208,6 +219,15 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
 
 /// Registers the slash commands globally, and removes per-server commands that voltgpt
 /// registered under the same application, so they don't show up twice.
+/// Marks `command` and its subcommands as `feature`'s. The gate check looks at the command
+/// that runs, which for `/memory show` is `show`, so subcommands need it too.
+fn set_category(command: &mut poise::Command<BotCtx, crate::core::Error>, feature: &'static str) {
+    command.category = Some(feature.into());
+    for sub in &mut command.subcommands {
+        set_category(sub, feature);
+    }
+}
+
 async fn register_commands(
     ctx: &serenity::Context,
     ready: &serenity::Ready,

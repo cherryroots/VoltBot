@@ -20,6 +20,8 @@ use crate::core::{BotCtx, BotEvent, Result, user_error};
 const SERVER_ONLY: &str = "The wheel only works in a server.";
 const NO_GAME: &str = "There's no game running. Start one with /wheel_status.";
 const NOT_CURRENT: &str = "Only the current round can be changed from this message.";
+const SEASON_CHANGED: &str =
+    "The season changed since this confirmation was made. Run /reset_wheel again.";
 
 /// A season as loaded, and whether it's the one being played.
 pub struct Game {
@@ -140,7 +142,10 @@ pub async fn on_component(ctx: &BotCtx, i: &ComponentInteraction, action: &str) 
             round,
             message,
         }) => picked(ctx, i, guild, kind, round, MessageId::new(message)).await,
-        Some(Action::Reset { keep_options }) => reset(ctx, i, guild, keep_options).await,
+        Some(Action::Reset {
+            keep_options,
+            season,
+        }) => confirm_reset(ctx, i, guild, keep_options, season).await,
         Some(Action::Help { season }) => help(ctx, i, guild, season).await,
         Some(Action::Rename { round }) => rename(ctx, i, guild, round).await,
         Some(Action::Stake {
@@ -152,7 +157,9 @@ pub async fn on_component(ctx: &BotCtx, i: &ComponentInteraction, action: &str) 
         Some(Action::Other { round, on, message }) => {
             other_amount(ctx, i, guild, round, on, message).await
         }
-        Some(Action::Amount { .. } | Action::Name { .. }) | None => {
+        // A confirmation from before the confirm modal: it doesn't say which season it ends.
+        None if action.starts_with("reset:") => Err(user_error(SEASON_CHANGED)),
+        Some(Action::Amount { .. } | Action::Name { .. } | Action::NewSeason { .. }) | None => {
             bail!("unknown action {action:?}")
         }
     }
@@ -165,6 +172,10 @@ pub async fn on_modal(ctx: &BotCtx, i: &ModalInteraction, action: &str) -> Resul
             amount_entered(ctx, i, guild, round, on, message).await
         }
         Some(Action::Name { round }) => name_entered(ctx, i, guild, round).await,
+        Some(Action::NewSeason {
+            keep_options,
+            season,
+        }) => reset(ctx, i, guild, keep_options, season).await,
         _ => bail!("unknown modal {action:?}"),
     }
 }
@@ -623,20 +634,57 @@ async fn name_entered(
     Ok(())
 }
 
-/// The confirm button of `/reset_wheel`.
-async fn reset(
+/// The button of `/reset_wheel`: opens the confirm modal, if the season it was made for is
+/// still the one being played.
+async fn confirm_reset(
     ctx: &BotCtx,
     i: &ComponentInteraction,
     guild: GuildId,
     keep_options: bool,
+    season: i64,
 ) -> Result<()> {
     require_admin(ctx, i.user.id, "start a new season")?;
+    // Checked here too, so an old confirmation fails before anyone types in the modal.
+    let active = ctx
+        .db
+        .call(move |conn| Ok(store::active_season(conn, guild.get())?))
+        .await?;
+    if active.unwrap_or(0) != season {
+        return Err(user_error(SEASON_CHANGED));
+    }
+    let modal = ui::new_season_modal(keep_options, season);
+    i.create_response(&ctx.http, CreateInteractionResponse::Modal(modal))
+        .await?;
+    Ok(())
+}
+
+/// The confirm modal of `/reset_wheel`: ends season `season` (0: none) and starts the next.
+async fn reset(
+    ctx: &BotCtx,
+    i: &ModalInteraction,
+    guild: GuildId,
+    keep_options: bool,
+    season: i64,
+) -> Result<()> {
+    require_admin(ctx, i.user.id, "start a new season")?;
+    if !ui::confirmed(&modal_value(i).unwrap_or_default()) {
+        return Err(user_error(format!(
+            "Type {} to start a new season.",
+            ui::CONFIRM_WORD
+        )));
+    }
     let number = ctx
         .db
         .call(move |conn| {
             let tx = conn.transaction()?;
+            // Checked in the same transaction that starts the season, so of two submits of
+            // the same confirmation only the first starts one.
+            let active = store::active_season(&tx, guild.get())?;
+            if active.unwrap_or(0) != season {
+                return Err(user_error(SEASON_CHANGED));
+            }
             let mut options = Vec::new();
-            if let Some(old) = store::active_season(&tx, guild.get())? {
+            if let Some(old) = active {
                 if keep_options {
                     options = store::load_season(&tx, old)?.options;
                 }
@@ -650,6 +698,7 @@ async fn reset(
         .await?;
     info!("started season {number}");
     let text = format!("Started season {number}. Show it with /wheel_status.");
+    // Replaces the confirmation the modal came from, so its button is gone.
     i.create_response(&ctx.http, update_text(text)).await?;
     Ok(())
 }
@@ -699,7 +748,7 @@ async fn edit_status(
     }
 }
 
-/// The text typed into the bet modal.
+/// The text typed into a modal (each wheel modal has one field).
 fn modal_value(i: &ModalInteraction) -> Option<String> {
     i.data
         .components

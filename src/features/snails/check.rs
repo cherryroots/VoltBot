@@ -1,14 +1,15 @@
 //! "Check Snail": has this message's link or picture been posted in the server before?
 
 use anyhow::Context as _;
+use chrono::Utc;
 use image::DynamicImage;
 use poise::CreateReply;
 use serenity::all::{ChannelId, CreateAllowedMentions, GuildId, Message, MessageId};
 use tracing::debug;
 
 use super::fingerprint::{self, Fingerprint};
-use super::index;
-use super::store::{self, Candidate, Indexed, Posted};
+use super::index::{self, LoadedPicture};
+use super::store::{self, Candidate, Failure, Indexed, Posted};
 use super::{backfill, collect};
 use crate::core::{BotCtx, Context, Result};
 
@@ -25,13 +26,22 @@ pub async fn check_snail(ctx: Context<'_>, msg: Message) -> Result<()> {
         .context("guild_only command without a server")?;
     // Downloads and the detail check take longer than Discord's 3 seconds.
     ctx.defer_ephemeral().await?;
-    let snails = find_snails(ctx.data(), guild, &msg).await?;
-    let text = match snails {
+    let text = match find_snails(ctx.data(), guild, &msg).await? {
         None => "This message has no links or pictures to check.".to_string(),
-        Some(snails) if snails.is_empty() => {
-            "No snails: this hasn't been posted here before.".to_string()
+        Some((snails, failed)) => {
+            let mut text = if snails.is_empty() {
+                "No snails: this hasn't been posted here before.".to_string()
+            } else {
+                describe(guild, &snails)
+            };
+            if failed > 0 {
+                text.push_str(&format!(
+                    "\n({failed} picture(s) couldn't be downloaded, so they weren't checked. \
+                     They'll be retried later.)"
+                ));
+            }
+            text
         }
-        Some(snails) => describe(guild, &snails),
     };
     ctx.send(
         CreateReply::default()
@@ -49,36 +59,73 @@ struct Snail {
     same_link: bool,
 }
 
-/// The earlier posts, oldest first. None when the message has nothing to check.
-async fn find_snails(ctx: &BotCtx, guild: GuildId, msg: &Message) -> Result<Option<Vec<Snail>>> {
-    let keys = index::link_keys(ctx, msg).await;
-    let pictures = index::load_pictures(ctx, msg).await;
-    if keys.is_empty() && pictures.is_empty() {
+/// The earlier posts, oldest first, and how many pictures failed to load. None when the
+/// message has nothing to check.
+async fn find_snails(
+    ctx: &BotCtx,
+    guild: GuildId,
+    msg: &Message,
+) -> Result<Option<(Vec<Snail>, usize)>> {
+    let keys = index::link_keys(msg).await;
+    let (pictures, failed) = index::load_pictures(msg).await;
+    if keys.is_empty() && pictures.is_empty() && failed.is_empty() {
         return Ok(None);
     }
-    save_if_new(ctx, guild, msg, &keys, &pictures).await?;
-    Ok(Some(
-        earlier_posts(ctx, guild, msg, &keys, &pictures, false).await?,
-    ))
+    let failed_count = failed.len();
+    save_if_new(ctx, guild, msg, &keys, &pictures, failed).await?;
+    let snails = earlier_posts(ctx, guild, msg, &keys, &pictures, false).await?;
+    Ok(Some((snails, failed_count)))
 }
 
-/// A new message as it arrives: saves its links and pictures, and if it's a snail, notes
-/// that for the control panel's count. Nothing is posted: snails are only pointed out when
-/// someone asks with Check Snail.
+/// A new message, or one that changed (an edit, a late link preview, or a message read by
+/// the startup catch-up): saves its links and pictures, and if what's new in it is a snail,
+/// notes that for the control panel's count. A message counts once however often it
+/// changes. Nothing is posted: snails are only pointed out when someone asks with Check
+/// Snail.
 pub async fn on_new_message(ctx: &BotCtx, guild: GuildId, msg: &Message) -> Result<()> {
-    let keys = index::link_keys(ctx, msg).await;
-    let pictures = index::load_pictures(ctx, msg).await;
-    if keys.is_empty() && pictures.is_empty() {
+    let synced = index::sync_message(ctx, guild, msg).await?;
+    count_if_snail(ctx, guild, msg, &synced.new_links, &synced.new_pictures).await
+}
+
+/// A failed picture of `msg` downloaded on retry (and was saved): checked like a new
+/// picture, so a snail whose picture was slow to load still counts.
+pub async fn on_retried_picture(
+    ctx: &BotCtx,
+    guild: GuildId,
+    msg: &Message,
+    picture: LoadedPicture,
+) -> Result<()> {
+    count_if_snail(ctx, guild, msg, &[], &[picture]).await
+}
+
+/// Counts `msg` as caught if any of `links` or `pictures` (what's new in it) was posted
+/// before. Only what's new is checked: the rest was checked when it arrived. A message is
+/// counted once.
+async fn count_if_snail(
+    ctx: &BotCtx,
+    guild: GuildId,
+    msg: &Message,
+    links: &[String],
+    pictures: &[LoadedPicture],
+) -> Result<()> {
+    if links.is_empty() && pictures.is_empty() {
         return Ok(());
     }
-    save_if_new(ctx, guild, msg, &keys, &pictures).await?;
-    if earlier_posts(ctx, guild, msg, &keys, &pictures, true)
+    let id = msg.id.get();
+    if ctx
+        .db
+        .call(move |conn| Ok(store::is_caught(conn, id)?))
+        .await?
+    {
+        return Ok(());
+    }
+    if earlier_posts(ctx, guild, msg, links, pictures, true)
         .await?
         .is_empty()
     {
         return Ok(());
     }
-    let (g, id, author) = (guild.get(), msg.id.get(), msg.author.id.get());
+    let (g, author) = (guild.get(), msg.author.id.get());
     let at = msg.timestamp.unix_timestamp();
     ctx.db
         .call(move |conn| Ok(store::record_caught(conn, g, id, author, at)?))
@@ -92,7 +139,7 @@ async fn earlier_posts(
     guild: GuildId,
     msg: &Message,
     keys: &[String],
-    pictures: &[(usize, DynamicImage, Fingerprint)],
+    pictures: &[LoadedPicture],
     first_only: bool,
 ) -> Result<Vec<Snail>> {
     let mut snails = Vec::new();
@@ -114,12 +161,12 @@ async fn earlier_posts(
         }
     }
 
-    let checked: Vec<Fingerprint> = pictures.iter().map(|(_, _, fp)| fp.clone()).collect();
+    let checked: Vec<Fingerprint> = pictures.iter().map(|p| p.fp.clone()).collect();
     for candidate in close_pictures(ctx, g, checked, before).await? {
         if snails.iter().any(|s| s.posted == candidate.posted) {
             continue;
         }
-        let image = &pictures[candidate.checked].1;
+        let image = &pictures[candidate.checked].image;
         if same_picture(ctx, &candidate, image).await? {
             snails.push(Snail {
                 posted: candidate.posted,
@@ -134,13 +181,15 @@ async fn earlier_posts(
     Ok(snails)
 }
 
-/// Saves the checked message too, so later checks find it.
+/// Saves the checked message too, so later checks find it. Pictures that failed go on the
+/// retry list.
 async fn save_if_new(
     ctx: &BotCtx,
     guild: GuildId,
     msg: &Message,
     keys: &[String],
-    pictures: &[(usize, DynamicImage, Fingerprint)],
+    pictures: &[LoadedPicture],
+    failed: Vec<Failure>,
 ) -> Result<()> {
     let found = Indexed {
         guild: guild.get(),
@@ -148,13 +197,17 @@ async fn save_if_new(
         message: msg.id.get(),
         author: msg.author.id.get(),
         links: keys.to_vec(),
-        pictures: pictures.iter().map(|(p, _, fp)| (*p, fp.clone())).collect(),
+        pictures: pictures.iter().map(LoadedPicture::stored).collect(),
+        failed,
+        // Only saved when it wasn't read before, so nothing failed before.
+        waiting: Vec::new(),
     };
+    let now = Utc::now().timestamp();
     ctx.db
         .call(move |conn| {
             if !store::is_indexed(conn, found.message)? {
                 let tx = conn.transaction()?;
-                store::save(&tx, &found)?;
+                store::save(&tx, &found, now)?;
                 tx.commit()?;
             }
             Ok(())
@@ -201,7 +254,8 @@ async fn close_pictures(
     Ok(unique)
 }
 
-/// Reads a stored message again. None (and forgotten) if it was deleted.
+/// Reads a stored message again. None (and forgotten) if it was deleted; None (but kept) if
+/// the bot can't read it right now, like a channel it lost access to.
 async fn still_there(ctx: &BotCtx, posted: &Posted) -> Result<Option<Message>> {
     let channel = ChannelId::new(posted.channel);
     match channel
@@ -216,6 +270,13 @@ async fn still_there(ctx: &BotCtx, posted: &Posted) -> Result<Option<Message>> {
                 .await?;
             Ok(None)
         }
+        Err(err) if backfill::is_no_access(&err) => {
+            debug!(
+                message = posted.message,
+                "can't read an earlier message: {err}"
+            );
+            Ok(None)
+        }
         Err(err) => Err(err).context("reading an earlier message"),
     }
 }
@@ -228,7 +289,7 @@ async fn same_picture(ctx: &BotCtx, candidate: &Candidate, image: &DynamicImage)
     let Some(picture) = collect::pictures(&msg).into_iter().nth(candidate.position) else {
         return Ok(false);
     };
-    let earlier = match index::load_picture(ctx, &picture).await {
+    let earlier = match index::load_picture(&picture).await {
         Ok(img) => img,
         Err(err) => {
             debug!("couldn't load the earlier picture for the detail check: {err:#}");

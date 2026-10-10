@@ -7,12 +7,15 @@
 //! and videos as grids of frames (see [`frames`](super::frames)).
 
 use std::collections::HashSet;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use base64::Engine as _;
 use reqwest::Url;
+use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use serenity::all::{Http, Message};
-use std::time::Duration;
 use tracing::warn;
 
 use super::frames;
@@ -21,6 +24,9 @@ use super::frames;
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 /// GIFs and videos bigger than this aren't downloaded. Discord's own upload limit is 100 MB.
 const MAX_VIDEO_BYTES: usize = 100 * 1024 * 1024;
+/// How long one download may take in all. The download client only limits connecting and
+/// silence, so without this a server that trickles bytes could hold up a reply for long.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MediaKind {
@@ -182,7 +188,10 @@ pub fn links(text: &str) -> Vec<&str> {
             let start = word.find("https://").or_else(|| word.find("http://"))?;
             let link = &word[start..];
             let link = link.split('>').next().unwrap_or(link);
-            Some(link.trim_end_matches([')', ']', '.', ',', '!', '?', '"', '\'']))
+            // Also markdown around the link: ||spoiler||, **bold**, `code`...
+            Some(link.trim_end_matches([
+                ')', ']', '.', ',', '!', '?', '"', '\'', '|', '*', '_', '~', '`',
+            ]))
         })
         .collect()
 }
@@ -204,13 +213,161 @@ pub async fn with_previews(http: &Http, msg: &Message) -> Message {
     }
 }
 
-/// Downloads `url`, giving up once it is bigger than `max_bytes`.
-pub async fn download(
-    client: &reqwest::Client,
-    url: &str,
-    max_bytes: usize,
-) -> anyhow::Result<Vec<u8>> {
-    let mut response = client.get(url).send().await?.error_for_status()?;
+// ---- Safe downloads ----
+//
+// Links in messages are written by anyone, so a download must not reach the bot's own
+// machine or home network (like http://127.0.0.1:8080/admin or the router at 192.168.1.1).
+// Three checks, because each closes a different gap:
+// - the link itself must not name a local host or a private address (`check_url`);
+// - a name is looked up first, and private addresses it points to are dropped
+//   (`PublicOnly`), so a public-looking name can't lead home either;
+// - every redirect is checked like the first link (the client's redirect policy).
+
+/// The client every download uses, with the checks above. It skips the system proxy: through
+/// a proxy, the bot can't see which address a name really leads to.
+static SAFE_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent(concat!("VoltBot/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        // Same as the main client in main.rs: a server that goes quiet this long fails.
+        .read_timeout(Duration::from_secs(5 * 60))
+        .dns_resolver(Arc::new(PublicOnly))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                attempt.error("too many redirects")
+            } else if let Err(err) = check_url(attempt.url().as_str()) {
+                attempt.error(err)
+            } else {
+                attempt.follow()
+            }
+        }))
+        .no_proxy()
+        .build()
+        .expect("building the download client")
+});
+
+/// The HTTP client for fetching links from messages: refuses local and private addresses,
+/// at every redirect too.
+pub fn safe_client() -> &'static reqwest::Client {
+    &SAFE_CLIENT
+}
+
+/// Refuses links that aren't http(s), or that name a local host or a private address.
+/// Names are checked again when they're looked up (see `PublicOnly`).
+pub fn check_url(url: &str) -> Result<(), String> {
+    let url = Url::parse(url).map_err(|err| format!("not a link: {err}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!("{} links aren't downloaded", url.scheme()));
+    }
+    let host = url.host_str().unwrap_or("");
+    // IPv6 addresses come in brackets. Odd ways of writing an IPv4 address (2130706433,
+    // 0x7f.1) are already turned into the normal form by the parser.
+    let refused = match host.trim_start_matches('[').trim_end_matches(']').parse() {
+        Ok(ip) => !is_public(ip),
+        Err(_) => {
+            let name = host.trim_end_matches('.').to_ascii_lowercase();
+            name.is_empty() || name == "localhost" || name.ends_with(".localhost")
+        }
+    };
+    if refused {
+        return Err(format!("{host} is a local or private address"));
+    }
+    Ok(())
+}
+
+/// Whether an address is on the public internet: not this machine, a home or company
+/// network, link-local, multicast or otherwise reserved.
+fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, ..] = ip.octets();
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_multicast()
+                || a == 0
+                // Carrier-grade NAT, 100.64.0.0/10.
+                || (a == 100 && (64..128).contains(&b))
+                // IETF protocol assignments, 192.0.0.0/24.
+                || (a == 192 && b == 0 && ip.octets()[2] == 0)
+                // Benchmarking, 198.18.0.0/15.
+                || (a == 198 && (b == 18 || b == 19))
+                // Reserved, 240.0.0.0/4.
+                || a >= 240)
+        }
+        IpAddr::V6(ip) => {
+            // An IPv4 address inside an IPv6 one is checked as IPv4, since it can lead to
+            // it: mapped (::ffff:127.0.0.1), IPv4-compatible (::127.0.0.1), NAT64
+            // (64:ff9b::127.0.0.1) and 6to4 (2002:7f00:1::, the IPv4 in segments 1-2).
+            let s = ip.segments();
+            let o = ip.octets();
+            let tail = Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return is_public(IpAddr::V4(v4));
+            }
+            // IPv4-compatible: the first 96 bits are zero (:: and ::1 are checked below).
+            if s[..6] == [0; 6] && !(ip.is_unspecified() || ip.is_loopback()) {
+                return is_public(IpAddr::V4(tail));
+            }
+            // NAT64, 64:ff9b::/96. Translated to the IPv4 it holds, so check that.
+            if s[..6] == [0x64, 0xff9b, 0, 0, 0, 0] {
+                return is_public(IpAddr::V4(tail));
+            }
+            // 6to4, 2002::/16.
+            if s[0] == 0x2002 {
+                return is_public(IpAddr::V4(Ipv4Addr::new(o[2], o[3], o[4], o[5])));
+            }
+            let first = s[0];
+            !(ip.is_unspecified()
+                || ip.is_loopback()
+                || ip.is_multicast()
+                // Unique local, fc00::/7.
+                || (first & 0xfe00) == 0xfc00
+                // Link-local, fe80::/10.
+                || (first & 0xffc0) == 0xfe80)
+        }
+    }
+}
+
+/// Looks names up like normal, but keeps only public addresses.
+struct PublicOnly;
+
+impl Resolve for PublicOnly {
+    fn resolve(&self, name: Name) -> Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            // The port is replaced by the link's own; lookup_host just needs one.
+            let found: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|address| is_public(address.ip()))
+                .collect();
+            if found.is_empty() {
+                return Err(format!("{host} only leads to local or private addresses").into());
+            }
+            let addrs: Addrs = Box::new(found.into_iter());
+            Ok(addrs)
+        })
+    }
+}
+
+/// Downloads `url`, giving up once it is bigger than `max_bytes`. Local and private
+/// addresses are refused (see [`safe_client`]).
+pub async fn download(url: &str, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
+    check_url(url).map_err(anyhow::Error::msg)?;
+    fetch(safe_client(), url, max_bytes).await
+}
+
+/// The download itself, without the address checks (tests serve files from 127.0.0.1).
+async fn fetch(client: &reqwest::Client, url: &str, max_bytes: usize) -> anyhow::Result<Vec<u8>> {
+    let mut response = client
+        .get(url)
+        .timeout(DOWNLOAD_TIMEOUT)
+        .send()
+        .await?
+        .error_for_status()?;
     if let Some(length) = response.content_length()
         && length > max_bytes as u64
     {
@@ -248,15 +405,12 @@ impl ModelImage {
 
 /// Downloads `media` and returns the images a model should see: the image itself, or frame
 /// grids for a GIF or video.
-pub async fn load_for_model(
-    client: &reqwest::Client,
-    media: &Media,
-) -> anyhow::Result<Vec<ModelImage>> {
+pub async fn load_for_model(media: &Media) -> anyhow::Result<Vec<ModelImage>> {
     let max_bytes = match media.kind {
         MediaKind::Image => MAX_IMAGE_BYTES,
         MediaKind::Gif | MediaKind::Video => MAX_VIDEO_BYTES,
     };
-    let data = download(client, &media.url, max_bytes)
+    let data = download(&media.url, max_bytes)
         .await
         .with_context(|| format!("downloading {}", media.url))?;
     if media.kind == MediaKind::Image {
@@ -330,6 +484,14 @@ mod tests {
             ]
         );
         assert!(links("no links here").is_empty());
+        assert_eq!(
+            links("||https://x.com/a/status/123|| **https://b.com/c** `https://d.com/e`"),
+            [
+                "https://x.com/a/status/123",
+                "https://b.com/c",
+                "https://d.com/e"
+            ]
+        );
     }
 
     #[test]
@@ -440,11 +602,68 @@ mod tests {
     async fn download_respects_the_limit() {
         let client = reqwest::Client::new();
         let url = serve_once(vec![7; 100]).await;
-        assert_eq!(download(&client, &url, 100).await.unwrap(), vec![7; 100]);
+        assert_eq!(fetch(&client, &url, 100).await.unwrap(), vec![7; 100]);
 
         let url = serve_once(vec![7; 101]).await;
-        let err = download(&client, &url, 100).await.unwrap_err();
+        let err = fetch(&client, &url, 100).await.unwrap_err();
         assert!(err.to_string().contains("limit"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn download_refuses_local_addresses() {
+        let url = serve_once(vec![7; 10]).await;
+        let err = download(&url, 100).await.unwrap_err();
+        assert!(err.to_string().contains("private"), "{err}");
+        // A name that leads to this machine is refused when it's looked up.
+        let err = fetch(safe_client(), "http://localhost:1/x.png", 100)
+            .await
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("private"), "{err:#}");
+    }
+
+    #[test]
+    fn checks_addresses() {
+        for bad in [
+            "http://127.0.0.1/x",
+            "http://localhost:8080/",
+            "http://LOCALHOST./",
+            "http://admin.localhost/",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://169.254.169.254/latest/meta-data",
+            "http://100.64.0.1/",
+            "http://0.0.0.0/",
+            "http://2130706433/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[fd00::1]/",
+            "http://[fe80::1]/",
+            "http://192.0.0.8/",
+            "http://198.18.0.1/",
+            "http://198.19.255.255/",
+            "http://[::127.0.0.1]/",
+            "http://[::a00:1]/",
+            "http://[64:ff9b::127.0.0.1]/",
+            "http://[64:ff9b::a9fe:a9fe]/",
+            "http://[2002:7f00:1::]/",
+            "http://[2002:c0a8:101::1]/",
+            "file:///etc/passwd",
+            "ftp://example.com/x",
+        ] {
+            assert!(check_url(bad).is_err(), "{bad} should be refused");
+        }
+        for good in [
+            "https://cdn.discordapp.com/a.png",
+            "http://8.8.8.8/",
+            "https://[2606:4700::1111]/",
+            "http://198.20.0.1/",
+            "http://192.0.1.1/",
+            "http://[64:ff9b::808:808]/",
+            "http://[2002:808:808::]/",
+        ] {
+            assert!(check_url(good).is_ok(), "{good} should be allowed");
+        }
     }
 
     #[test]

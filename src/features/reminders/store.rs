@@ -171,6 +171,18 @@ pub fn mark_sent(conn: &Connection, id: i64, now: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// Snoozes a delivered reminder of `user_id`: it becomes pending again, due at `fire_at`.
+/// One UPDATE that only matches a sent reminder, so two quick presses can't snooze it
+/// twice. Returns whether it was snoozed.
+pub fn snooze(conn: &Connection, id: i64, user_id: u64, fire_at: i64) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE reminders SET fire_at = ?3, next_try_at = ?3, attempts = 0, sent_at = NULL
+         WHERE id = ?1 AND user_id = ?2 AND sent_at IS NOT NULL",
+        params![id, user_id, fire_at],
+    )?;
+    Ok(changed > 0)
+}
+
 /// Records a failed send and when to try again.
 pub fn mark_failed(conn: &Connection, id: i64, next_try_at: i64) -> rusqlite::Result<()> {
     conn.execute(
@@ -354,6 +366,21 @@ mod tests {
         let sent = add(&mut conn, &new(1, 100)).unwrap();
         mark_sent(&conn, sent, 100).unwrap();
         assert!(!delete_pending(&conn, sent, 1).unwrap());
+    }
+
+    #[test]
+    fn snooze_only_once() {
+        let mut conn = conn();
+        let id = add(&mut conn, &new(1, 100)).unwrap();
+        // Not delivered yet, or someone else's: nothing to snooze.
+        assert!(!snooze(&conn, id, 1, 500).unwrap());
+        mark_sent(&conn, id, 100).unwrap();
+        assert!(!snooze(&conn, id, 2, 500).unwrap());
+
+        assert!(snooze(&conn, id, 1, 500).unwrap());
+        assert!(!snooze(&conn, id, 1, 600).unwrap());
+        assert_eq!(next_try_at(&conn).unwrap(), Some(500));
+        assert_eq!(get(&conn, id).unwrap().unwrap().fire_at, 500);
     }
 
     #[test]

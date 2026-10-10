@@ -72,31 +72,16 @@ pub fn parse_reminder(text: &str) -> Result<Parsed, String> {
     // 1. The time comes first: "in 2h check the oven".
     let mut input = text;
     let leading_error = match when.parse_next(&mut input) {
-        Ok(when) => {
-            return Ok(Parsed {
-                when,
-                message: clean_message(input),
-            });
-        }
+        Ok(when) => return Ok(day_then_time(when, input)),
         Err(err) => (text.len() - input.len(), err),
     };
 
-    // 2. The time comes last: "check the oven in 2h". Try every word as the start of the
-    //    time, from the left, and take the first one that reads all the way to the end.
-    let word_starts = text
-        .char_indices()
-        .filter(|(_, c)| c.is_whitespace())
-        .map(|(i, c)| i + c.len_utf8());
-    for start in word_starts {
-        let mut tail = &text[start..];
-        if let Ok(when) = when.parse_next(&mut tail)
-            && tail.trim_end_matches(['.', '!', '?', ' ']).is_empty()
-        {
-            return Ok(Parsed {
-                when,
-                message: clean_message(&text[..start]),
-            });
-        }
+    // 2. The time comes last: "check the oven in 2h".
+    if let Some((start, when)) = time_at_end(text) {
+        return Ok(Parsed {
+            when,
+            message: clean_message(&text[..start]),
+        });
     }
 
     // 3. Neither worked. If the start looked like a time ("in ...", "at ..."), say where it
@@ -115,6 +100,57 @@ pub fn parse_reminder(text: &str) -> Result<Parsed, String> {
         }
         _ => Err("I couldn't find a time in that.".to_string()),
     }
+}
+
+/// The time was at the start and `rest` is the message after it. For "tomorrow call mom at
+/// 5pm" the start only gave a day, so the time at the end of `rest` is used with it.
+fn day_then_time(when: When, rest: &str) -> Parsed {
+    if let When::At {
+        day: Some(day),
+        time: None,
+        ..
+    } = when
+        && let Some((
+            start,
+            When::At {
+                day: None,
+                time,
+                zone,
+            },
+        )) = time_at_end(rest)
+    {
+        return Parsed {
+            when: When::At {
+                day: Some(day),
+                time,
+                zone,
+            },
+            message: clean_message(&rest[..start]),
+        };
+    }
+    Parsed {
+        when,
+        message: clean_message(rest),
+    }
+}
+
+/// Finds a time at the end of `text`: tries every word as the start of the time, from the
+/// left, and takes the first one that reads all the way to the end. Returns where the time
+/// starts and the time.
+fn time_at_end(text: &str) -> Option<(usize, When)> {
+    let word_starts = text
+        .char_indices()
+        .filter(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8());
+    for start in word_starts {
+        let mut tail = &text[start..];
+        if let Ok(when) = when.parse_next(&mut tail)
+            && tail.trim_end_matches(['.', '!', '?', ' ']).is_empty()
+        {
+            return Some((start, when));
+        }
+    }
+    None
 }
 
 /// Reads a time on its own, like "in 2h" or "tomorrow at 9am". Used by the chat tool, where
@@ -140,7 +176,7 @@ pub fn resolve(when: &When, now: DateTime<Utc>, home: Tz) -> Result<DateTime<Utc
         When::In(parts) => {
             let mut t = now;
             for &(n, unit) in parts {
-                t = add(t, n, unit).ok_or_else(too_far)?;
+                t = add(t, n, unit, home).ok_or_else(too_far)?;
             }
             Ok(t)
         }
@@ -414,11 +450,12 @@ fn zone(input: &mut &str) -> ModalResult<Tz> {
 // ---------------------------------------------------------------------------------------
 
 /// Matches `w` ignoring case, as a whole word: "in" matches "in 2h" but not "inside".
-/// Digits may follow, so "h" still matches in "2h30m".
+/// Digits may follow, so "h" still matches in "2h30m". An apostrophe counts as part of the
+/// word, so "tomorrow's standup" isn't read as "tomorrow".
 fn word<'s>(w: &'static str) -> impl Parser<&'s str, &'s str, ErrMode<ContextError>> {
     terminated(
         literal(Caseless(w)),
-        not(one_of(|c: char| c.is_alphabetic())),
+        not(one_of(|c: char| c.is_alphabetic() || c == '\'' || c == '’')),
     )
 }
 
@@ -463,30 +500,42 @@ fn expected(err: &ContextError) -> &'static str {
         .unwrap_or("a time")
 }
 
-/// Strips the glue around a message: "in 2h: to check the oven" becomes "check the oven".
+/// Strips the glue around a message: "in 2h: to check the oven" becomes "check the oven",
+/// and "in 2h and call mom" becomes "call mom".
 fn clean_message(s: &str) -> String {
     let s = s.trim().trim_start_matches([':', '-', ',']).trim_start();
-    let s = match s.get(..3) {
-        Some(to) if to.eq_ignore_ascii_case("to ") => &s[3..],
-        _ => s,
-    };
+    let s = strip_word(s, "and ");
+    let s = strip_word(s, "to ");
     s.trim()
         .trim_end_matches([':', '-', ','])
         .trim_end()
         .to_string()
 }
 
-fn add(t: DateTime<Utc>, n: u32, unit: Unit) -> Option<DateTime<Utc>> {
-    let n64 = i64::from(n);
-    match unit {
-        Unit::Year => t.checked_add_months(Months::new(n.checked_mul(12)?)),
-        Unit::Month => t.checked_add_months(Months::new(n)),
-        Unit::Week => t.checked_add_signed(TimeDelta::try_weeks(n64)?),
-        Unit::Day => t.checked_add_signed(TimeDelta::try_days(n64)?),
-        Unit::Hour => t.checked_add_signed(TimeDelta::try_hours(n64)?),
-        Unit::Minute => t.checked_add_signed(TimeDelta::try_minutes(n64)?),
-        Unit::Second => t.checked_add_signed(TimeDelta::try_seconds(n64)?),
+/// `s` without `word` at its start, ignoring case.
+fn strip_word<'s>(s: &'s str, word: &str) -> &'s str {
+    match s.get(..word.len()) {
+        Some(start) if start.eq_ignore_ascii_case(word) => &s[word.len()..],
+        _ => s,
     }
+}
+
+/// Adds `n` units to `t`. Years, months, weeks and days move the date on the calendar in
+/// `zone` and keep the clock time there, so summer time doesn't shift the hour and "in 1
+/// month" on Jan 31 in Tokyo is Feb 28 in Tokyo. Hours, minutes and seconds are exact.
+fn add(t: DateTime<Utc>, n: u32, unit: Unit, zone: Tz) -> Option<DateTime<Utc>> {
+    let n64 = i64::from(n);
+    let local = t.with_timezone(&zone).naive_local();
+    let moved = match unit {
+        Unit::Year => local.checked_add_months(Months::new(n.checked_mul(12)?)),
+        Unit::Month => local.checked_add_months(Months::new(n)),
+        Unit::Week => local.checked_add_days(Days::new(u64::from(n) * 7)),
+        Unit::Day => local.checked_add_days(Days::new(n.into())),
+        Unit::Hour => return t.checked_add_signed(TimeDelta::try_hours(n64)?),
+        Unit::Minute => return t.checked_add_signed(TimeDelta::try_minutes(n64)?),
+        Unit::Second => return t.checked_add_signed(TimeDelta::try_seconds(n64)?),
+    }?;
+    to_utc(zone, moved.date(), moved.time()).ok()
 }
 
 /// A wall-clock time in `zone` as UTC. When summer time skips that hour, the hour after
@@ -567,6 +616,8 @@ mod tests {
                 "stretch",
             ),
             ("in 1h, 15 mins tea", TimeDelta::minutes(75), "tea"),
+            ("in 2h and call mom", TimeDelta::hours(2), "call mom"),
+            ("in 2h and to call mom", TimeDelta::hours(2), "call mom"),
             ("IN 2H shout", TimeDelta::hours(2), "shout"),
             ("in 3 months renew", TimeDelta::days(89), "renew"),
         ];
@@ -633,6 +684,61 @@ mod tests {
             (utc(2026, 12, 24, 17, 0), "christmas".into())
         );
         assert_eq!(run("2026-12-24 x").0, utc(2026, 12, 24, 9, 0));
+    }
+
+    #[test]
+    fn day_first_time_last() {
+        assert_eq!(
+            run("tomorrow call mom at 5pm"),
+            (utc(2026, 2, 23, 17, 0), "call mom".into())
+        );
+        assert_eq!(
+            run("friday dentist at 3:30pm CET."),
+            (utc(2026, 2, 27, 14, 30), "dentist".into())
+        );
+        // A time in the middle of the message stays in the message.
+        assert_eq!(
+            run("tomorrow at 3pm is the deadline"),
+            (utc(2026, 2, 23, 15, 0), "is the deadline".into())
+        );
+        assert_eq!(
+            run("tomorrow meet at 5pm friday"),
+            (utc(2026, 2, 23, 9, 0), "meet at 5pm friday".into())
+        );
+    }
+
+    #[test]
+    fn apostrophe_ends_no_word() {
+        assert_eq!(
+            run("tomorrow's standup at 3pm"),
+            (utc(2026, 2, 22, 15, 0), "tomorrow's standup".into())
+        );
+        assert_eq!(run("friday’s game at 3pm").1, "friday’s game");
+    }
+
+    #[test]
+    fn calendar_units_follow_the_users_zone() {
+        // Jan 31 00:00 in Tokyo is Jan 30 in UTC; a month later is Feb 28 in Tokyo.
+        let tokyo_jan_31 = utc(2026, 1, 30, 15, 0);
+        assert_eq!(
+            run_in("in 1 month x", tokyo_jan_31, Tz::Asia__Tokyo).0,
+            utc(2026, 2, 27, 15, 0)
+        );
+        // New York moves to summer time on Mar 8: "in 1 day" keeps 12:00 on the clock,
+        // "in 24h" doesn't.
+        let ny_noon = utc(2026, 3, 7, 17, 0);
+        assert_eq!(
+            run_in("in 1 day x", ny_noon, Tz::America__New_York).0,
+            utc(2026, 3, 8, 16, 0)
+        );
+        assert_eq!(
+            run_in("in 1 week x", ny_noon, Tz::America__New_York).0,
+            utc(2026, 3, 14, 16, 0)
+        );
+        assert_eq!(
+            run_in("in 24h x", ny_noon, Tz::America__New_York).0,
+            utc(2026, 3, 8, 17, 0)
+        );
     }
 
     #[test]

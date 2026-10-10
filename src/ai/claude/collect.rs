@@ -174,6 +174,9 @@ impl Collector {
     pub fn continue_after_pause(&mut self) {
         self.base = self.content.len();
         self.stop_reason = None;
+        // The usage was already added to the spend; the new response reports its own, and
+        // may leave out counts (like web searches) that would otherwise be added again.
+        self.usage = Usage::default();
     }
 
     /// Why Claude declined, like "cyber", when it did.
@@ -501,11 +504,13 @@ mod tests {
             &mut collector,
             &[
                 json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": "A"}}),
-                json!({"type": "message_delta", "delta": {"stop_reason": "pause_turn"}}),
+                json!({"type": "message_delta", "delta": {"stop_reason": "pause_turn"}, "usage": {"output_tokens": 5, "server_tool_use": {"web_search_requests": 1}}}),
             ],
         );
         assert_eq!(collector.stop_reason.as_deref(), Some("pause_turn"));
         collector.continue_after_pause();
+        // The paused response's usage was already counted.
+        assert_eq!(collector.usage, Usage::default());
         push_all(
             &mut collector,
             &[
