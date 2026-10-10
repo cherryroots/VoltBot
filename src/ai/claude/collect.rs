@@ -14,6 +14,7 @@ use anyhow::bail;
 use serde_json::{Value, json};
 use tracing::{debug, info};
 
+use crate::ai::fallback::ApiError;
 use crate::ai::{Activity, ChatEvent, ToolCall};
 
 #[derive(Debug, Default)]
@@ -37,13 +38,14 @@ pub struct Collector {
     pub usage: Usage,
 }
 
-/// Tokens of one response, for the log.
+/// Tokens of one response, for the log and what it cost.
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 pub struct Usage {
     pub input: u64,
     pub cache_read: u64,
     pub cache_write: u64,
     pub output: u64,
+    pub web_searches: u64,
 }
 
 /// A finished round.
@@ -144,12 +146,24 @@ impl Collector {
                 self.read_usage(&data["usage"]);
                 log_transformations(&data["input_transformations"]);
             }
-            "error" => bail!(
-                "Claude error: {}",
-                data["error"]["message"]
-                    .as_str()
-                    .unwrap_or("no reason given")
-            ),
+            // An error partway through, like being overloaded. It gets the status code the
+            // same error has as an HTTP answer, so the fallback reads it the same way.
+            "error" => {
+                let status = match data["error"]["type"].as_str() {
+                    Some("overloaded_error") => 529,
+                    Some("api_error") => 500,
+                    _ => 400,
+                };
+                return Err(ApiError {
+                    provider: "claude",
+                    status: reqwest::StatusCode::from_u16(status).unwrap_or_default(),
+                    message: data["error"]["message"]
+                        .as_str()
+                        .unwrap_or("no reason given")
+                        .to_string(),
+                }
+                .into());
+            }
             // "ping", "message_stop" and event types added later.
             _ => {}
         }
@@ -218,6 +232,9 @@ impl Collector {
         }
         if let Some(n) = get("output_tokens") {
             self.usage.output = n;
+        }
+        if let Some(n) = usage["server_tool_use"]["web_search_requests"].as_u64() {
+            self.usage.web_searches = n;
         }
     }
 
@@ -351,7 +368,7 @@ mod tests {
                 json!({"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "{\"zone\": "}}),
                 json!({"type": "content_block_delta", "index": 2, "delta": {"type": "input_json_delta", "partial_json": "\"UTC\"}"}}),
                 json!({"type": "content_block_stop", "index": 2}),
-                json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 50}}),
+                json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 50, "server_tool_use": {"web_search_requests": 1}}}),
                 json!({"type": "message_stop"}),
             ],
         );
@@ -370,7 +387,8 @@ mod tests {
                 input: 10,
                 cache_read: 900,
                 cache_write: 0,
-                output: 50
+                output: 50,
+                web_searches: 1,
             }
         );
         let finished = collector.finish();
@@ -541,5 +559,9 @@ mod tests {
             .push(&json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}))
             .unwrap_err();
         assert!(err.to_string().contains("Overloaded"));
+        assert_eq!(
+            crate::ai::fallback::outage(&err),
+            Some(crate::ai::fallback::Outage::Down)
+        );
     }
 }

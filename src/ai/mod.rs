@@ -7,7 +7,9 @@
 
 pub mod claude;
 mod complete;
+pub mod fallback;
 pub mod openai;
+mod spend;
 mod sse;
 
 use std::sync::Arc;
@@ -21,6 +23,7 @@ use crate::util::media::ModelImage;
 pub use claude::{Claude, ClaudeConfig};
 pub use complete::{ToolRunner, complete};
 pub use openai::{OpenAi, OpenAiConfig};
+pub use spend::{AdminKey, Spend};
 
 /// Who said something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +145,8 @@ pub struct ChatRequest {
     pub tools: Vec<ToolDef>,
     /// Requests with the same key share a cache, for example one per channel.
     pub cache_key: String,
+    /// What the request is for ("chat", "diary", ...), for what each job costs.
+    pub job: &'static str,
 }
 
 /// Something the model is busy with, shown in the reply's status line.
@@ -203,6 +208,9 @@ pub trait ChatProvider: Send + Sync {
 pub struct AiConfig {
     /// Which provider chats. Only this one's key is read from `.env`.
     pub provider: Provider,
+    /// The provider chat moves to while the main one is out of credit or down. Left out,
+    /// there's none.
+    pub fallback: Option<Provider>,
     pub openai: OpenAiConfig,
     pub claude: ClaudeConfig,
 }
@@ -217,11 +225,71 @@ pub enum Provider {
     Claude,
 }
 
+/// "Claude" for "claude", "OpenAI" for "openai".
+pub fn display_name(name: &str) -> &str {
+    match name {
+        "claude" => "Claude",
+        "openai" => "OpenAI",
+        other => other,
+    }
+}
+
 /// The AI services the bot has, set up from `.env` and `config.toml` at startup.
 #[derive(Clone, Default)]
 pub struct Ai {
     /// `None` when no API key is configured; chat then explains that it's off.
-    pub chat: Option<Arc<dyn ChatProvider>>,
+    main: Option<Arc<dyn ChatProvider>>,
+    /// Takes over while the main provider is out (see [`fallback`]).
+    backup: Option<Arc<dyn ChatProvider>>,
+    fallback: Option<Arc<fallback::State>>,
+    /// What Claude cost this month, when Claude is set up.
+    pub spend: Option<Spend>,
+}
+
+impl Ai {
+    pub fn new(
+        main: Option<Arc<dyn ChatProvider>>,
+        backup: Option<Arc<dyn ChatProvider>>,
+        spend: Option<Spend>,
+    ) -> Ai {
+        let (Some(inner), Some(backup)) = (main.clone(), backup) else {
+            return Ai {
+                main,
+                spend,
+                ..Ai::default()
+            };
+        };
+        // The main provider reports every answer, so a failure can move chat over.
+        let state = Arc::new(fallback::State::new(inner.name(), backup.name()));
+        let main: Arc<dyn ChatProvider> = Arc::new(fallback::Watched {
+            inner,
+            state: state.clone(),
+        });
+        Ai {
+            main: Some(main),
+            backup: Some(backup),
+            fallback: Some(state),
+            spend,
+        }
+    }
+
+    /// The provider for a new answer: the main one, or the backup while the main one is
+    /// out. Use the same provider for the whole answer, since its input is built for it.
+    pub fn chat(&self) -> Option<Arc<dyn ChatProvider>> {
+        match (&self.fallback, &self.backup) {
+            (Some(state), Some(backup)) if state.use_backup(chrono::Utc::now()) => {
+                Some(backup.clone())
+            }
+            _ => self.main.clone(),
+        }
+    }
+
+    /// The main provider's name, and why chat moved to the backup if it did.
+    pub fn switched(&self) -> Option<(&'static str, fallback::Switched)> {
+        let main = self.main.as_ref()?;
+        let switched = self.fallback.as_ref()?.switched()?;
+        Some((main.name(), switched))
+    }
 }
 
 /// The input for the next round, after the model asked for tools in `done` and they

@@ -174,8 +174,7 @@ impl Feature for Chat {
 
 fn provider(ctx: &BotCtx) -> Result<Arc<dyn ChatProvider>> {
     ctx.ai
-        .chat
-        .clone()
+        .chat()
         .ok_or_else(|| user_error("Chat is turned off: the bot has no AI key."))
 }
 

@@ -81,7 +81,7 @@ impl Chime {
 
     /// Rolls the dice for a message, and reads along if it hits.
     pub async fn on_message(&self, ctx: &BotCtx, msg: &Message) -> Result<()> {
-        let Some(guild) = msg.guild_id.filter(|_| ctx.ai.chat.is_some()) else {
+        let Some(guild) = msg.guild_id.filter(|_| ctx.ai.chat().is_some()) else {
             return Ok(());
         };
         // Messages to her get a real answer instead.
@@ -140,7 +140,7 @@ pub async fn speak(
     instructions: &str,
     mention: Option<UserId>,
 ) -> Result<()> {
-    let provider = ctx.ai.chat.clone().context("chat has no model")?;
+    let provider = ctx.ai.chat().context("chat has no model")?;
     let transcript = read_along(ctx, asker.guild, asker.channel, last).await?;
     let question = format!("{transcript}\n{instructions}");
     let context = answer::context_for(ctx, asker, true).await;
@@ -155,6 +155,7 @@ pub async fn speak(
         }]),
         tools,
         cache_key: format!("discord:{}", asker.channel),
+        job: "chime",
     };
     let runner = Runner {
         ctx: ctx.clone(),

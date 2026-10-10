@@ -59,7 +59,7 @@ async fn run(ctx: BotCtx) {
 }
 
 async fn reflect_due(ctx: &BotCtx) -> Result<()> {
-    if ctx.ai.chat.is_none() {
+    if ctx.ai.chat().is_none() {
         return Ok(());
     }
     let now = Utc::now().timestamp();
@@ -89,11 +89,7 @@ async fn reflect_due(ctx: &BotCtx) -> Result<()> {
 }
 
 async fn reflect(ctx: &BotCtx, scope: &str) -> Result<()> {
-    let provider = ctx
-        .ai
-        .chat
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("no model"))?;
+    let provider = ctx.ai.chat().ok_or_else(|| anyhow::anyhow!("no model"))?;
     let (folder, changes) = {
         let scope = scope.to_string();
         ctx.db
@@ -146,6 +142,7 @@ async fn reflect(ctx: &BotCtx, scope: &str) -> Result<()> {
         }]),
         tools: vec![tool::def()],
         cache_key: format!("memory:{scope}"),
+        job: "reflection",
     };
     let runner = tool::FolderRunner {
         ctx: ctx.clone(),

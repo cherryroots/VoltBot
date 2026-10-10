@@ -34,6 +34,7 @@ pub async fn complete(
         mut input,
         tools: defs,
         cache_key,
+        job,
     } = request;
     let mut completed = Completed::default();
     for _round in 0..max_rounds {
@@ -42,6 +43,7 @@ pub async fn complete(
             input: input.clone(),
             tools: defs.clone(),
             cache_key: cache_key.clone(),
+            job,
         };
         let mut events = provider.stream(request).await?;
         completed.text.clear();

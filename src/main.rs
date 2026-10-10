@@ -49,7 +49,6 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
         .connect_timeout(Duration::from_secs(10))
         .build()
         .context("creating the HTTP client")?;
-    let ai = ai_from_env(&config, &web);
 
     // Database: open, run every owner's migrations, then import voltgpt's data if present.
     let db = Db::open(&config.database)
@@ -67,6 +66,19 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
     .context("running migrations")?;
     let import_summary = import_legacy(&db, &features, &config).await;
     info!("database {} is ready", config.database);
+    let ai = ai_from_env(&config, &web, &db);
+    // With an Admin API key, Claude's spend comes from Anthropic's bill (see ai/spend.rs).
+    let admin_key = std::env::var("ANTHROPIC_ADMIN_KEY").unwrap_or_default();
+    if let Some(spend) = &ai.spend
+        && !admin_key.trim().is_empty()
+    {
+        if config.ai.claude.billed_spend {
+            let billing = ai::claude::billing::Billing::new(web.clone(), admin_key.trim().into());
+            tokio::spawn(spend.clone().follow_bill(billing));
+        } else {
+            spend.set_admin_key(ai::AdminKey::Unused);
+        }
+    }
 
     // Slash commands. The category remembers which feature a command belongs to, for gating.
     let mut commands = Vec::new();
@@ -212,36 +224,55 @@ async fn register_commands(
     Ok(())
 }
 
-/// Sets up the AI provider for chat: the one `provider` under `[ai]` names. Chat is off
-/// when that provider's key is missing from `.env`.
-fn ai_from_env(config: &Config, web: &reqwest::Client) -> ai::Ai {
-    let key = |name: &str| {
-        let key = std::env::var(name)
+/// Sets up the AI providers for chat: the one `provider` under `[ai]` names, and the
+/// `fallback` one if it's set. Chat is off when the main provider's key is missing from
+/// `.env`; a missing fallback key only means there's no fallback.
+fn ai_from_env(config: &Config, web: &reqwest::Client, db: &Db) -> ai::Ai {
+    // Claude's spend is tracked whether it's the main provider or the fallback.
+    let spend = ai::Spend::new(db.clone(), config.ai.claude.monthly_budget);
+    let make = |provider: ai::Provider| -> Option<Arc<dyn ai::ChatProvider>> {
+        let name = match provider {
+            ai::Provider::Claude => "ANTHROPIC_API_KEY",
+            ai::Provider::Openai => "OPENAI_TOKEN",
+        };
+        let Some(key) = std::env::var(name)
             .ok()
             .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty());
-        if key.is_none() {
-            warn!("{name} is not set in .env, so chat is off");
-        }
-        key
-    };
-    let chat: Option<Arc<dyn ai::ChatProvider>> = match config.ai.provider {
-        ai::Provider::Claude => key("ANTHROPIC_API_KEY")
-            .map(|key| Arc::new(ai::Claude::new(web.clone(), key, config.ai.claude.clone())) as _),
-        ai::Provider::Openai => key("OPENAI_TOKEN").map(|key| {
-            let base = std::env::var("OPENAI_BASE").ok();
-            Arc::new(ai::OpenAi::new(
+            .filter(|k| !k.is_empty())
+        else {
+            warn!("{name} is not set in .env, so {provider:?} can't chat");
+            return None;
+        };
+        Some(match provider {
+            ai::Provider::Claude => Arc::new(ai::Claude::new(
                 web.clone(),
                 key,
-                base.as_deref(),
+                config.ai.claude.clone(),
+                Some(spend.clone()),
+            )),
+            ai::Provider::Openai => Arc::new(ai::OpenAi::new(
+                web.clone(),
+                key,
+                std::env::var("OPENAI_BASE").ok().as_deref(),
                 config.ai.openai.clone(),
-            )) as _
-        }),
+            )),
+        })
     };
-    if let Some(chat) = &chat {
-        info!("chat uses {} ({})", chat.name(), chat.model());
+    let main = make(config.ai.provider);
+    let backup = config
+        .ai
+        .fallback
+        .filter(|&fallback| fallback != config.ai.provider)
+        .and_then(make);
+    if let Some(main) = &main {
+        info!("chat uses {} ({})", main.name(), main.model());
     }
-    ai::Ai { chat }
+    if let Some(backup) = &backup {
+        info!("chat falls back to {} ({})", backup.name(), backup.model());
+    }
+    let uses_claude = [config.ai.provider, config.ai.fallback.unwrap_or_default()]
+        .contains(&ai::Provider::Claude);
+    ai::Ai::new(main, backup, uses_claude.then_some(spend))
 }
 
 /// Imports voltgpt's `old.db` if it's there. Returns a summary for the start notice.

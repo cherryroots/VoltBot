@@ -96,7 +96,7 @@ async fn run(ctx: BotCtx) {
 
 /// Describes the emoji of every server chat is on in that don't have a description yet.
 async fn describe_new(ctx: &BotCtx) -> Result<()> {
-    if ctx.ai.chat.is_none() {
+    if ctx.ai.chat().is_none() {
         return Ok(());
     }
     for guild in ctx.cache.guilds() {
@@ -139,11 +139,7 @@ async fn describe_new(ctx: &BotCtx) -> Result<()> {
 
 /// Shows the model the emoji's picture (frames, for an animated one) and returns its line.
 async fn describe(ctx: &BotCtx, emoji: &Emoji) -> Result<String> {
-    let provider = ctx
-        .ai
-        .chat
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("no model"))?;
+    let provider = ctx.ai.chat().ok_or_else(|| anyhow::anyhow!("no model"))?;
     let media = if emoji.animated {
         Media {
             url: format!("https://cdn.discordapp.com/emojis/{}.gif", emoji.id),
@@ -175,6 +171,7 @@ async fn describe(ctx: &BotCtx, emoji: &Emoji) -> Result<String> {
         }]),
         tools: Vec::new(),
         cache_key: "emoji".to_string(),
+        job: "emoji",
     };
     let done = complete(provider.as_ref(), request, &NoTools, 1).await?;
     let line = done.text.trim().lines().next().unwrap_or_default().trim();

@@ -204,6 +204,7 @@ async fn stream_answer(
             input: input.clone(),
             tools: tools.clone(),
             cache_key: format!("discord:{}", asker.channel),
+            job: "chat",
         };
         let mut events = tokio::select! {
             events = provider.stream(request) => events?,
