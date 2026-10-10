@@ -11,11 +11,15 @@
 //! - `commands.rs`: `/memory show`, `forget` and `delete`
 //! - `reflect.rs`: the daily reflection, where Vivy tidies her memory and updates her own notes
 //!   and mood (which sets her Discord status)
+//! - `mood.rs`: mood checks a few times a day, which follow the time of day
+//! - `face.rs`: her face, a picture per mood that becomes her avatar in each server
 //! - `diary.rs`: the weekly diary she posts in `diary_channels`
 
 mod commands;
 mod diary;
+mod face;
 mod folder;
+mod mood;
 mod reflect;
 mod store;
 mod tool;
@@ -95,7 +99,7 @@ impl Feature for Memory {
     }
 
     /// Her mood, what's on her mind and what she wonders about, from the mood file she
-    /// rewrote last (the same one her Discord status comes from).
+    /// rewrote last (the same one her Discord status comes from), with its face.
     async fn panels(&self, ctx: &BotCtx) -> Result<Vec<Panel>> {
         let newest = ctx
             .db
@@ -115,6 +119,8 @@ impl Feature for Memory {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
-        Ok(vec![Panel::about_bot(ctx, rows)])
+        let mut panel = Panel::about_bot(ctx, rows);
+        panel.picture = face::panel_picture(ctx, &mood).await;
+        Ok(vec![panel])
     }
 }

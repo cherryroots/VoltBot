@@ -16,7 +16,7 @@ use crate::core::logging::ErrorStats;
 use crate::core::{Panel, Stat};
 use crate::util::shorten;
 use crate::util::svg::{
-    ACCENT, AMBER, DIM, GREEN, LINE, MUTED, RED, ROW, Style, Svg, TEXT, text_width,
+    ACCENT, AMBER, DIM, GREEN, LINE, MUTED, RED, ROW, Style, Svg, TEXT, esc, text_width,
 };
 
 /// Width of the picture in SVG units.
@@ -303,12 +303,18 @@ fn ai(svg: &mut Svg, d: &Dashboard) {
     svg.y += height;
 }
 
-/// A feature's box of longer text: labels on the left, a line or a few on the right.
+/// A feature's box of longer text: labels on the left, a line or a few on the right, and
+/// its picture (like Vivy's face) in a circle at the top right.
 fn text_panel(svg: &mut Svg, d: &Dashboard, panel: &Panel) {
     section(svg, &panel.title);
     let (label_x, text_x) = (32.0, 160.0);
+    let picture_size = 64.0;
+    let text_right = match panel.picture {
+        Some(_) => RIGHT - 16.0 - picture_size - 12.0,
+        None => RIGHT - 16.0,
+    };
     // Running text is narrower than `text_width`'s estimate, which is made for names.
-    let chars = ((RIGHT - 16.0 - text_x) / (13.0 * 0.5)) as usize;
+    let chars = ((text_right - text_x) / (13.0 * 0.5)) as usize;
     let rows: Vec<(&str, Vec<String>)> = panel
         .rows
         .iter()
@@ -320,10 +326,27 @@ fn text_panel(svg: &mut Svg, d: &Dashboard, panel: &Panel) {
         })
         .collect();
     let lines: usize = rows.iter().map(|(_, lines)| lines.len().max(1)).sum();
-    let height = 20.0 + 19.0 * lines as f32 + 8.0 * rows.len().saturating_sub(1) as f32;
+    let mut height = 20.0 + 19.0 * lines as f32 + 8.0 * rows.len().saturating_sub(1) as f32;
+    if panel.picture.is_some() {
+        height = height.max(picture_size + 24.0);
+    }
     let y = svg.y;
     svg.rect([LEFT, y, RIGHT - LEFT, height], ROW, 8.0, "");
     svg.rect([LEFT, y, 4.0, height], ACCENT, 2.0, "");
+    if let Some(picture) = &panel.picture {
+        let r = picture_size / 2.0;
+        let (cx, cy) = (RIGHT - 16.0 - r, y + 12.0 + r);
+        let id = format!("picture{}", y as i32);
+        svg.raw(format!(
+            "<clipPath id=\"{id}\"><circle cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\"/></clipPath>\
+             <image href=\"{}\" x=\"{}\" y=\"{}\" width=\"{picture_size}\" height=\"{picture_size}\" \
+             preserveAspectRatio=\"xMidYMid slice\" clip-path=\"url(#{id})\"/>\
+             <circle cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" fill=\"none\" stroke=\"{ACCENT}\" stroke-width=\"2\"/>",
+            esc(picture),
+            cx - r,
+            cy - r,
+        ));
+    }
     let mut line_y = y + 24.0;
     for (label, lines) in rows {
         svg.text(
@@ -1150,9 +1173,30 @@ mod tests {
                         ),
                     ),
                 ],
+                picture: Some(sample_face()),
             }],
             history: sample_history(now),
         }
+    }
+
+    /// A stand-in for Vivy's face: a teal square with a lighter middle.
+    fn sample_face() -> String {
+        use base64::Engine as _;
+        let face = image::RgbaImage::from_fn(64, 64, |x, y| {
+            let middle = (16..48).contains(&x) && (16..48).contains(&y);
+            image::Rgba(if middle {
+                [190, 240, 235, 255]
+            } else {
+                [64, 190, 200, 255]
+            })
+        });
+        let mut png = Vec::new();
+        face.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        format!(
+            "data:image/png;base64,{}",
+            base64::prelude::BASE64_STANDARD.encode(png)
+        )
     }
 
     /// Also writes the pictures to `$STATUS_MOCKUP_DIR` when it's set, to look at them.

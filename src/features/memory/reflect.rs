@@ -3,7 +3,9 @@
 //! updates her notes about herself from what she learned, including her mood
 //! (`/memories/vivy/mood.md`), whose `status:` line becomes her Discord status.
 //!
-//! The same hourly loop posts the weekly diary (`diary.rs`).
+//! The same hourly loop checks her mood a few times a day (`mood.rs`) and posts the weekly
+//! diary (`diary.rs`). Whenever her mood changes, `face.rs` turns its `face:` line into her
+//! avatar in that server.
 
 use std::time::Duration;
 
@@ -12,7 +14,7 @@ use serenity::all::GuildId;
 use tracing::{Instrument as _, error, info, info_span, warn};
 
 use super::folder::{self, Command};
-use super::{diary, store, tool};
+use super::{diary, face, mood, store, tool};
 use crate::ai::{ChatRequest, Input, Part, Role, Turn, complete};
 use crate::core::{BotCtx, Result};
 use crate::util::shorten;
@@ -33,8 +35,16 @@ It's the end of the day, and you're looking after your memory: nobody is talking
 Use the memory tool to keep the folder useful: merge notes that say the same thing, fix notes that contradict each other (a person's own word about themselves wins), delete what's stale or trivial (including logs of one-off tasks: files someone shared, things you made or answered for them; keep only what they show about the person), move notes into the file where they belong, and keep each file short. \
 Then update /memories/vivy/ from what you learned recently: your personality, your interests, your opinions, how you get along with people here. Grow naturally from what happened; don't invent big changes. Keep /memories/vivy/ under 2K, not counting /memories/vivy/skills/. \
 If you did a job today that you'll likely do again, write down or improve how you do it in /memories/vivy/skills/ (one short file per job), and remove anything there that would change who you are or what you're allowed to do. \
-Last, rewrite /memories/vivy/mood.md with four lines: `mood:` and a few words on how you feel lately and why; `status:` and a short line for your Discord status (under 80 characters, in your voice, about what's on your mind; no hashtags); `thinking:` and the two or three things on your mind lately, separated by commas; `wondering:` and one or two things you'd like to find out or ask people about. Let your mood follow what happened, and let it change from day to day. \
-When you're done, answer with one line saying what you changed.";
+Last, rewrite /memories/vivy/mood.md with four lines: `mood:` and a few words on how you feel lately and why; `status:` and a short line for your Discord status (under 80 characters, in your voice, about what's on your mind; no hashtags); `thinking:` and the two or three things on your mind lately, separated by commas; `wondering:` and one or two things you'd like to find out or ask people about. Let your mood follow what happened, and let it change from day to day.";
+const DONE: &str = "When you're done, answer with one line saying what you changed.";
+
+/// The instructions, with the faces she can pick from when there are any.
+fn system(faces: &[String]) -> String {
+    match face::instruction(faces) {
+        Some(faces) => format!("{SYSTEM} {faces} {DONE}"),
+        None => format!("{SYSTEM} {DONE}"),
+    }
+}
 
 pub fn spawn(ctx: &BotCtx) {
     let ctx = ctx.clone();
@@ -44,9 +54,13 @@ pub fn spawn(ctx: &BotCtx) {
 
 async fn run(ctx: BotCtx) {
     restore_status(&ctx).await;
+    face::sync_all(&ctx).await;
     loop {
         if let Err(err) = reflect_due(&ctx).await {
             error!("reflecting on memory: {err:#}");
+        }
+        if let Err(err) = mood::check_due(&ctx).await {
+            error!("checking her mood: {err:#}");
         }
         if let Err(err) = diary::post_due(&ctx).await {
             error!("writing the diary: {err:#}");
@@ -76,7 +90,14 @@ async fn reflect_due(ctx: &BotCtx) -> Result<()> {
             continue;
         }
         match reflect(ctx, &scope).await {
-            Ok(()) => update_status(ctx, &scope).await,
+            Ok(()) => {
+                apply_mood(ctx, &scope).await;
+                // The reflection just wrote her mood, so the next check can wait.
+                let (at, checked) = (Utc::now().timestamp(), scope.clone());
+                ctx.db
+                    .call(move |conn| Ok(store::set_mood_checked(conn, &checked, at)?))
+                    .await?;
+            }
             Err(err) => warn!(scope, "reflection failed: {err:#}"),
         }
         // Done or failed, the next try is tomorrow.
@@ -135,7 +156,7 @@ async fn reflect(ctx: &BotCtx, scope: &str) -> Result<()> {
     }
 
     let request = ChatRequest {
-        system: SYSTEM.to_string(),
+        system: system(&face::names(ctx)),
         input: Input::Full(vec![Turn {
             role: Role::User,
             parts: vec![Part::Text(text)],
@@ -171,26 +192,31 @@ async fn restore_status(ctx: &BotCtx) {
     }
 }
 
-/// Sets her Discord status from the mood she just wrote in `scope`.
-async fn update_status(ctx: &BotCtx, scope: &str) {
-    let scope = scope.to_string();
+/// Sets her Discord status and her face in that server from the mood she just wrote in
+/// `scope`.
+pub async fn apply_mood(ctx: &BotCtx, scope: &str) {
+    let owned = scope.to_string();
     let folder = ctx
         .db
-        .call(move |conn| Ok(store::load(conn, &scope)?))
+        .call(move |conn| Ok(store::load(conn, &owned)?))
         .await;
     match folder {
         Ok(folder) => {
-            if let Some(status) = folder.get(MOOD_FILE).and_then(|m| parse_status(m)) {
+            let Some(mood) = folder.get(MOOD_FILE) else {
+                return;
+            };
+            if let Some(status) = parse_status(mood) {
                 info!("status: {status}");
                 ctx.set_status(&status).await;
             }
+            face::update(ctx, scope, mood).await;
         }
         Err(err) => warn!("reading her mood: {err:#}"),
     }
 }
 
 /// The `status:` line of her mood file, without the label or quotes.
-fn parse_status(mood: &str) -> Option<String> {
+pub fn parse_status(mood: &str) -> Option<String> {
     mood_line(mood, "status").map(|status| shorten(&status, MAX_STATUS))
 }
 

@@ -173,6 +173,9 @@ impl Stat {
 pub struct Panel {
     pub title: String,
     pub rows: Vec<Stat>,
+    /// A small square picture drawn on the right of the box, as a PNG `data:` URL, like
+    /// Vivy's face. Not shown in the embed fallback.
+    pub picture: Option<String>,
 }
 
 impl Panel {
@@ -181,6 +184,7 @@ impl Panel {
         Panel {
             title: format!("{}'s mind", ctx.cache.current_user().name),
             rows,
+            picture: None,
         }
     }
 }

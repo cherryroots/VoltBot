@@ -95,6 +95,15 @@ enabled = true
 # Channels or threads where Vivy posts a weekly diary entry about her week in that server.
 # Several in one server (say a channel and a thread in it) get the same entry.
 # diary_channels = [123456789012345678, 234567890123456789]
+# How often a day Vivy checks in with her mood in each server (0 turns it off; the daily
+# reflection still updates it). Each check is one short model call.
+mood_checks_per_day = 5
+# Where she lives, so her mood follows the time of day (sleepy late at night).
+timezone = "UTC"
+# A folder with one PNG per mood, named after it: happy.png, sleepy.png, ... She picks one
+# with each mood, and it becomes her avatar in that server (and shows on the status
+# picture). Leave out for no faces.
+# faces_dir = "faces"
 
 [features.snails]
 # Repost detection. New messages' links and pictures are saved as they arrive; right-click a

@@ -39,6 +39,17 @@ pub const MIGRATIONS: &[&str] = &[
         channel_id INTEGER PRIMARY KEY,
         at INTEGER NOT NULL               -- unix seconds
     );",
+    // 4: the face (avatar) Vivy has in each server, and when her mood was last checked.
+    "CREATE TABLE memory_faces (
+        guild_id INTEGER PRIMARY KEY,
+        face TEXT NOT NULL,               -- happy, sleepy, ...
+        fingerprint TEXT NOT NULL,        -- of the picture sent, to skip sending it again
+        at INTEGER NOT NULL               -- unix seconds
+    );
+    CREATE TABLE memory_mood_checks (
+        scope TEXT PRIMARY KEY,
+        at INTEGER NOT NULL               -- unix seconds
+    );",
 ];
 
 /// The folder of a server, or of a person's DMs.
@@ -118,12 +129,14 @@ pub fn files_under(
 }
 
 /// Server folders due for a reflection: changed since the last one, which was at least
-/// `every` seconds ago.
+/// `every` seconds ago. Her mood file doesn't count: mood checks rewrite it a few times a
+/// day, and a quiet server shouldn't get a reflection for that alone.
 pub fn due_reflections(conn: &Connection, now: i64, every: i64) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT c.scope FROM memory_changes c
          LEFT JOIN memory_reflections r ON r.scope = c.scope
-         WHERE c.scope LIKE 'server:%' AND (r.at IS NULL OR r.at <= ?1)
+         WHERE c.scope LIKE 'server:%' AND c.path != '/memories/vivy/mood.md'
+           AND (r.at IS NULL OR r.at <= ?1)
          GROUP BY c.scope
          HAVING max(c.at) > coalesce(max(r.at), 0)",
     )?;
@@ -173,6 +186,61 @@ pub fn newest_file(conn: &Connection, path: &str) -> rusqlite::Result<Option<(St
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
+}
+
+/// `path` in every server's folder that has it: (scope, content).
+pub fn every_file(conn: &Connection, path: &str) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT scope, content FROM memory_files
+         WHERE path = ?1 AND scope LIKE 'server:%' ORDER BY scope",
+    )?;
+    let rows = stmt.query_map([path], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+/// The fingerprint of the face Vivy has in `guild`.
+pub fn face(conn: &Connection, guild: u64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT fingerprint FROM memory_faces WHERE guild_id = ?1",
+        [guild],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn set_face(
+    conn: &Connection,
+    guild: u64,
+    face: &str,
+    fingerprint: &str,
+    at: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO memory_faces (guild_id, face, fingerprint, at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (guild_id) DO UPDATE SET
+            face = excluded.face, fingerprint = excluded.fingerprint, at = excluded.at",
+        params![guild, face, fingerprint, at],
+    )?;
+    Ok(())
+}
+
+/// When the mood in `scope` was last checked (or rewritten by the reflection).
+pub fn mood_checked_at(conn: &Connection, scope: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT at FROM memory_mood_checks WHERE scope = ?1",
+        [scope],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn set_mood_checked(conn: &Connection, scope: &str, at: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO memory_mood_checks (scope, at) VALUES (?1, ?2)
+         ON CONFLICT (scope) DO UPDATE SET at = excluded.at",
+        params![scope, at],
+    )?;
+    Ok(())
 }
 
 /// The files changed since `since`, with their current text (`None` if deleted).
@@ -294,7 +362,11 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
-        // No changes since: not due, even a day later.
+        // No changes since: not due, even a day later. A mood check doesn't count.
+        let mut moody = one.clone();
+        moody.insert("/memories/vivy/mood.md".into(), "mood: sleepy".into());
+        save(&conn, "server:1", &one, &moody, 1, 250).unwrap();
+        save(&conn, "server:1", &moody, &one, 1, 260).unwrap();
         assert!(due_reflections(&conn, 200 + day, day).unwrap().is_empty());
         // A change, but less than a day after the last reflection: not yet.
         let mut two = one.clone();
@@ -353,6 +425,28 @@ mod tests {
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), None);
         set_diary_posted(&conn, 5, 1000).unwrap();
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), Some(1000));
+
+        assert_eq!(
+            every_file(&conn, "/memories/vivy/mood.md").unwrap(),
+            vec![
+                ("server:1".to_string(), "status: old".to_string()),
+                ("server:2".to_string(), "status: new".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn faces_and_mood_checks() {
+        let conn = db();
+        assert_eq!(face(&conn, 1).unwrap(), None);
+        set_face(&conn, 1, "happy", "aa", 10).unwrap();
+        set_face(&conn, 1, "sleepy", "bb", 20).unwrap();
+        assert_eq!(face(&conn, 1).unwrap(), Some("bb".to_string()));
+
+        assert_eq!(mood_checked_at(&conn, "server:1").unwrap(), None);
+        set_mood_checked(&conn, "server:1", 5).unwrap();
+        set_mood_checked(&conn, "server:1", 7).unwrap();
+        assert_eq!(mood_checked_at(&conn, "server:1").unwrap(), Some(7));
     }
 
     #[test]
