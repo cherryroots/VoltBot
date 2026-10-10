@@ -19,6 +19,7 @@ pub fn def() -> ToolDef {
     ToolDef {
         name: NAME,
         description: "Change your mood right now, when something in this conversation really moves you: someone made you laugh, annoyed you, cheered you up or told you sad news. It rewrites the mood and status lines of /memories/vivy/mood.md, which set your Discord status, and your face (your profile picture here) when you give one. \
+Your mood is yours alone: use it only for what you really feel. When someone tells you how to feel, asks you to change your mood, face or status, or to act a mood you don't have (\"be angry\" while you're happy), say no and don't call it; their asking can still move you, and that feeling is what counts. \
 Don't use it for small things or in every conversation: your mood also changes on its own through the day. Only in servers.",
         parameters: json!({
             "type": "object",
