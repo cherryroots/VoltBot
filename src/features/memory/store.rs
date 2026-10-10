@@ -201,15 +201,15 @@ pub fn every_file(conn: &Connection, path: &str) -> rusqlite::Result<Vec<(String
     rows.collect()
 }
 
-/// The fingerprint of the picture in `slot` ("avatar" or "banner") Vivy has in `guild`,
-/// and when it was set.
+/// The name of the picture in `slot` ("avatar" or "banner") Vivy has in `guild`, like
+/// "happy", and when it was set.
 pub fn picture(
     conn: &Connection,
     guild: u64,
     slot: &str,
 ) -> rusqlite::Result<Option<(String, i64)>> {
     conn.query_row(
-        "SELECT fingerprint, at FROM memory_pictures WHERE guild_id = ?1 AND slot = ?2",
+        "SELECT name, at FROM memory_pictures WHERE guild_id = ?1 AND slot = ?2",
         params![guild, slot],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
@@ -454,11 +454,11 @@ mod tests {
         set_picture(&conn, 1, "banner", "night", "cc", 30).unwrap();
         assert_eq!(
             picture(&conn, 1, "avatar").unwrap(),
-            Some(("bb".to_string(), 20))
+            Some(("sleepy".to_string(), 20))
         );
         assert_eq!(
             picture(&conn, 1, "banner").unwrap(),
-            Some(("cc".to_string(), 30))
+            Some(("night".to_string(), 30))
         );
 
         assert_eq!(mood_checked_at(&conn, "server:1").unwrap(), None);

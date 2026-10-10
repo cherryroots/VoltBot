@@ -157,7 +157,7 @@ fn load(path: &Path, size: u32, crop: Option<Crop>) -> anyhow::Result<Vec<u8>> {
     Ok(png)
 }
 
-/// A short fingerprint of a picture, so a face is sent again only when it changed.
+/// A short fingerprint of a picture, kept with its name in `memory_pictures`.
 fn fingerprint(png: &[u8]) -> String {
     let mut hasher = DefaultHasher::new();
     png.hash(&mut hasher);
@@ -244,7 +244,8 @@ impl Slot {
 }
 
 /// Sets the picture at `path` (named `name`, like "happy") in `slot` of her profile in
-/// `guild`, unless it's already there. When that slot changed in the last 10 minutes it's
+/// `guild`, unless that slot already shows a picture of that name (Cherry: only a switch to
+/// another face changes it, so a restart never sends the same one again). When that slot changed in the last 10 minutes it's
 /// left alone, and the result is how many seconds are left to wait.
 pub async fn set_picture(
     ctx: &BotCtx,
@@ -253,19 +254,13 @@ pub async fn set_picture(
     path: PathBuf,
     name: &str,
 ) -> Result<Option<i64>> {
-    let crop = match slot {
-        Slot::Avatar => crop(ctx),
-        Slot::Banner => None,
-    };
-    let png = tokio::task::spawn_blocking(move || load(&path, slot.size(), crop)).await??;
-    let print = fingerprint(&png);
     let id = guild.get();
     let current = ctx
         .db
         .call(move |conn| Ok(store::picture(conn, id, slot.field())?))
         .await?;
     if let Some((current, at)) = current {
-        if current == print {
+        if current == name {
             return Ok(None);
         }
         let since = Utc::now().timestamp() - at;
@@ -275,6 +270,12 @@ pub async fn set_picture(
         }
     }
 
+    let crop = match slot {
+        Slot::Avatar => crop(ctx),
+        Slot::Banner => None,
+    };
+    let png = tokio::task::spawn_blocking(move || load(&path, slot.size(), crop)).await??;
+    let print = fingerprint(&png);
     let data = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&png));
     let mut body = serde_json::Map::new();
     body.insert(slot.field().into(), data.into());
@@ -298,8 +299,8 @@ pub async fn set_picture(
 }
 
 /// At start: puts each server's face back in step with its mood file, for a face picked
-/// before the pictures were there, or a picture that was replaced. Servers that already
-/// have it are skipped, so this costs nothing most of the time.
+/// before the pictures were there. Servers that already show that face are skipped, so
+/// this costs nothing most of the time.
 pub async fn sync_all(ctx: &BotCtx) {
     if names(ctx).is_empty() {
         return;
