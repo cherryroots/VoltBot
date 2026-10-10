@@ -27,7 +27,7 @@ Don't use it for small things or in every conversation: your mood also changes o
                 "mood": {"type": "string", "description": "A few words on how you feel now and why."},
                 "status": {"type": "string", "description": "Your new Discord status: under 80 characters, in your voice, about what's on your mind. No hashtags."},
                 "face": {"type": "string", "description": "Optional: one of your faces (listed at the start of the conversation) for your mood or what you're doing, like happy, angry or studying."},
-                "emoji": {"type": "string", "description": "Optional: one emoji for your mood, shown after your name in this server."}
+                "emoji": {"type": "string", "description": "Optional: one standard emoji for your mood, shown after your name in this server. Never a custom server emoji: names can't show them."}
             },
             "required": ["mood", "status"]
         }),
