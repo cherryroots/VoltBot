@@ -16,7 +16,9 @@ VoltBot is a Discord bot written in Rust. It is a rewrite of [voltgpt](https://g
 
 ## Status
 
-Stage 4 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, the shared helpers (message splitting, multi-message replies, media and text extraction, GIF and video frames), AI chat with OpenAI, its tools, and the ❌/🔁 reaction controls, the movie wheel, and memory. Next up are the Claude and Gemini providers and the image hashing redesign. See `docs/feature-map.md` for the plan and the order.
+Stage 4 of 4: the core (config, database, event dispatcher, logging), the control panel, reminders, the shared helpers (message splitting, multi-message replies, media and text extraction, GIF and video frames), AI chat with Claude or OpenAI, its tools, and the ❌/🔁 reaction controls, the movie wheel, memory, and repost ("snail") detection. Next up is the Gemini provider. See `docs/feature-map.md` for the plan and the order.
+
+Chat runs on Claude or OpenAI, whichever `provider` under `[ai]` in `config.toml` names (OpenAI when it's left out). On Claude, Vivy can search the web, read web pages, and run code in a sandbox that keeps its files per channel, with Anthropic's skills for making spreadsheets, documents, slides and PDFs. Files people attach (spreadsheets, PDFs, data) are uploaded once through Anthropic's Files API and copied into that sandbox, and files her code saves are attached to her reply. Her memory uses Claude's built-in memory tool on the same folder. Each answer is saved with Claude's own output, thinking included, and sent back unchanged with the rest of the conversation, so later replies keep her earlier reasoning and hit the prompt cache. When Claude declines a request, the API retries it on another Claude model (`fallbacks` under `[ai.claude]`).
 
 The movie wheel is voltgpt's betting game for movie night. `/wheel_status` shows the round as a picture with Claim, Place Bet, Remove Bet and Set Winner buttons; admins use `/wheel_add`, `/insert_bet` and `/reset_wheel`, and can undo a winner set by mistake. `/reset_wheel` starts a new season and keeps the old one viewable with `/wheel_status season:`. New seasons use pool betting: all bets and taxes of a round go into a pot that the bets on the winner share by stake, so long shots pay more than favourites, and a pot nobody won carries over. A player's bets in one round add up to at most half of their money, so nobody goes broke in one round. Place Bet opens a private bet slip with the option's current payout and buttons for 10%, 25% and 50% of your money, or any amount. voltgpt's imported game keeps voltgpt's fixed payouts until the next `/reset_wheel`. Change Name sets the name the wheel shows for you (empty goes back to your Discord name), and the Help button under the picture explains the rules privately.
 
@@ -61,7 +63,7 @@ sudo chown -R voltbot:voltbot /opt/voltbot
 sudo chmod 600 /opt/voltbot/.env
 ```
 
-Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`, and `OPENAI_TOKEN` for chat) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
+Fill in `/opt/voltbot/.env` (the secret `DISCORD_TOKEN`, and `ANTHROPIC_API_KEY` or `OPENAI_TOKEN` for chat, matching `provider` under `[ai]`) and `/opt/voltbot/config.toml` (admin user IDs, the log and status channel IDs, and per-feature settings). The example files explain every key.
 
 **Coming from voltgpt:** copy its `voltgpt.db` to `/opt/voltbot/old.db` before the first start. The bot imports the reminders and the running movie wheel game, each only once, then renames the file to `old.db.imported`. voltgpt's wheel had no server, so set `main_server` in `config.toml` first: the game is imported into that server, and the import waits until it is set. If VoltBot reuses voltgpt's bot account, the per-server slash commands voltgpt registered are removed on start, so nothing shows up twice.
 
@@ -75,7 +77,7 @@ sudo systemctl enable --now voltbot
 
 ### 5. Check on it
 
-- **Discord:** the status channel has a message that refreshes every minute with uptime, errors and per-feature stats, and the log channel gets warnings, errors, and start and stop notices.
+- **Discord:** the status channel has a message that refreshes every minute with uptime, the AI provider and model, errors and per-feature stats, and the log channel gets warnings, errors, and start and stop notices.
 - **Service state:** `systemctl status voltbot`
 - **Full logs:** `journalctl -u voltbot -f`. Set `RUST_LOG` in the service file to change the level, for example `RUST_LOG=info,voltbot::features::chat=debug`.
 

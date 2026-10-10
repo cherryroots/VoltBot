@@ -212,22 +212,36 @@ async fn register_commands(
     Ok(())
 }
 
-/// Sets up the AI providers whose keys are in `.env`.
+/// Sets up the AI provider for chat: the one `provider` under `[ai]` names. Chat is off
+/// when that provider's key is missing from `.env`.
 fn ai_from_env(config: &Config, web: &reqwest::Client) -> ai::Ai {
-    let mut ai = ai::Ai::default();
-    match std::env::var("OPENAI_TOKEN") {
-        Ok(token) if !token.trim().is_empty() => {
+    let key = |name: &str| {
+        let key = std::env::var(name)
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+        if key.is_none() {
+            warn!("{name} is not set in .env, so chat is off");
+        }
+        key
+    };
+    let chat: Option<Arc<dyn ai::ChatProvider>> = match config.ai.provider {
+        ai::Provider::Claude => key("ANTHROPIC_API_KEY")
+            .map(|key| Arc::new(ai::Claude::new(web.clone(), key, config.ai.claude.clone())) as _),
+        ai::Provider::Openai => key("OPENAI_TOKEN").map(|key| {
             let base = std::env::var("OPENAI_BASE").ok();
-            ai.chat = Some(Arc::new(ai::OpenAi::new(
+            Arc::new(ai::OpenAi::new(
                 web.clone(),
-                token.trim().to_string(),
+                key,
                 base.as_deref(),
                 config.ai.openai.clone(),
-            )));
-        }
-        _ => warn!("OPENAI_TOKEN is not set, so chat is off"),
+            )) as _
+        }),
+    };
+    if let Some(chat) = &chat {
+        info!("chat uses {} ({})", chat.name(), chat.model());
     }
-    ai
+    ai::Ai { chat }
 }
 
 /// Imports voltgpt's `old.db` if it's there. Returns a summary for the start notice.

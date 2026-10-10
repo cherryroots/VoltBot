@@ -2,10 +2,8 @@
 //! tools the model asks for, and continue until it's done. For background work like
 //! chiming in or tidying memory; chat's answers stream into Discord with their own loop.
 
+use super::{ChatEvent, ChatProvider, ChatRequest, NativeRound, ToolCall, ToolOutput, next_input};
 use async_trait::async_trait;
-use serde_json::Value;
-
-use super::{ChatEvent, ChatProvider, ChatRequest, Input, Part, Role, ToolCall, Turn};
 
 /// Runs the tool calls of [`complete`]. Whatever happens, the model gets text back.
 #[async_trait]
@@ -20,8 +18,8 @@ pub struct Completed {
     pub text: String,
     /// How to continue from this answer.
     pub continuation: Option<String>,
-    /// The provider's raw output of each round.
-    pub natives: Vec<Value>,
+    /// The provider's raw output of each round, with the tools' results.
+    pub rounds: Vec<NativeRound>,
 }
 
 /// Sends `request`, runs tools for at most `max_rounds` rounds, and returns the answer.
@@ -41,7 +39,7 @@ pub async fn complete(
     for _round in 0..max_rounds {
         let request = ChatRequest {
             system: system.clone(),
-            input,
+            input: input.clone(),
             tools: defs.clone(),
             cache_key: cache_key.clone(),
         };
@@ -56,28 +54,26 @@ pub async fn complete(
                 Some(Ok(ChatEvent::Done(done))) => break done,
             }
         };
-        completed.natives.push(done.native);
         completed.continuation = done.continuation.clone();
         if done.tool_calls.is_empty() {
+            completed.rounds.push(NativeRound {
+                output: done.native,
+                results: Vec::new(),
+            });
             return Ok(completed);
         }
-        let continuation = done.continuation.ok_or_else(|| {
-            anyhow::anyhow!("the model asked for tools but gave no way to continue")
-        })?;
         let mut results = Vec::new();
         for call in &done.tool_calls {
-            results.push(Part::ToolResult {
+            results.push(ToolOutput {
                 call_id: call.id.clone(),
                 output: tools.run(call).await,
             });
         }
-        input = Input::After {
-            continuation,
-            new: vec![Turn {
-                role: Role::User,
-                parts: results,
-            }],
-        };
+        input = next_input(provider, input, &done, &results);
+        completed.rounds.push(NativeRound {
+            output: done.native,
+            results,
+        });
     }
     anyhow::bail!("the model kept calling tools ({max_rounds} rounds)")
 }

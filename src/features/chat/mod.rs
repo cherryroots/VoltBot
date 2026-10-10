@@ -176,7 +176,7 @@ fn provider(ctx: &BotCtx) -> Result<Arc<dyn ChatProvider>> {
     ctx.ai
         .chat
         .clone()
-        .ok_or_else(|| user_error("Chat is turned off: the bot has no OpenAI key."))
+        .ok_or_else(|| user_error("Chat is turned off: the bot has no AI key."))
 }
 
 impl Chat {
@@ -194,8 +194,28 @@ impl Chat {
             .call(move |conn| store::chain(conn, question_id, history::MAX_TURNS))
             .await?;
         let mut input = history::build_input(ctx, provider, &chain).await;
-        let fresh = matches!(input, Input::Full(_));
-        add_context(&mut input, answer::context_for(ctx, &asker, fresh).await);
+        // The features' context is saved with the question the first time it's answered,
+        // so a later request (🔁, or the rest of the conversation) sends the question
+        // exactly as before.
+        let has_context = chain.last().is_some_and(|question| {
+            question
+                .parts
+                .iter()
+                .any(|p| matches!(p, StoredPart::Context { .. }))
+        });
+        if !has_context {
+            let fresh = !chain.iter().any(|turn| turn.role == Role::Assistant);
+            let texts = answer::context_for(ctx, &asker, fresh).await;
+            let parts: Vec<StoredPart> = texts
+                .iter()
+                .map(|text| StoredPart::Context { text: text.clone() })
+                .collect();
+            ctx.db
+                .call(move |conn| store::add_parts(conn, question_id, &parts))
+                .await
+                .context("saving the question's context")?;
+            add_context(&mut input, texts);
+        }
 
         let cancel = CancellationToken::new();
         let message_ids = Arc::new(Mutex::new(Vec::new()));
@@ -305,8 +325,7 @@ impl Chat {
     }
 }
 
-/// Adds the features' context to the question, the last turn of the input. It isn't
-/// stored, so later requests only carry the newest context.
+/// Adds the features' context to the question, the last turn of the input.
 fn add_context(input: &mut Input, texts: Vec<String>) {
     let turns = match input {
         Input::Full(turns) => turns,

@@ -9,6 +9,7 @@
 
 use anyhow::{Context as _, bail};
 use async_trait::async_trait;
+use base64::Engine as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -145,11 +146,25 @@ fn input_items(turns: &[Turn]) -> Vec<Value> {
                     "image_url": image.data_url(),
                     "detail": "auto",
                 })),
+                (Part::File(file), _) if file.mime == "application/pdf" => content.push(json!({
+                    "type": "input_file",
+                    "filename": file.name,
+                    "file_data": format!(
+                        "data:application/pdf;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(&file.data)
+                    ),
+                })),
+                (Part::File(file), _) => content.push(json!({
+                    "type": "input_text",
+                    "text": format!("[{} is attached, but you can't open this kind of file here]", file.name),
+                })),
                 (Part::ToolResult { call_id, output }, _) => items.push(json!({
                     "type": "function_call_output",
                     "call_id": call_id,
                     "output": output,
                 })),
+                // OpenAI remembers its own answers; the turn's text is enough.
+                (Part::Native { .. }, _) => {}
             }
         }
         if !content.is_empty() {

@@ -7,7 +7,7 @@ This maps every feature of the Go bot (voltgpt) to what VoltBot will do with it,
 | Topic | Decision |
 |---|---|
 | Discord library | `serenity` + `poise` (poise handles slash commands, serenity handles raw events) |
-| AI provider | OpenAI first, behind a provider trait. Claude next, through the plain Messages API (not the Agent SDK), then maybe Gemini |
+| AI provider | OpenAI first, behind a provider trait. Claude next, through the plain Messages API (not the Agent SDK), then maybe Gemini. `provider` under `[ai]` picks which one chats |
 | Storage | One SQLite file (`voltbot.db`, WAL mode), raw SQL through `rusqlite` behind `tokio-rusqlite` (same idea as the Go bot: no ORM). Each feature owns its tables, named after it (`reminders`, `reminder_images`, `wheel_*`, `chat_turns`), and its own migrations, recorded in a shared `schema_migrations` table. Core tables shared by all features: `user_settings`, `legacy_imports` |
 | Config | `.env` for secrets, `config.toml` for everything else (admin IDs, per-feature settings and guild/channel gating that Go hardcodes) |
 | Async runtime | `tokio` (serenity already uses it) |
@@ -134,7 +134,7 @@ Features get everything shared through one context value: the serenity HTTP clie
 src/
   main.rs                 # load config, open db, build features, start serenity + poise
   core/                   # ctx, dispatcher, guards, config, db, events, custom_id, errors
-  ai/                     # mod.rs (provider trait, Turn types), sse.rs, openai.rs, later claude.rs
+  ai/                     # mod.rs (provider trait, Turn types), sse.rs, openai.rs, claude/ (messages.rs, collect.rs)
   util/                   # split.rs, reply.rs (multi-message replies), media.rs, frames.rs, text.rs
   features/
     mod.rs                # the feature list
@@ -193,7 +193,7 @@ Prompt caching: the system prompt is fully static. The Go bot appended the curre
 
 Reaction controls: ❌ on a bot reply cancels a running answer (through a cancellation token kept per reply) and deletes a finished one, and 🔁 regenerates it from the same input, editing the old answer's messages in place. Only the person who asked can use them. The bot removes the 🔁 again, so it can be used for the next try.
 
-Config: model name, reasoning effort, verbosity and service tier come from `[ai.openai]` in `config.toml`, not constants in code. The key is `OPENAI_TOKEN` in `.env` (with an optional `OPENAI_BASE`); without it chat answers that it is turned off.
+Config: model name, reasoning effort, verbosity and service tier come from `[ai.openai]` in `config.toml`, not constants in code, and Claude's model, effort, output limit, code execution, skills, memory tool and fallbacks from `[ai.claude]`. The keys are `ANTHROPIC_API_KEY` and `OPENAI_TOKEN` in `.env` (with an optional `OPENAI_BASE`). `provider` under `[ai]` picks one (`"claude"` or `"openai"`, OpenAI when left out); only that provider's key is read, so having both keys in `.env` changes nothing. Without a key chat answers that it is turned off.
 
 GIFs from Discord's picker (Klipy since Tenor's API closed, also Giphy) are a link to the GIF's page plus a `gifv` embed with an MP4 `video` and a still `thumbnail`; `util::media` reads the MP4 and skips the still, whatever the provider. Discord can add link previews in a later message update, so if a mention has links but no embeds yet, chat waits two seconds and fetches the message again before reading its media.
 
@@ -201,7 +201,7 @@ Message splitting: one splitter replaces the Go bot's two (`SplitParagraph` and 
 
 #### Chat tools
 
-The provider's built-in tools stay on (web search, code interpreter). On top of those, the bot offers its own function tools, which work the same with every provider.
+The provider's built-in tools stay on: web search and the code interpreter on OpenAI; web search, web fetch and code execution (with Anthropic's xlsx, docx, pptx and pdf skills) on Claude. On top of those, the bot offers its own function tools, which work the same with every provider.
 
 Each feature can contribute tools, the same way it subscribes to events, so reminder tools live in the reminders module and wheel tools in the movie wheel module. A tool runs as the person who asked: it only sees channels they can see and only changes their own reminders.
 
@@ -245,7 +245,7 @@ Go helpers and what replaces them. Most come from serenity, poise or a well-know
 | `video.go` (duration, frame at time) | the same `util::frames` run, with `ffprobe` for the duration, through `tokio::process::Command`. Go started one ffmpeg process per frame (up to 910); this is one per file. `ffmpeg-next` would need FFmpeg's C libraries at build time |
 | `AttachmentText`, `EmbedText` | hand-written; a few lines each over serenity's types |
 | `strings.go` | the standard library |
-| YouTube and PDF URL handling | dropped, as the Go OpenAI path already ignores them. Claude reads PDFs, so this can return with the Claude provider |
+| YouTube and PDF URL handling | YouTube links dropped. Attachments that aren't pictures or videos (PDFs, spreadsheets, text, archives) are stored as file parts: Claude reads PDFs and gets every file in its code execution container through the Files API |
 
 Other crates that save hand-written code: `dotenvy` (`.env`), `tracing` + `tracing-subscriber` (logging, see "Logging and error reporting"), `anyhow` (errors), `tokio-util`'s `CancellationToken` (❌ stops an answer).
 
@@ -298,7 +298,7 @@ The tool loop lives outside the trait: when `Done` lists tool calls, the bot run
 
 Every user message the bot answers and every bot answer gets a turn. A turn has its own ID rather than a Discord message ID, because a long answer spans several messages (all of them point at the turn through `chat_messages`, so replying to any part continues the conversation) and a regenerated answer reuses the old answer's messages. `content_json` holds provider-neutral content (text and media links). `provider` says which provider wrote the turn, and `continuation_id` holds OpenAI's response ID when there is one. When someone replies to a message, the bot walks `parent_id` up the chain (at most 40 turns); a replied-to message the bot hasn't seen, such as someone else's message or an old voltgpt answer, becomes a turn first. If the newest bot turn was written by the current provider and has a `continuation_id`, it sends that. Otherwise it sends the rebuilt history. This means switching providers in the middle of a conversation works, and it no longer depends on fetching old messages from Discord.
 
-**Thinking is stored, but only replayed to the model that wrote it.** For bot turns, `native_json` keeps the provider's raw output for that turn exactly as it came back: Claude's thinking blocks (with their signatures), OpenAI's encrypted reasoning items (requested with `include: ["reasoning.encrypted_content"]`), and the tool calls and results in their original order. When the rebuilt history goes to the same provider and model, the bot sends `native_json` unchanged. That keeps the model's earlier reasoning available, keeps the request prefix byte-identical so the prompt cache still hits, and follows Claude's rule that thinking blocks must be passed back unmodified. For any other provider or model, the bot sends only the neutral `content_json`, because thinking blocks are tied to the model that produced them. (Stage 3 stores `native_json` but doesn't replay it yet: OpenAI continues through `previous_response_id`, which already carries the reasoning. Replaying starts with the Claude provider.) History is append-only: turns are never edited, and 🔁 regenerate adds a new sibling turn under the same parent instead of overwriting. Thinking is never shown in Discord. Image attachments are stored by URL; Discord CDN links expire, so the rebuild refreshes them through Discord's refresh-urls endpoint before sending. Only the newest four turns with media send it again; older ones say an image was there.
+**Thinking is stored, but only replayed to the model that wrote it.** For bot turns, `native_json` keeps the provider's raw output round by round (`[{output, results}]`: what the model wrote in each round of the tool loop, and what the bot's tools answered), exactly as it came back: Claude's thinking blocks with their signatures, its tool calls, and its built-in tools' results. When the rebuilt history goes to the same provider and model, the Claude provider sends those rounds unchanged instead of the turn's text. That keeps the model's earlier reasoning available, keeps the request prefix byte-identical so the prompt cache still hits, and follows Claude's rule that thinking blocks only stay valid while everything before them is unchanged ("preserved thinking"). For any other provider or model, the bot sends only the neutral `content_json`, because thinking blocks are tied to the model that produced them. OpenAI continues through `previous_response_id`, which already carries the reasoning, so it ignores the rounds. History is append-only: turns are never edited, and 🔁 regenerate adds a new sibling turn under the same parent instead of overwriting. Thinking is never shown in Discord. Image attachments are stored by URL; Discord CDN links expire, so the rebuild refreshes them through Discord's refresh-urls endpoint before sending. For OpenAI only the newest four turns with media send it again (older ones say an image was there); Claude, which is sent everything every time, gets all of it, so earlier turns never change, and pictures and files go through the Files API (uploaded once, sent by ID). What features add to a question (`chat_context`, like `<memory_files>`) is saved with it as `context` parts the first time it's answered, and chime-ins save the question exactly as the model read it, for the same reason. Claude requests also set `prefix_mismatch_behavior: "drop_block"`, so if an earlier turn ever does change, Claude drops the thinking after it instead of failing the request, and the log says so.
 
 ### 2. Reminders
 
@@ -401,7 +401,7 @@ What it does: gives admins two channels to watch the bot without logging in to t
 
 **Status channel.** One message that the bot keeps editing every 60 seconds (well inside Discord's rate limits). Its ID is saved in the database, so after a restart the bot edits the same message instead of posting a new one. It shows:
 
-- 🟢 Online, uptime, version and git commit, gateway latency, server count
+- 🟢 Online, uptime, version and git commit, gateway latency, server count, the AI provider and model chat uses
 - memory use, database size, errors in the last hour and the last 24 hours, and when the last error happened
 - one block per feature from its `stats()`: for example, pending reminders and the next one due; chat requests today, tokens used and prompt cache hit rate; the current wheel round and its bet count
 - "Updated <t:…:R>" at the bottom. Discord renders that as "12 seconds ago" and keeps counting on its own, so a crashed bot is obvious even though it can't edit the message any more. On a clean shutdown the bot changes the header to 🔴 Offline before it exits.
@@ -433,7 +433,8 @@ Crates: `sysinfo` (memory use) and a small `build.rs` (git commit in the binary)
 | 3 | AI chat behind the provider trait, OpenAI implementation, tool loop and chat tools, reaction controls | The main feature; builds on stages 1 and 2, and reminder tools reuse the stage 1 parser |
 | 4 | Movie wheel (ledger, tables, import), plus its `get_wheel_status` tool | Self-contained; mostly embeds, buttons and pure money logic |
 | 5 | Memory: a folder of notes per server (and per person in DMs) behind a `memory` tool that matches Anthropic's memory tool | Asked for after stage 4; built on chat's tools |
-| Later | Claude provider (Messages API over `reqwest`), then Gemini | When credits arrive |
+| 7 | Claude provider (Messages API over `reqwest`): built-in tools, Files API, native memory tool, thinking replayed from history | Credits arrived 2026-10-10 |
+| Later | Gemini | |
 | Later | Image hashing redesign | TODO |
 
 ## Importing from voltgpt (`old.db`)
@@ -458,7 +459,7 @@ The Go bot hashes every image and video in the main server after 3 seconds (to l
 
 voltgpt's memory captured every message, summarized it into notes and profiles, and pasted the matches into the instructions of every request. That bloated the prompt and broke the cache. VoltBot's memory is a folder of text files the model manages itself through one chat tool, `memory`, and nothing is pasted into the instructions.
 
-- **Compatible with Claude.** The tool's commands (`view`, `create`, `str_replace`, `insert`, `delete`, `rename`), arguments and reply texts follow Anthropic's memory tool (`memory_20250818`). On OpenAI it is a normal function tool. The Claude provider will send `{"type": "memory_20250818", "name": "memory"}` instead of the function definition and route the calls to the same code.
+- **Compatible with Claude.** The tool's commands (`view`, `create`, `str_replace`, `insert`, `delete`, `rename`), arguments and reply texts follow Anthropic's memory tool (`memory_20250818`). On OpenAI it is a normal function tool. The Claude provider sends `{"type": "memory_20250818", "name": "memory"}` instead of the function definition and routes the calls to the same code; since Claude's own tool has no description of ours, the bot's description (the folder layout) follows the system prompt. Anthropic adds an instruction to view the memory folder before anything else; `native_memory = false` under `[ai.claude]` sends the bot's own tool instead.
 - **Folders.** One `/memories` folder per server, shared by everyone in it, and a private one per person in DMs (scope `server:<id>` or `dm:<id>`). The tool suggests a folder per person, `/memories/users/<user id>/`, with `about.md` (name first) and one file per topic (`games.md`, `movies.md`), and a server folder with one file per topic: `/memories/server/channels.md`, `culture.md`, and more as needed (Cherry's idea, 2026-10-09). The model fills the server files from conversations, `search_messages` and `list_channels`, so it learns the environment it's in. `/memories/vivy/` holds Vivy's notes about herself in that server (`personality.md`, `interests.md`, under 2K together), so each server grows its own Vivy; the system prompt tells her to be the Vivy those notes describe (Cherry's idea, 2026-10-09). Small topic files let the model open only what the conversation needs. Chat's `<user>` tags carry the user ID for this.
 - **Who decides.** Anyone can add notes about anyone (Cherry's choice, 2026-10-09). A person's own word about themselves replaces what others said, and notes from others name who said them.
 - **Caching.** The `chat_context` hook adds `<vivy_self>` (her own notes, at most 3000 characters, only when a conversation starts fresh, since a continued one still has them) and `<memory_files>` after the newest question: the asker's and the server's files with sizes, and one line per other person's folder (at most 50 lines), for that request only. The instructions, tool list and earlier turns stay the same.
