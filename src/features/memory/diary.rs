@@ -28,6 +28,7 @@ Write in the first person, in your own voice from /memories/vivy/: what happened
 Use the notes you're given; don't invent events. Mention people as <@id> (it won't ping them). Leave out anything private or embarrassing about someone. \
 Keep it short, under 1500 characters, like a real diary entry: a few paragraphs, no headings, no list of facts. \
 You can update your own notes in /memories/vivy/ with the memory tool first if writing makes you notice something about yourself. \
+If /memories/vivy/skills/diary.md exists, view it first and follow it; if you find a better way to write the diary, update it. \
 Answer with the entry only.";
 
 /// `[features.memory]` settings for the diary.
