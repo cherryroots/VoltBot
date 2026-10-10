@@ -34,11 +34,57 @@ const MIN_GAP_SECS: i64 = 10 * 60;
 const PANEL_SIZE: u32 = 128;
 
 /// `[features.memory]` settings for her faces.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(default)]
 struct Settings {
     /// The folder with one PNG per mood.
     faces_dir: Option<String>,
+    /// How far to zoom in on a face: 1 keeps the whole square, 1.5 shows the middle two
+    /// thirds.
+    face_zoom: f32,
+    /// Where the middle of the crop is, from the top (0) to the bottom (1) of the picture.
+    face_center: f32,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            faces_dir: None,
+            face_zoom: 1.0,
+            face_center: 0.5,
+        }
+    }
+}
+
+/// The part of a face picture that is used: a square, `zoom` times smaller than the
+/// picture's short side, centered across and at `center` down.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Crop {
+    zoom: f32,
+    center: f32,
+}
+
+impl Crop {
+    /// The square to cut from a `width` × `height` picture: left, top and side.
+    fn square(self, width: u32, height: u32) -> (u32, u32, u32) {
+        let short = width.min(height) as f32;
+        let side = (short / self.zoom.max(1.0)).round().max(1.0) as u32;
+        let left = (width - side) / 2;
+        let top = (height as f32 * self.center.clamp(0.0, 1.0) - side as f32 / 2.0)
+            .clamp(0.0, (height - side) as f32)
+            .round() as u32;
+        (left, top, side)
+    }
+}
+
+/// The crop for faces from the settings, or none when nothing is cut.
+fn crop(ctx: &BotCtx) -> Option<Crop> {
+    let settings: Settings = ctx.config.feature("memory").ok()?;
+    let crop = Crop {
+        zoom: settings.face_zoom,
+        center: settings.face_center,
+    };
+    (crop.zoom > 1.0).then_some(crop)
 }
 
 /// The faces folder, if one is set.
@@ -90,9 +136,14 @@ pub fn parse(mood: &str, names: &[String]) -> Option<String> {
     names.iter().find(|name| *name == face).cloned()
 }
 
-/// Reads a picture and scales it down to at most `size` pixels, as a PNG.
-fn load(path: &Path, size: u32) -> anyhow::Result<Vec<u8>> {
-    let picture = image::open(path).with_context(|| format!("reading {}", path.display()))?;
+/// Reads a picture, cuts out `crop` if given, and scales it down to at most `size` pixels,
+/// as a PNG.
+fn load(path: &Path, size: u32, crop: Option<Crop>) -> anyhow::Result<Vec<u8>> {
+    let mut picture = image::open(path).with_context(|| format!("reading {}", path.display()))?;
+    if let Some(crop) = crop {
+        let (left, top, side) = crop.square(picture.width(), picture.height());
+        picture = picture.crop_imm(left, top, side, side);
+    }
     let picture = if picture.width() > size || picture.height() > size {
         picture.resize(size, size, FilterType::Lanczos3)
     } else {
@@ -166,7 +217,11 @@ pub async fn set_picture(
     path: PathBuf,
     name: &str,
 ) -> Result<()> {
-    let png = tokio::task::spawn_blocking(move || load(&path, slot.size())).await??;
+    let crop = match slot {
+        Slot::Avatar => crop(ctx),
+        Slot::Banner => None,
+    };
+    let png = tokio::task::spawn_blocking(move || load(&path, slot.size(), crop)).await??;
     let print = fingerprint(&png);
     let id = guild.get();
     let current = ctx
@@ -239,7 +294,8 @@ pub async fn panel_picture(ctx: &BotCtx, mood: &str) -> Option<String> {
     let dir = dir(ctx)?;
     let face = parse(mood, &names_in(&dir))?;
     let path = dir.join(format!("{face}.png"));
-    let png = tokio::task::spawn_blocking(move || load(&path, PANEL_SIZE))
+    let crop = crop(ctx);
+    let png = tokio::task::spawn_blocking(move || load(&path, PANEL_SIZE, crop))
         .await
         .ok()?
         .inspect_err(|err| warn!("reading her face: {err:#}"))
@@ -278,11 +334,29 @@ mod tests {
     }
 
     #[test]
+    fn crops_closer() {
+        let crop = Crop {
+            zoom: 2.0,
+            center: 0.4,
+        };
+        // A 1000 px square: a 500 px square centered across, its middle at 400 px down.
+        assert_eq!(crop.square(1000, 1000), (250, 150, 500));
+        // Near the top it stops at the edge.
+        let top = Crop {
+            center: 0.0,
+            ..crop
+        };
+        assert_eq!(top.square(1000, 1000), (250, 0, 500));
+        // A tall picture uses its width.
+        assert_eq!(crop.square(800, 1200), (200, 280, 400));
+    }
+
+    #[test]
     fn scales_faces_down() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("happy.png");
         image::RgbaImage::new(1024, 1024).save(&path).unwrap();
-        let png = load(&path, AVATAR_SIZE).unwrap();
+        let png = load(&path, AVATAR_SIZE, None).unwrap();
         let small = image::load_from_memory(&png).unwrap();
         assert_eq!((small.width(), small.height()), (512, 512));
         assert_eq!(fingerprint(&png), fingerprint(&png));

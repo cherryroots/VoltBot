@@ -104,6 +104,10 @@ timezone = "UTC"
 # with each mood, and it becomes her avatar in that server (and shows on the status
 # picture). Leave out for no faces.
 # faces_dir = "faces"
+# How far to zoom in on the faces for her avatar (1 is the whole picture, 1.5 the middle two
+# thirds), and where the middle of the crop sits, from the top (0) to the bottom (1).
+face_zoom = 1.0
+face_center = 0.5
 # A folder with her banner for each time of day where she lives: morning.png (5 to 11),
 # day.png (11 to 17), evening.png (17 to 22) and night.png. Checked every hour. Leave out
 # for no banners.
