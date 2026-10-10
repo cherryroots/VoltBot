@@ -327,6 +327,8 @@ pub struct Stats {
     pub games: i64,
     /// Bets in the open rounds of all active seasons.
     pub open_bets: i64,
+    /// Rounds with a winner in the active seasons.
+    pub rounds_played: i64,
 }
 
 pub fn stats(conn: &Connection) -> rusqlite::Result<Stats> {
@@ -336,12 +338,16 @@ pub fn stats(conn: &Connection) -> rusqlite::Result<Stats> {
             (SELECT count(*) FROM wheel_bets b
                JOIN wheel_rounds r ON r.id = b.round_id
                JOIN wheel_seasons s ON s.id = r.season_id
-              WHERE s.ended_at IS NULL AND r.winner_id IS NULL)",
+              WHERE s.ended_at IS NULL AND r.winner_id IS NULL),
+            (SELECT count(*) FROM wheel_rounds r
+               JOIN wheel_seasons s ON s.id = r.season_id
+              WHERE s.ended_at IS NULL AND r.winner_id IS NOT NULL)",
         [],
         |row| {
             Ok(Stats {
                 games: row.get(0)?,
                 open_bets: row.get(1)?,
+                rounds_played: row.get(2)?,
             })
         },
     )
@@ -505,6 +511,9 @@ mod tests {
             [(GUILD, new), (GUILD + 1, other)]
         );
         let stats = stats(&conn).unwrap();
-        assert_eq!((stats.games, stats.open_bets), (2, 0));
+        assert_eq!(
+            (stats.games, stats.open_bets, stats.rounds_played),
+            (2, 0, 0)
+        );
     }
 }

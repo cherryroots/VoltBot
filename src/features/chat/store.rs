@@ -373,6 +373,28 @@ pub fn next_follow_up(conn: &Connection) -> rusqlite::Result<Option<i64>> {
     })
 }
 
+/// The next planned check-in in a server: when, with whom, and what about. Check-ins from
+/// DMs stay private.
+pub fn upcoming_follow_up(conn: &Connection) -> rusqlite::Result<Option<(i64, u64, String)>> {
+    conn.query_row(
+        "SELECT due_at, user_id, note FROM chat_follow_ups WHERE guild_id IS NOT NULL
+         ORDER BY due_at LIMIT 1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+}
+
+/// For the control panel: answers given so far, and check-ins still planned.
+pub fn stats(conn: &Connection) -> rusqlite::Result<(i64, i64)> {
+    conn.query_row(
+        "SELECT (SELECT count(*) FROM chat_turns WHERE role = 'assistant'),
+                (SELECT count(*) FROM chat_follow_ups)",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
 /// The emoji of a server that have a description, by ID.
 pub fn emoji_descriptions(
     conn: &Connection,

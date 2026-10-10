@@ -37,7 +37,7 @@ use tracing::{error, info, warn};
 use self::answer::{End, Job};
 use self::store::{NewTurn, StoredPart};
 use crate::ai::{ChatProvider, Input, Part, Role, ToolDef};
-use crate::core::{Asker, BotCtx, Feature, Result, user_error};
+use crate::core::{Asker, BotCtx, Feature, Panel, Result, Stat, user_error};
 use crate::util::media;
 use crate::util::reply::LiveReply;
 
@@ -73,6 +73,34 @@ impl Feature for Chat {
     /// The empty prefix: every mention no other feature claimed.
     fn mention_prefixes(&self) -> &'static [&'static str] {
         &[""]
+    }
+
+    async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {
+        let (answers, follow_ups) = ctx.db.call(|conn| Ok(store::stats(conn)?)).await?;
+        Ok(vec![
+            Stat::new("Answers", answers),
+            Stat::new("Follow-ups", follow_ups),
+        ])
+    }
+
+    /// Her next planned check-in, for the box about her on the status message.
+    async fn panels(&self, ctx: &BotCtx) -> Result<Vec<Panel>> {
+        let (planned, next) = ctx
+            .db
+            .call(|conn| Ok((store::stats(conn)?.1, store::upcoming_follow_up(conn)?)))
+            .await?;
+        let Some((due, user, note)) = next else {
+            return Ok(Vec::new());
+        };
+        let name = match ctx.cache.user(UserId::new(user)) {
+            Some(user) => user.display_name().to_string(),
+            None => "someone".to_string(),
+        };
+        let row = Stat::new(
+            "Next check-in",
+            format!("<t:{due}:R> with {name} ({planned} planned): {note}"),
+        );
+        Ok(vec![Panel::about_bot(ctx, vec![row])])
     }
 
     fn tools(&self) -> Vec<ToolDef> {

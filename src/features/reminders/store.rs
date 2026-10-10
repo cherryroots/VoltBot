@@ -84,6 +84,8 @@ pub struct Stats {
     pub pending: usize,
     pub failing: usize,
     pub next_fire_at: Option<i64>,
+    /// Sent in the last week (sent reminders are kept that long, for snoozing).
+    pub sent_this_week: usize,
 }
 
 /// Adds a reminder and its images. Call inside a transaction (see [`add`]).
@@ -221,14 +223,18 @@ pub fn list_pending(conn: &Connection, user_id: u64) -> rusqlite::Result<Vec<Sum
 
 pub fn stats(conn: &Connection) -> rusqlite::Result<Stats> {
     conn.query_row(
-        "SELECT count(*), count(*) FILTER (WHERE attempts > 0), min(fire_at)
-         FROM reminders WHERE sent_at IS NULL",
+        "SELECT count(*) FILTER (WHERE sent_at IS NULL),
+                count(*) FILTER (WHERE sent_at IS NULL AND attempts > 0),
+                min(fire_at) FILTER (WHERE sent_at IS NULL),
+                count(*) FILTER (WHERE sent_at IS NOT NULL)
+         FROM reminders",
         [],
         |row| {
             Ok(Stats {
                 pending: row.get(0)?,
                 failing: row.get(1)?,
                 next_fire_at: row.get(2)?,
+                sent_this_week: row.get(3)?,
             })
         },
     )
@@ -384,7 +390,8 @@ mod tests {
             Stats {
                 pending: 3,
                 failing: 0,
-                next_fire_at: Some(50)
+                next_fire_at: Some(50),
+                sent_this_week: 0,
             }
         );
     }

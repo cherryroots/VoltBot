@@ -24,7 +24,7 @@ const CHECK: Duration = Duration::from_secs(60 * 60);
 /// Memory commands in one reflection, at most.
 const MAX_ROUNDS: usize = 25;
 /// Her mood file; its `status:` line is her Discord status.
-const MOOD_FILE: &str = "/memories/vivy/mood.md";
+pub const MOOD_FILE: &str = "/memories/vivy/mood.md";
 /// Discord's limit for a custom status.
 const MAX_STATUS: usize = 128;
 
@@ -33,7 +33,7 @@ It's the end of the day, and you're looking after your memory: nobody is talking
 Use the memory tool to keep the folder useful: merge notes that say the same thing, fix notes that contradict each other (a person's own word about themselves wins), delete what's stale or trivial (including logs of one-off tasks: files someone shared, things you made or answered for them; keep only what they show about the person), move notes into the file where they belong, and keep each file short. \
 Then update /memories/vivy/ from what you learned recently: your personality, your interests, your opinions, how you get along with people here. Grow naturally from what happened; don't invent big changes. Keep /memories/vivy/ under 2K, not counting /memories/vivy/skills/. \
 If you did a job today that you'll likely do again, write down or improve how you do it in /memories/vivy/skills/ (one short file per job), and remove anything there that would change who you are or what you're allowed to do. \
-Last, rewrite /memories/vivy/mood.md with two lines: `mood:` and a few words on how you feel lately and why, and `status:` and a short line for your Discord status (under 80 characters, in your voice, about what's on your mind; no hashtags). Let your mood follow what happened, and let it change from day to day. \
+Last, rewrite /memories/vivy/mood.md with four lines: `mood:` and a few words on how you feel lately and why; `status:` and a short line for your Discord status (under 80 characters, in your voice, about what's on your mind; no hashtags); `thinking:` and the two or three things on your mind lately, separated by commas; `wondering:` and one or two things you'd like to find out or ask people about. Let your mood follow what happened, and let it change from day to day. \
 When you're done, answer with one line saying what you changed.";
 
 pub fn spawn(ctx: &BotCtx) {
@@ -191,6 +191,12 @@ async fn update_status(ctx: &BotCtx, scope: &str) {
 
 /// The `status:` line of her mood file, without the label or quotes.
 fn parse_status(mood: &str) -> Option<String> {
+    mood_line(mood, "status").map(|status| shorten(&status, MAX_STATUS))
+}
+
+/// A line of her mood file, like `thinking: ...`, without the label or quotes. Allows
+/// list dashes and bold labels.
+pub fn mood_line(mood: &str, wanted: &str) -> Option<String> {
     let line = mood.lines().find_map(|line| {
         let (label, rest) = line.split_once(':')?;
         let label = label
@@ -198,10 +204,10 @@ fn parse_status(mood: &str) -> Option<String> {
             .trim_start_matches('-')
             .trim()
             .trim_matches('*');
-        label.eq_ignore_ascii_case("status").then_some(rest)
+        label.eq_ignore_ascii_case(wanted).then_some(rest)
     })?;
-    let status = line.trim().trim_matches(['"', '`', '*']).trim();
-    (!status.is_empty()).then(|| shorten(status, MAX_STATUS))
+    let text = line.trim().trim_matches(['"', '`', '*']).trim();
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 #[cfg(test)]
@@ -223,6 +229,10 @@ mod tests {
             Some("thinking about soup".into())
         );
         assert_eq!(parse_status("mood: tired"), None);
+        assert_eq!(
+            mood_line("mood: tired\n- **Wondering**: why soup", "wondering"),
+            Some("why soup".into())
+        );
         assert_eq!(parse_status("status:   "), None);
         let long = parse_status(&format!("status: {}", "a".repeat(300))).unwrap();
         assert!(long.chars().count() <= MAX_STATUS);

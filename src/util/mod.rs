@@ -1,10 +1,12 @@
 //! Helpers shared by features: splitting and sending long messages, finding and loading
-//! media, and pulling text out of messages. Nothing here knows about a specific feature.
+//! media, drawing pictures, and pulling text out of messages. Nothing here knows about a
+//! specific feature.
 
 pub mod frames;
 pub mod media;
 pub mod reply;
 pub mod split;
+pub mod svg;
 pub mod text;
 
 /// Cuts `text` to at most `max` characters (not bytes), ending in "…" when cut.

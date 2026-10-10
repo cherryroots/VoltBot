@@ -381,7 +381,7 @@ How it was built (stage 4), where it differs from the plan above:
 - **Admins** are `admins` in `config.toml`, checked inside each admin command and button (a poise `check` would answer with the "turned off" message).
 - **The bet amount modal** is a plain serenity `CreateModal`, because it opens from the bet slip's button, not from a slash command.
 - **Names** are looked up when a round is shown (nickname, then global name, then username) and remembered for 10 minutes.
-- **The status is a picture**, not an embed: `render.rs` lays the round out as SVG and `resvg` draws it as a PNG, with the Inter font built into the binary (system fonts are the fallback, for emoji in names). An open round shows the standings with each player's tax if the round ended now, the bets grouped by option, and who hasn't claimed or bet yet. A resolved round shows the winner and a table of before, bets, tax, after and change. Resolved rounds are posted as `SPOILER_` files, so the winner is hidden as voltgpt's `||spoiler||` did.
+- **The status is a picture**, not an embed: `render.rs` lays the round out as SVG and `resvg` draws it as a PNG (with the helpers in `util/svg.rs`, shared with the control panel), with the Inter font built into the binary (system fonts are the fallback, for emoji in names). An open round shows the standings with each player's tax if the round ended now, the bets grouped by option, and who hasn't claimed or bet yet. A resolved round shows the winner and a table of before, bets, tax, after and change. Resolved rounds are posted as `SPOILER_` files, so the winner is hidden as voltgpt's `||spoiler||` did.
 - **After Claim!** the private reply gives the player's money for the round and the smallest bet that avoids the tax.
 - **Small differences from voltgpt**: the player list is everyone who claimed or bet this season (voltgpt also listed people who only opened the bet menu).
 - **Pool betting** (Cherry, 2026-10-09): with fixed `amount × (options − 1)` payouts, early rounds paid ×10 and more and a lost claim cost nothing, so everyone bet everything every round. Seasons now have `rules` (`classic` or `pool`, migration 2). Under pool rules every bet and tax of a round goes into a pot, the bets on the winner share it by stake (integer division; the rounding rest stays in the pot), and a pot nobody won carries over to the next round. The picture shows the pot and each option's current payout. New seasons use pool; seasons from before, including voltgpt's import, stay classic.
@@ -403,12 +403,19 @@ What it does: gives admins two channels to watch the bot without logging in to t
 - lifecycle lines at `info`: 🟢 started (version, git commit, features loaded, `old.db` import results), 🔴 shutting down, 🔌 gateway reconnected
 - the minimum level is configurable, and a burst of the same error is grouped into one message with a count ("×12 in the last minute") instead of one post each
 
-**Status channel.** One message that the bot keeps editing every 60 seconds (well inside Discord's rate limits). Its ID is saved in the database, so after a restart the bot edits the same message instead of posting a new one. It shows:
+**Status channel.** One message that the bot keeps editing every 60 seconds (well inside Discord's rate limits). Its ID is saved in the database, so after a restart the bot edits the same message instead of posting a new one. Like the movie wheel, the status is a picture: `control_panel/render.rs` lays it out as SVG and the shared `util/svg.rs` draws it as a PNG. It shows:
 
-- 🟢 Online, uptime, version and git commit, gateway latency, server count, the AI provider and model chat uses
-- memory use, database size, errors in the last hour and the last 24 hours, and when the last error happened
-- one block per feature from its `stats()`: for example, pending reminders and the next one due; chat requests today, tokens used and prompt cache hit rate; the current wheel round and its bet count
-- "Updated <t:…:R>" at the bottom. Discord renders that as "12 seconds ago" and keeps counting on its own, so a crashed bot is obvious even though it can't edit the message any more. On a clean shutdown the bot changes the header to 🔴 Offline before it exits.
+- the bot's name with an ONLINE label, version and git commit, uptime, server count
+- tiles for gateway latency, memory use and database size, each with a graph of the last day, and errors per hour over the last day
+- the AI provider and model chat uses, and the fallback with when it retries
+- Claude's spend this month: a bar against `monthly_budget`, a graph of the month so far with the pace to the month's end and the budget line, whether it's the bill or the estimate, the admin key's state and last read, and (behind their toggles) the cache hit rate as a ring and the cost per job as bars
+- "Vivy's mind": a box features fill with `panels()` (panels with the same title merge). Memory adds her mood, what she's thinking about and what she wants to know, from the `mood:`, `thinking:` and `wondering:` lines the daily reflection writes in `/memories/vivy/mood.md` (the newest one, like her Discord status). Chat adds her next check-in in a server, with whom and what about, and how many are planned (check-ins from DMs stay off it)
+- one card per feature from its `stats()`; stats that are plain numbers get a graph of the last 7 days and how much they changed. Chat: answers and planned follow-ups. Reminders: pending, sent this week, next. Wheel: games, open bets, rounds played. Memory: files, folders, changes today, last reflection. Snails: caught this week (new messages that repeat an earlier post, checked like Check Snail as they arrive and saved in `snail_caught`), links, pictures, backfill
+- the last error, with when it happened
+
+"Updated <t:…:R>" is text above the picture. Discord renders that as "12 seconds ago" and keeps counting on its own, so a crashed bot is obvious even though it can't edit the message any more. On a clean shutdown the bot swaps in an OFFLINE picture before it exits. If the picture can't be drawn, the message shows the same information as an embed.
+
+Graphs need history: every 15 minutes the numbers are saved in `control_panel_samples` (name, time, value), kept for 32 days (`control_panel/history.rs`). Graphs need two samples, so a new install shows plain numbers at first.
 
 Config:
 
@@ -424,7 +431,7 @@ status_interval_secs = 60
 
 Events: `start` runs the refresh loop, which marks the message 🔴 Offline when the shutdown token is cancelled. The log channel is part of the core logging setup (hence its own `[logging]` section), so it works even with the control panel turned off, and errors from startup, before any feature runs, still reach Discord.
 
-Storage: `control_panel_state` (key, value) for the status message ID. Chat records each request's token usage, including cached input tokens, in `chat_usage`, which is where the cache hit rate comes from.
+Storage: `control_panel_state` (key, value) for the status message ID, `control_panel_samples` for the graphs. The cache hit rate and cost per job come from the core `ai_spend_jobs` table.
 
 Crates: `sysinfo` (memory use) and a small `build.rs` (git commit in the binary).
 

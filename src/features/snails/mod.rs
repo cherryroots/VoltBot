@@ -1,7 +1,8 @@
 //! Snails: spotting reposts. A "snail" is someone posting a link or picture the server has
 //! already seen.
 //!
-//! Every new message's links and pictures are saved as it arrives. "Check Snail" (right-click a
+//! Every new message's links and pictures are saved as it arrives, and a new message that
+//! repeats an earlier post is counted (quietly, for the control panel). "Check Snail" (right-click a
 //! message → Apps) lists the earlier posts of the same thing. `/snail_backfill` reads the
 //! server's older history, but only when an admin starts it.
 //!
@@ -22,6 +23,7 @@ mod links;
 mod store;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use serenity::all::Message;
 use tracing::warn;
 
@@ -68,16 +70,23 @@ impl Feature for Snails {
             return Ok(());
         }
         let msg = media::with_previews(&ctx.http, msg).await;
-        if let Err(err) = index::index_message(ctx, guild, &msg).await {
+        if let Err(err) = check::on_new_message(ctx, guild, &msg).await {
             warn!("couldn't save the message's links and pictures: {err:#}");
         }
         Ok(())
     }
 
     async fn stats(&self, ctx: &BotCtx) -> Result<Vec<Stat>> {
-        let (links, pictures, finished, channels) =
-            ctx.db.call(|conn| Ok(store::stats(conn)?)).await?;
-        let mut stats = vec![Stat::new("Links", links), Stat::new("Pictures", pictures)];
+        let week_ago = Utc::now().timestamp() - 7 * 86_400;
+        let ((links, pictures, finished, channels), caught) = ctx
+            .db
+            .call(move |conn| Ok((store::stats(conn)?, store::caught_since(conn, week_ago)?)))
+            .await?;
+        let mut stats = vec![
+            Stat::new("Caught this week", caught),
+            Stat::new("Links", links),
+            Stat::new("Pictures", pictures),
+        ];
         if channels > 0 {
             stats.push(Stat::new(
                 "Backfill",

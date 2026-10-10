@@ -57,13 +57,50 @@ async fn find_snails(ctx: &BotCtx, guild: GuildId, msg: &Message) -> Result<Opti
         return Ok(None);
     }
     save_if_new(ctx, guild, msg, &keys, &pictures).await?;
+    Ok(Some(
+        earlier_posts(ctx, guild, msg, &keys, &pictures, false).await?,
+    ))
+}
 
+/// A new message as it arrives: saves its links and pictures, and if it's a snail, notes
+/// that for the control panel's count. Nothing is posted: snails are only pointed out when
+/// someone asks with Check Snail.
+pub async fn on_new_message(ctx: &BotCtx, guild: GuildId, msg: &Message) -> Result<()> {
+    let keys = index::link_keys(ctx, msg).await;
+    let pictures = index::load_pictures(ctx, msg).await;
+    if keys.is_empty() && pictures.is_empty() {
+        return Ok(());
+    }
+    save_if_new(ctx, guild, msg, &keys, &pictures).await?;
+    if earlier_posts(ctx, guild, msg, &keys, &pictures, true)
+        .await?
+        .is_empty()
+    {
+        return Ok(());
+    }
+    let (g, id, author) = (guild.get(), msg.id.get(), msg.author.id.get());
+    let at = msg.timestamp.unix_timestamp();
+    ctx.db
+        .call(move |conn| Ok(store::record_caught(conn, g, id, author, at)?))
+        .await
+}
+
+/// Earlier posts of the same links or pictures, oldest first. With `first_only`, stops at
+/// the first one found.
+async fn earlier_posts(
+    ctx: &BotCtx,
+    guild: GuildId,
+    msg: &Message,
+    keys: &[String],
+    pictures: &[(usize, DynamicImage, Fingerprint)],
+    first_only: bool,
+) -> Result<Vec<Snail>> {
     let mut snails = Vec::new();
     let (g, before) = (guild.get(), msg.id.get());
-    let keys2 = keys.clone();
+    let keys = keys.to_vec();
     let same_links = ctx
         .db
-        .call(move |conn| Ok(store::same_links(conn, g, &keys2, before)?))
+        .call(move |conn| Ok(store::same_links(conn, g, &keys, before)?))
         .await?;
     for posted in same_links {
         if still_there(ctx, &posted).await?.is_some() {
@@ -71,6 +108,9 @@ async fn find_snails(ctx: &BotCtx, guild: GuildId, msg: &Message) -> Result<Opti
                 posted,
                 same_link: true,
             });
+            if first_only {
+                return Ok(snails);
+            }
         }
     }
 
@@ -85,10 +125,13 @@ async fn find_snails(ctx: &BotCtx, guild: GuildId, msg: &Message) -> Result<Opti
                 posted: candidate.posted,
                 same_link: false,
             });
+            if first_only {
+                return Ok(snails);
+            }
         }
     }
     snails.sort_by_key(|s| s.posted.message);
-    Ok(Some(snails))
+    Ok(snails)
 }
 
 /// Saves the checked message too, so later checks find it.
