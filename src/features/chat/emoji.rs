@@ -78,15 +78,20 @@ pub fn spawn(ctx: &BotCtx) {
 }
 
 async fn run(ctx: BotCtx) {
+    let timer = ctx.timers.add("Emoji descriptions", "daily");
     // Give the gateway a moment to fill the cache with servers.
+    let first = Duration::from_secs(30);
+    timer.sleeping(first);
     tokio::select! {
-        () = tokio::time::sleep(Duration::from_secs(30)) => {}
+        () = tokio::time::sleep(first) => {}
         () = ctx.shutdown.cancelled() => return,
     }
     loop {
+        timer.running();
         if let Err(err) = describe_new(&ctx).await {
             error!("describing emoji: {err:#}");
         }
+        timer.sleeping(CHECK);
         tokio::select! {
             () = tokio::time::sleep(CHECK) => {}
             () = ctx.shutdown.cancelled() => break,

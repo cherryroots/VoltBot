@@ -2,7 +2,8 @@
 //!
 //! [`online_svg`] lays out a [`Dashboard`]: a header, four tiles with the last day's graph
 //! (latency, memory, database, errors), the AI provider, Claude's spend this month with a
-//! graph of the month so far, one card per feature with its `stats()`, and the last error.
+//! graph of the month so far, one card per feature with its `stats()`, the background
+//! loops' timers, and the last error.
 //! Graphs come from the samples in `history.rs`; a graph needs two samples, so a new
 //! install shows plain numbers for its first 15 minutes.
 //!
@@ -13,6 +14,7 @@ use chrono::{DateTime, Datelike, Months, NaiveDate, TimeDelta, Utc};
 
 use super::history::{self, History};
 use crate::core::logging::ErrorStats;
+use crate::core::timers::TimerState;
 use crate::core::{Panel, Stat};
 use crate::util::shorten;
 use crate::util::svg::{
@@ -46,6 +48,8 @@ pub struct Dashboard {
     pub features: Vec<FeatureView>,
     /// Boxes of longer text from the features, those with the same title merged.
     pub panels: Vec<Panel>,
+    /// The background loops, in the order they started.
+    pub timers: Vec<TimerState>,
     pub history: History,
 }
 
@@ -112,6 +116,7 @@ pub fn online_svg(d: &Dashboard) -> String {
         }
     }
     features(&mut svg, d);
+    timers(&mut svg, d);
     last_error(&mut svg, d);
 
     svg.y += 22.0;
@@ -639,6 +644,50 @@ fn feature_card(svg: &mut Svg, d: &Dashboard, f: &FeatureView, card: [f32; 4], w
 }
 
 /// The most recent error, in a red box.
+/// One row per background loop: its name, how often it runs, when it last ran and when it
+/// runs next.
+fn timers(svg: &mut Svg, d: &Dashboard) {
+    if d.timers.is_empty() {
+        return;
+    }
+    section(svg, "Timers");
+    let height = 28.0;
+    svg.y += 4.0;
+    for (n, timer) in d.timers.iter().enumerate() {
+        svg.stripe(n, height);
+        let y = svg.y + 18.5;
+        svg.text(32.0, y, timer.name, Style::new(13.0, TEXT).weight(500));
+        svg.text(200.0, y, timer.every, Style::new(12.0, DIM));
+        let (next, color) = timer_next(timer, d.now);
+        svg.text(
+            RIGHT - 16.0,
+            y,
+            &next,
+            Style::new(13.0, color).weight(600).end(),
+        );
+        if let Some(last) = timer.last {
+            svg.text(
+                RIGHT - 120.0,
+                y,
+                &format!("ran {}", relative(last, d.now)),
+                Style::new(12.0, MUTED).end(),
+            );
+        }
+        svg.y += height;
+    }
+}
+
+/// "in 12m", "running" while it works, or "due" when it's late: a loop busy with something
+/// else, or stuck.
+fn timer_next(timer: &TimerState, now: DateTime<Utc>) -> (String, &'static str) {
+    match timer.next {
+        None => ("running".to_string(), GREEN),
+        Some(at) if at < now - TimeDelta::seconds(60) => ("due".to_string(), AMBER),
+        Some(at) if at <= now => ("now".to_string(), ACCENT),
+        Some(at) => (relative(at, now), ACCENT),
+    }
+}
+
 fn last_error(svg: &mut Svg, d: &Dashboard) {
     let Some((at, text)) = &d.errors.last else {
         return;
@@ -1175,8 +1224,32 @@ mod tests {
                 ],
                 picture: Some(sample_face()),
             }],
+            timers: sample_timers(now),
             history: sample_history(now),
         }
+    }
+
+    fn sample_timers(now: DateTime<Utc>) -> Vec<TimerState> {
+        let timer = |name, every, last: Option<i64>, next: Option<i64>| TimerState {
+            name,
+            every,
+            last: last.map(|m| now - TimeDelta::minutes(m)),
+            next: next.map(|m| now + TimeDelta::minutes(m)),
+        };
+        vec![
+            timer("Status graphs", "every 15m", Some(10), Some(5)),
+            timer("Reminders", "at the next reminder", Some(3), Some(75)),
+            timer("Check-ins", "at the next check-in", Some(40), Some(20)),
+            timer("Emoji descriptions", "daily", Some(300), Some(1140)),
+            timer(
+                "Memory upkeep",
+                "hourly: reflection, mood, diary",
+                Some(0),
+                None,
+            ),
+            timer("Snail picture retries", "every 5m", None, Some(-4)),
+            timer("Anthropic bill", "hourly", Some(55), Some(5)),
+        ]
     }
 
     /// A stand-in for Vivy's face: a teal square with a lighter middle.
@@ -1216,12 +1289,16 @@ mod tests {
                 || svg.contains("Couldn't load: database is locked")
         );
         assert!(svg.contains(">12m ago  ·  10 Oct 08:28 UTC<"));
+        assert!(svg.contains(">TIMERS<"));
+        assert!(svg.contains(">in 1h 15m<") && svg.contains(">ran 3m ago<"));
+        assert!(svg.contains(">running<") && svg.contains(">due<"));
 
         // A new install: no history, no spend, a fallback, no errors.
         let mut fresh = sample(now);
         fresh.history = History::new();
         fresh.spend = None;
         fresh.panels = Vec::new();
+        fresh.timers = Vec::new();
         fresh.errors = ErrorStats {
             last_hour: 0,
             last_day: 0,

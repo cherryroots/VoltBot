@@ -23,6 +23,7 @@ use tracing::{info, warn};
 
 use super::claude::billing::Billing;
 use super::display_name;
+use crate::core::Timers;
 use crate::core::db::Db;
 
 /// Shares of the budget that get a warning, once a month each.
@@ -142,10 +143,12 @@ impl Spend {
     }
 
     /// Reads Claude's bill now and then every hour, for as long as the bot runs.
-    pub async fn follow_bill(self, billing: Billing) {
+    pub async fn follow_bill(self, billing: Billing, timers: Timers) {
         self.set_admin_key(AdminKey::Starting);
+        let timer = timers.add("Anthropic bill", "hourly");
         let mut failing = false;
         loop {
+            timer.running();
             let now = Utc::now();
             match billing.this_month(now).await {
                 Ok(usd) => {
@@ -176,6 +179,7 @@ impl Spend {
                     self.set_admin_key(AdminKey::Failing(format!("{err:#}")));
                 }
             }
+            timer.sleeping(BILL_EVERY);
             tokio::time::sleep(BILL_EVERY).await;
         }
     }

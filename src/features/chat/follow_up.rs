@@ -99,7 +99,9 @@ pub fn spawn(ctx: &BotCtx, wake: Arc<Notify>) {
 }
 
 async fn run(ctx: BotCtx, wake: Arc<Notify>) {
+    let timer = ctx.timers.add("Check-ins", "at the next check-in");
     loop {
+        timer.running();
         if let Err(err) = deliver_due(&ctx).await {
             error!("delivering follow-ups: {err:#}");
         }
@@ -115,8 +117,10 @@ async fn run(ctx: BotCtx, wake: Arc<Notify>) {
             Some(at) => (at - Utc::now().timestamp()).clamp(1, 3600),
             None => 3600,
         };
+        let wait = Duration::from_secs(wait as u64);
+        timer.sleeping(wait);
         tokio::select! {
-            () = tokio::time::sleep(Duration::from_secs(wait as u64)) => {}
+            () = tokio::time::sleep(wait) => {}
             () = wake.notified() => {}
             () = ctx.shutdown.cancelled() => break,
         }

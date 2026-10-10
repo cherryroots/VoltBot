@@ -27,11 +27,14 @@ const OFF_WAIT: i64 = 60 * 60;
 pub fn spawn(ctx: &BotCtx) {
     let ctx = ctx.clone();
     ctx.tasks.clone().spawn(async move {
+        let timer = ctx.timers.add("Snail picture retries", "every 5m");
         loop {
+            timer.sleeping(CHECK_EVERY);
             tokio::select! {
                 _ = ctx.shutdown.cancelled() => return,
                 _ = tokio::time::sleep(CHECK_EVERY) => {}
             }
+            timer.running();
             if let Err(err) = retry_due(&ctx).await {
                 warn!("retrying failed snail pictures: {err:#}");
             }

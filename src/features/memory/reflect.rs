@@ -61,9 +61,14 @@ pub fn spawn(ctx: &BotCtx) {
 }
 
 async fn run(ctx: BotCtx) {
+    let timer = ctx
+        .timers
+        .add("Memory upkeep", "hourly: reflection, mood, diary");
+    timer.running();
     update_status(&ctx).await;
     face::sync_all(&ctx).await;
     loop {
+        timer.running();
         if let Err(err) = reflect_due(&ctx).await {
             error!("reflecting on memory: {err:#}");
         }
@@ -77,6 +82,7 @@ async fn run(ctx: BotCtx) {
         if let Err(err) = prune_changes(&ctx).await {
             error!("pruning old memory changes: {err:#}");
         }
+        timer.sleeping(CHECK);
         tokio::select! {
             () = tokio::time::sleep(CHECK) => {}
             () = ctx.shutdown.cancelled() => break,

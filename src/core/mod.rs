@@ -13,11 +13,13 @@ pub mod feature;
 pub mod legacy;
 pub mod logging;
 pub mod settings;
+pub mod timers;
 
 pub use ctx::BotCtx;
 pub use errors::user_error;
 pub use events::BotEvent;
 pub use feature::{Asker, Feature, LegacyImport, Mention, Panel, Stat};
+pub use timers::Timers;
 
 /// The error type used everywhere. `anyhow` keeps the chain of causes, so a log line reads
 /// "sending reminder 12: Missing Access" instead of only "Missing Access".
