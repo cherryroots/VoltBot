@@ -39,7 +39,7 @@ const PANEL_SIZE: u32 = 128;
 /// `[features.memory]` settings for her faces.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
-struct Settings {
+pub(super) struct Settings {
     /// The folder with one PNG per mood.
     faces_dir: Option<String>,
     /// How far to zoom in on a face: 1 keeps the whole square, 1.5 shows the middle two
@@ -82,7 +82,7 @@ impl Crop {
 
 /// The crop for faces from the settings, or none when nothing is cut.
 fn crop(ctx: &BotCtx) -> Option<Crop> {
-    let settings: Settings = ctx.config.feature("memory").ok()?;
+    let settings: Settings = ctx.config.feature_part("memory").ok()?;
     let crop = Crop {
         zoom: settings.face_zoom,
         center: settings.face_center,
@@ -92,7 +92,7 @@ fn crop(ctx: &BotCtx) -> Option<Crop> {
 
 /// The faces folder, if one is set.
 fn dir(ctx: &BotCtx) -> Option<PathBuf> {
-    let settings: Settings = ctx.config.feature("memory").ok()?;
+    let settings: Settings = ctx.config.feature_part("memory").ok()?;
     settings.faces_dir.map(PathBuf::from)
 }
 

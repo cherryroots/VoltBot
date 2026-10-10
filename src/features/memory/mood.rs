@@ -26,7 +26,7 @@ const ANSWER: &str = "Answer with only the new file, nothing before or after it.
 /// `[features.memory]` settings for mood checks.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
-struct Settings {
+pub(super) struct Settings {
     /// How often a day her mood is checked in each server. 0 turns checks off (the daily
     /// reflection still updates it).
     mood_checks_per_day: u32,
@@ -45,7 +45,7 @@ impl Default for Settings {
 
 /// Where she lives (`timezone`), or UTC when it isn't set or isn't a known name.
 pub fn zone(ctx: &BotCtx) -> Tz {
-    let settings: Settings = ctx.config.feature("memory").unwrap_or_default();
+    let settings: Settings = ctx.config.feature_part("memory").unwrap_or_default();
     settings.timezone.parse().unwrap_or_else(|_| {
         warn!(timezone = settings.timezone, "unknown timezone, using UTC");
         Tz::UTC
@@ -65,7 +65,7 @@ pub async fn check_due(ctx: &BotCtx) -> Result<()> {
     if ctx.ai.chat().is_none() {
         return Ok(());
     }
-    let settings: Settings = ctx.config.feature("memory")?;
+    let settings: Settings = ctx.config.feature_part("memory")?;
     if settings.mood_checks_per_day == 0 {
         return Ok(());
     }
