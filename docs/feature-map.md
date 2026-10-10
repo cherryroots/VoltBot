@@ -149,6 +149,7 @@ src/
     wheel/                # ledger.rs (pure), store.rs, commands.rs, ui.rs, render.rs, tools.rs, import.rs
     chat/                 # mod.rs, answer.rs, history.rs, store.rs, tools.rs, prompt.md
     memory/               # folder.rs (pure), store.rs, tool.rs, commands.rs
+    voice/                # speech.rs (ElevenLabs), audio.rs (ffmpeg), store.rs
 ```
 
 Plain modules in one crate. A Cargo workspace with a crate per feature would let the compiler enforce rule 1, but it adds build setup that isn't worth it yet.
@@ -228,6 +229,7 @@ Each feature can contribute tools, the same way it subscribes to events, so remi
 | `get_wheel_status` | Movie wheel | Current round, options, bets and balances (read only) |
 | `memory` | Memory | View, create, edit, delete and rename notes under `/memories` (same commands as Anthropic's memory tool) |
 | `set_mood` | Memory | Change her mood, status and face in this server when a conversation moves her |
+| `send_voice_message` | Voice | Speaks a short script (with audio tags) through ElevenLabs and posts it as a Discord voice message replying to the asker |
 
 The tool loop: when the model asks for a tool, the bot runs it, sends the result back, and keeps streaming. The status line under the reply shows which tool is running.
 
@@ -411,7 +413,7 @@ What it does: gives admins two channels to watch the bot without logging in to t
 - the AI provider and model chat uses, and the fallback with when it retries
 - Claude's spend this month: a bar against `monthly_budget`, a graph of the month so far with the pace to the month's end and the budget line, whether it's the bill or the estimate, the admin key's state and last read, and (behind their toggles) the cache hit rate as a ring and the cost per job as bars
 - "Vivy's mind": a box features fill with `panels()` (panels with the same title merge). Memory adds her mood, what she's thinking about and what she wants to know, from the `mood:`, `thinking:` and `wondering:` lines the daily reflection and the mood checks write in `/memories/vivy/mood.md` (the newest one, like her Discord status), with the picture of its `face:` line in a circle on the right. Chat adds her next check-in in a server, with whom and what about, and how many are planned (check-ins from DMs stay off it)
-- one card per feature from its `stats()`; stats that are plain numbers get a graph of the last 7 days and how much they changed. Chat: answers and planned follow-ups. Reminders: pending, sent this week, next. Wheel: games, open bets, rounds played. Memory: files, folders, changes today, last reflection. Snails: caught this week (new messages that repeat an earlier post, checked like Check Snail as they arrive and saved in `snail_caught`), links, pictures, backfill
+- one card per feature from its `stats()`; stats that are plain numbers get a graph of the last 7 days and how much they changed. Chat: answers and planned follow-ups. Reminders: pending, sent this week, next. Wheel: games, open bets, rounds played. Memory: files, folders, changes today, last reflection. Snails: caught this week (new messages that repeat an earlier post, checked like Check Snail as they arrive and saved in `snail_caught`), links, pictures, backfill. Voice: voice messages sent this month and characters used against `monthly_characters`
 - the last error, with when it happened
 
 "Updated <t:…:R>" is text above the picture. Discord renders that as "12 seconds ago" and keeps counting on its own, so a crashed bot is obvious even though it can't edit the message any more. On a clean shutdown the bot swaps in an OFFLINE picture before it exits. If the picture can't be drawn, the message shows the same information as an embed.
@@ -485,6 +487,16 @@ voltgpt's memory captured every message, summarized it into notes and profiles, 
 - **Control.** `/memory show [path]` shows all of your files by default, `/memory forget [file]` deletes one of your files (autocompleted) or your whole folder (in DMs, everything), and admins can `/memory delete` any file or folder.
 
 Tables: `memory_files (scope, path, content, updated_at, updated_by)` and `memory_changes (scope, path, at, user_id, before, after)`. `folder.rs` holds the commands as pure functions on a `BTreeMap` of paths, tested without a database.
+
+## Voice messages
+
+Cherry, 2026-10-10: Vivy speaks through Discord voice messages, made with ElevenLabs v4. Voice channels aren't part of it.
+
+- **Tool.** `send_voice_message` (`features/voice/`) takes a script: spoken words with v4 audio tags in square brackets (`[whispers]`, `[laughs]`, `[sleepy, slow]`). A tag lasts until the next one, several go in one bracket with commas, and opposite ones shouldn't be mixed. Only the script goes to ElevenLabs. Chat offers the tool only when `ELEVENLABS_API_KEY` is in .env, in chat answers and chime-ins.
+- **Speech** (`voice/speech.rs`). `POST /v1/text-to-speech/{voice_id}?output_format=opus_48000_128` with `model_id` (`model`, default `eleven_v4`), `stability` and `similarity_boost`, and `language_code` when `language` is set. v4 ignores style, speed and SSML.
+- **Audio** (`voice/audio.rs`). ffmpeg re-encodes it as mono OGG Opus at 64 kbit/s and decodes it to 8 kHz samples for the length and the waveform (up to 256 bars, one per tenth of a second, the loudest at 255).
+- **Posting.** A voice message can't have text, so it is its own message under the text answer: flag `IS_VOICE_MESSAGE` (1 << 13), one `voice-message.ogg` attachment with `duration_secs` and a base64 `waveform` in `payload_json`, replying to the asker. serenity's `CreateAttachment` can't carry those two fields, so it goes through `Http::send_message` with a hand-written payload. The channel needs the Send Voice Messages permission.
+- **Limits.** `max_characters` per message (1000) and `monthly_characters` per UTC month (50000, 0 for none), counted in `voice_messages`. Past the limit the tool tells her to answer in text.
 
 ## Go code that is not needed
 

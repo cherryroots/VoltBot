@@ -8,6 +8,7 @@ mod control_panel;
 mod memory;
 mod reminders;
 mod snails;
+mod voice;
 mod wheel;
 
 use std::sync::Arc;
@@ -21,6 +22,7 @@ pub fn all() -> Vec<Arc<dyn Feature>> {
         Arc::new(control_panel::ControlPanel),
         Arc::new(memory::Memory),
         Arc::new(snails::Snails),
+        Arc::new(voice::Voice),
         Arc::new(chat::Chat::default()),
     ]
 }

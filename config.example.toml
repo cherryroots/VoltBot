@@ -109,6 +109,26 @@ timezone = "UTC"
 # for no banners.
 # banners_dir = "banners"
 
+[features.voice]
+# Voice messages: Vivy can answer with a Discord voice message in her own voice, made with
+# ElevenLabs. The key goes in .env (ELEVENLABS_API_KEY); without it she can't send them.
+enabled = true
+# The ElevenLabs voice she speaks with (from Voice Design or the voice library).
+voice_id = "DIIk31SqVXDOEFbJGJl9"
+# "eleven_v4", or "eleven_v4_turbo" for faster and half the price.
+model = "eleven_v4"
+# 0 to 1: lower is more expressive and varied, higher is steadier.
+stability = 0.5
+# 0 to 1: how closely it sticks to the voice.
+similarity = 0.75
+# A language code like "en" to force a language. Left out, it follows the text.
+# language = "en"
+# The most characters a month, all voice messages together (0 for no limit). ElevenLabs
+# bills per character, audio tags included. The status picture shows what's used.
+monthly_characters = 50000
+# The most characters in one voice message.
+max_characters = 1000
+
 [features.snails]
 # Repost detection. New messages' links and pictures are saved as they arrive; right-click a
 # message → Apps → Check Snail lists earlier posts of the same link or picture.
