@@ -77,7 +77,7 @@ sudo systemctl enable --now voltbot
 
 ### 5. Check on it
 
-- **Discord:** the status channel has a message that refreshes every minute with uptime, errors and per-feature stats, and the log channel gets warnings, errors, and start and stop notices.
+- **Discord:** the status channel has a message that refreshes every minute with uptime, the AI provider and model, errors and per-feature stats, and the log channel gets warnings, errors, and start and stop notices.
 - **Service state:** `systemctl status voltbot`
 - **Full logs:** `journalctl -u voltbot -f`. Set `RUST_LOG` in the service file to change the level, for example `RUST_LOG=info,voltbot::features::chat=debug`.
 

@@ -401,7 +401,7 @@ What it does: gives admins two channels to watch the bot without logging in to t
 
 **Status channel.** One message that the bot keeps editing every 60 seconds (well inside Discord's rate limits). Its ID is saved in the database, so after a restart the bot edits the same message instead of posting a new one. It shows:
 
-- 🟢 Online, uptime, version and git commit, gateway latency, server count
+- 🟢 Online, uptime, version and git commit, gateway latency, server count, the AI provider and model chat uses
 - memory use, database size, errors in the last hour and the last 24 hours, and when the last error happened
 - one block per feature from its `stats()`: for example, pending reminders and the next one due; chat requests today, tokens used and prompt cache hit rate; the current wheel round and its bet count
 - "Updated <t:…:R>" at the bottom. Discord renders that as "12 seconds ago" and keeps counting on its own, so a crashed bot is obvious even though it can't edit the message any more. On a clean shutdown the bot changes the header to 🔴 Offline before it exits.

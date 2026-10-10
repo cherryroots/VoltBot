@@ -118,6 +118,7 @@ async fn online_embed(ctx: &BotCtx) -> CreateEmbed {
             true,
         )
         .field("Database", megabytes(database_size(ctx)), true)
+        .field("AI", ai_provider(ctx), true)
         .field(
             "Errors",
             format!(
@@ -162,6 +163,19 @@ fn offline_embed(ctx: &BotCtx) -> CreateEmbed {
         .field("Stopped", format!("<t:{}:f>", now.timestamp()), true)
         .field("Was up for", human_duration(now - ctx.started_at), true)
         .field("Version", format!("{VERSION} (`{GIT_COMMIT}`)"), true)
+}
+
+/// The provider and model chat uses, from `provider` under `[ai]`.
+fn ai_provider(ctx: &BotCtx) -> String {
+    let Some(chat) = &ctx.ai.chat else {
+        return "Off (no key)".to_string();
+    };
+    let name = match chat.name() {
+        "claude" => "Claude",
+        "openai" => "OpenAI",
+        other => other,
+    };
+    format!("{name}\n`{}`", chat.model())
 }
 
 /// "3d 4h 12m", "4h 12m" or "12m".
