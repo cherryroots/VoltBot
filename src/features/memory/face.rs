@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serenity::all::GuildId;
 use tracing::{info, warn};
 
-use super::{reflect, store};
+use super::{name, reflect, store};
 use crate::core::{BotCtx, Result};
 
 /// Avatars are scaled down to this size, which is plenty for Discord.
@@ -31,7 +31,7 @@ const AVATAR_SIZE: u32 = 512;
 const BANNER_SIZE: u32 = 1500;
 /// The shortest time between two changes of one picture in one server, so a lively conversation
 /// can't run into Discord's limits. A face held back by this is tried again when the time is up.
-const MIN_GAP_SECS: i64 = 10 * 60;
+pub(super) const MIN_GAP_SECS: i64 = 10 * 60;
 
 /// The face on the control panel, in pixels (drawn at half this size, for sharpness).
 const PANEL_SIZE: u32 = 128;
@@ -122,14 +122,23 @@ pub fn names(ctx: &BotCtx) -> Vec<String> {
     dir(ctx).map(|dir| names_in(&dir)).unwrap_or_default()
 }
 
-/// The line added to the reflection's instructions when there are faces.
-pub fn instruction(names: &[String]) -> Option<String> {
-    (!names.is_empty()).then(|| {
+/// The lines added to the mood instructions (reflection and mood checks): a `face:` line
+/// when there are faces, and an `emoji:` line when her nickname follows her mood.
+pub fn instruction(names: &[String], emoji: bool) -> Option<String> {
+    let face = (!names.is_empty()).then(|| {
         format!(
-            "Add a fifth line to mood.md, `face:` and the one word from this list that best fits your mood or what you're doing right now: {}. It becomes your profile picture in this server.",
+            "Add a line to mood.md, `face:` and the one word from this list that best fits your mood or what you're doing right now: {}. It becomes your profile picture in this server.",
             names.join(", ")
         )
-    })
+    });
+    let emoji = emoji.then(|| name::INSTRUCTION.to_string());
+    let lines: Vec<String> = face.into_iter().chain(emoji).collect();
+    (!lines.is_empty()).then(|| lines.join(" "))
+}
+
+/// [`instruction`] for the current settings.
+pub fn instruction_for(ctx: &BotCtx) -> Option<String> {
+    instruction(&names(ctx), name::enabled(ctx))
 }
 
 /// The `face:` line of her mood file, if it names one of `names`.
@@ -164,8 +173,9 @@ fn fingerprint(png: &[u8]) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// Makes the face in her mood file for `scope` her avatar in that server. Does nothing
-/// for DMs, without faces, or when that server already has this picture.
+/// Makes the face in her mood file for `scope` her avatar in that server, and its emoji
+/// part of her nickname (`name.rs`). Does nothing for DMs, or for what that server already
+/// shows.
 pub async fn update(ctx: &BotCtx, scope: &str, mood: &str) {
     let Some(guild) = scope
         .strip_prefix("server:")
@@ -174,24 +184,30 @@ pub async fn update(ctx: &BotCtx, scope: &str, mood: &str) {
     else {
         return;
     };
-    let Some(dir) = dir(ctx) else {
-        return;
-    };
-    let Some(face) = parse(mood, &names_in(&dir)) else {
-        return;
-    };
-    let path = dir.join(format!("{face}.png"));
-    match set_picture(ctx, guild, Slot::Avatar, path, &face).await {
-        Ok(Some(wait)) => retry_later(ctx, scope, wait),
+    let mut wait = None;
+    if let Some(dir) = dir(ctx)
+        && let Some(face) = parse(mood, &names_in(&dir))
+    {
+        let path = dir.join(format!("{face}.png"));
+        match set_picture(ctx, guild, Slot::Avatar, path, &face).await {
+            Ok(left) => wait = left,
+            Err(err) => warn!(%guild, face, "changing her face: {err:#}"),
+        }
+    }
+    match name::update(ctx, guild, mood).await {
+        Ok(Some(left)) => wait = Some(wait.unwrap_or(0).max(left)),
         Ok(None) => {}
-        Err(err) => warn!(%guild, face, "changing her face: {err:#}"),
+        Err(err) => warn!(%guild, "changing her nickname: {err:#}"),
+    }
+    if let Some(wait) = wait {
+        retry_later(ctx, scope, wait);
     }
 }
 
-/// Servers with a face change waiting for the 10 minutes to pass.
+/// Servers with a face or nickname change waiting for the 10 minutes to pass.
 static WAITING: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Mutex::default);
 
-/// Tries the face of `scope` again in `wait` seconds, with her mood as it is then. One
+/// Tries the face and nickname of `scope` again in `wait` seconds, with her mood as it is then. One
 /// waiting try per server is enough: it reads the newest mood.
 fn retry_later(ctx: &BotCtx, scope: &str, wait: i64) {
     if !WAITING.lock().unwrap().insert(scope.to_string()) {
@@ -305,11 +321,11 @@ pub async fn set_picture(
     Ok(None)
 }
 
-/// At start: puts each server's face back in step with its mood file, for a face picked
-/// before the pictures were there. Servers that already show that face are skipped, so
-/// this costs nothing most of the time.
+/// At start: puts each server's face and nickname back in step with its mood file, for a
+/// face picked before the pictures were there or a nickname just turned on. Servers that
+/// already show them are skipped, so this costs nothing most of the time.
 pub async fn sync_all(ctx: &BotCtx) {
-    if names(ctx).is_empty() {
+    if names(ctx).is_empty() && !name::enabled(ctx) {
         return;
     }
     let moods = ctx
@@ -382,8 +398,15 @@ mod tests {
         );
         assert_eq!(parse("face: furious", &names), None);
         assert_eq!(parse("mood: fine", &names), None);
-        assert!(instruction(&[]).is_none());
-        assert!(instruction(&names).unwrap().contains("happy, sleepy"));
+        assert!(instruction(&[], false).is_none());
+        assert!(
+            instruction(&names, false)
+                .unwrap()
+                .contains("happy, sleepy")
+        );
+        assert!(!instruction(&names, false).unwrap().contains("emoji:"));
+        assert!(instruction(&[], true).unwrap().contains("`emoji:`"));
+        assert!(instruction(&names, true).unwrap().contains("`emoji:`"));
     }
 
     #[test]

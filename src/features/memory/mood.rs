@@ -52,10 +52,11 @@ pub fn zone(ctx: &BotCtx) -> Tz {
     })
 }
 
-/// The instructions, with the faces she can pick from when there are any.
-fn system(faces: &[String]) -> String {
-    match face::instruction(faces) {
-        Some(faces) => format!("{SYSTEM} {faces} {ANSWER}"),
+/// The instructions, with the face and emoji lines when those are on
+/// ([`face::instruction`]).
+fn system(extra: Option<&str>) -> String {
+    match extra {
+        Some(extra) => format!("{SYSTEM} {extra} {ANSWER}"),
         None => format!("{SYSTEM} {ANSWER}"),
     }
 }
@@ -125,7 +126,7 @@ async fn check(ctx: &BotCtx, scope: &str, mood: &str, since: i64, zone: Tz) -> R
     let text = input(Utc::now(), zone, notes.as_deref(), mood, &changed);
 
     let request = ChatRequest {
-        system: system(&face::names(ctx)),
+        system: system(face::instruction_for(ctx).as_deref()),
         input: Input::Full(vec![Turn {
             role: Role::User,
             parts: vec![Part::Text(text)],
@@ -262,7 +263,7 @@ mod tests {
     fn settings_default_to_five_checks() {
         let settings = Settings::default();
         assert_eq!(settings.mood_checks_per_day, 5);
-        assert!(system(&[]).ends_with(ANSWER));
-        assert!(system(&["sleepy".into()]).contains("sleepy"));
+        assert!(system(None).ends_with(ANSWER));
+        assert!(system(Some("face: sleepy")).contains("sleepy"));
     }
 }

@@ -112,6 +112,9 @@ face_center = 0.5
 # day.png (11 to 17), evening.png (17 to 22) and night.png. Checked every hour. Leave out
 # for no banners.
 # banners_dir = "banners"
+# Her name in each server, followed by an emoji she picks with her mood ("Vivy ☕"). Leave
+# out to keep her name as it is.
+# nickname = "Vivy"
 
 [features.voice]
 # Voice messages: Vivy can answer with a Discord voice message in her own voice, made with

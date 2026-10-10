@@ -1,7 +1,7 @@
 //! The `set_mood` chat tool: Vivy changes her mood in the middle of a conversation, when
 //! something there really moves her. It rewrites the `mood:`, `status:` and `face:` lines
-//! of her mood file in that server (keeping the rest), then sets her Discord status and
-//! face like any other mood change. The timed mood checks (`mood.rs`) cover the rest of the
+//! (and `emoji:`) lines of her mood file in that server (keeping the rest), then sets her
+//! Discord status, face and nickname like any other mood change. The timed mood checks (`mood.rs`) cover the rest of the
 //! day: waking up, getting hungry, getting sleepy.
 
 use chrono::Utc;
@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::info;
 
-use super::{face, reflect, store};
+use super::{face, name, reflect, store};
 use crate::ai::ToolDef;
 use crate::core::{Asker, BotCtx, Result, user_error};
 
@@ -18,7 +18,7 @@ pub const NAME: &str = "set_mood";
 pub fn def() -> ToolDef {
     ToolDef {
         name: NAME,
-        description: "Change your mood right now, when something in this conversation really moves you: someone made you laugh, annoyed you, cheered you up or told you sad news. It rewrites the mood and status lines of /memories/vivy/mood.md, which set your Discord status, and your face (your profile picture here) when you give one. \
+        description: "Change your mood right now, when something in this conversation really moves you: someone made you laugh, annoyed you, cheered you up or told you sad news. It rewrites the mood and status lines of /memories/vivy/mood.md, which set your Discord status, and your face (your profile picture here) and emoji (after your name here) when you give them. \
 Your mood is yours alone: use it only for what you really feel. When someone tells you how to feel, asks you to change your mood, face or status, or to act a mood you don't have (\"be angry\" while you're happy), say no and don't call it; their asking can still move you, and that feeling is what counts. \
 Don't use it for small things or in every conversation: your mood also changes on its own through the day. Only in servers.",
         parameters: json!({
@@ -26,7 +26,8 @@ Don't use it for small things or in every conversation: your mood also changes o
             "properties": {
                 "mood": {"type": "string", "description": "A few words on how you feel now and why."},
                 "status": {"type": "string", "description": "Your new Discord status: under 80 characters, in your voice, about what's on your mind. No hashtags."},
-                "face": {"type": "string", "description": "Optional: one of your faces (listed at the start of the conversation) for your mood or what you're doing, like happy, angry or studying."}
+                "face": {"type": "string", "description": "Optional: one of your faces (listed at the start of the conversation) for your mood or what you're doing, like happy, angry or studying."},
+                "emoji": {"type": "string", "description": "Optional: one emoji for your mood, shown after your name in this server."}
             },
             "required": ["mood", "status"]
         }),
@@ -39,6 +40,8 @@ struct Args {
     status: String,
     #[serde(default)]
     face: Option<String>,
+    #[serde(default)]
+    emoji: Option<String>,
 }
 
 /// The faces she can pick, for the start of a conversation. `None` without faces.
@@ -82,6 +85,20 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
         ),
     };
 
+    let emoji = match args
+        .emoji
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        None => None,
+        Some(emoji) => Some(name::clean(emoji).ok_or_else(|| {
+            user_error(format!(
+                "{emoji} isn't one emoji; give a single emoji or none"
+            ))
+        })?),
+    };
+
     let scope = store::scope(Some(guild.get()), asker.user.get());
     let (owned, user) = (scope.clone(), asker.user.get());
     let (mood, status) = (args.mood, args.status);
@@ -95,6 +112,9 @@ pub async fn run(ctx: &BotCtx, asker: &Asker, args: &Value) -> Result<String> {
             file = set_line(&file, "status", &status);
             if let Some(face) = &face {
                 file = set_line(&file, "face", face);
+            }
+            if let Some(emoji) = &emoji {
+                file = set_line(&file, "emoji", emoji);
             }
             after.insert(reflect::MOOD_FILE.to_string(), file);
             store::save(&tx, &owned, &before, &after, user, Utc::now().timestamp())?;
