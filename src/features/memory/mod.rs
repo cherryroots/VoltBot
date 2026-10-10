@@ -12,6 +12,7 @@
 //! - `reflect.rs`: the daily reflection, where Vivy tidies her memory and updates her own notes
 //!   and mood (which sets her Discord status)
 //! - `mood.rs`: mood checks a few times a day, which follow the time of day
+//! - `set_mood.rs`: the `set_mood` tool, for when a conversation changes her mood
 //! - `face.rs`: her face, a picture per mood that becomes her avatar in each server
 //! - `diary.rs`: the weekly diary she posts in `diary_channels`
 
@@ -21,6 +22,7 @@ mod face;
 mod folder;
 mod mood;
 mod reflect;
+mod set_mood;
 mod store;
 mod tool;
 
@@ -48,21 +50,24 @@ impl Feature for Memory {
     }
 
     fn tools(&self) -> Vec<ToolDef> {
-        vec![tool::def()]
+        vec![tool::def(), set_mood::def()]
     }
 
     async fn run_tool(
         &self,
         ctx: &BotCtx,
         asker: &Asker,
-        _name: &str,
+        name: &str,
         args: &Value,
     ) -> Result<String> {
-        tool::run(ctx, asker, args).await
+        match name {
+            set_mood::NAME => set_mood::run(ctx, asker, args).await,
+            _ => tool::run(ctx, asker, args).await,
+        }
     }
 
-    /// The file list every time, and Vivy's own notes about herself at the start of a
-    /// conversation (a continued one still has them from its first answer).
+    /// The file list every time, and Vivy's own notes about herself (with her faces) at the
+    /// start of a conversation (a continued one still has them from its first answer).
     async fn chat_context(
         &self,
         ctx: &BotCtx,
@@ -72,6 +77,12 @@ impl Feature for Memory {
         let mut text = tool::file_list(ctx, asker).await?;
         if fresh && let Some(notes) = tool::self_notes(ctx, asker).await? {
             text = format!("{notes}\n{text}");
+        }
+        if fresh
+            && asker.guild.is_some()
+            && let Some(faces) = set_mood::faces_note(ctx)
+        {
+            text = format!("{faces}\n{text}");
         }
         Ok(Some(text))
     }

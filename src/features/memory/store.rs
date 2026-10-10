@@ -198,12 +198,12 @@ pub fn every_file(conn: &Connection, path: &str) -> rusqlite::Result<Vec<(String
     rows.collect()
 }
 
-/// The fingerprint of the face Vivy has in `guild`.
-pub fn face(conn: &Connection, guild: u64) -> rusqlite::Result<Option<String>> {
+/// The fingerprint of the face Vivy has in `guild`, and when it was set.
+pub fn face(conn: &Connection, guild: u64) -> rusqlite::Result<Option<(String, i64)>> {
     conn.query_row(
-        "SELECT fingerprint FROM memory_faces WHERE guild_id = ?1",
+        "SELECT fingerprint, at FROM memory_faces WHERE guild_id = ?1",
         [guild],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
 }
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(face(&conn, 1).unwrap(), None);
         set_face(&conn, 1, "happy", "aa", 10).unwrap();
         set_face(&conn, 1, "sleepy", "bb", 20).unwrap();
-        assert_eq!(face(&conn, 1).unwrap(), Some("bb".to_string()));
+        assert_eq!(face(&conn, 1).unwrap(), Some(("bb".to_string(), 20)));
 
         assert_eq!(mood_checked_at(&conn, "server:1").unwrap(), None);
         set_mood_checked(&conn, "server:1", 5).unwrap();

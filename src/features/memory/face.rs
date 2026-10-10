@@ -24,6 +24,10 @@ use crate::core::{BotCtx, Result};
 
 /// Avatars are scaled down to this size, which is plenty for Discord.
 const AVATAR_SIZE: u32 = 512;
+/// The shortest time between two avatar changes in one server, so a lively conversation
+/// can't run into Discord's limits. A face skipped for this waits for the next mood change.
+const MIN_GAP_SECS: i64 = 10 * 60;
+
 /// The face on the control panel, in pixels (drawn at half this size, for sharpness).
 const PANEL_SIZE: u32 = 128;
 
@@ -131,8 +135,14 @@ async fn set_avatar(ctx: &BotCtx, guild: GuildId, dir: &Path, face: &str) -> Res
     let print = fingerprint(&png);
     let id = guild.get();
     let current = ctx.db.call(move |conn| Ok(store::face(conn, id)?)).await?;
-    if current.as_deref() == Some(print.as_str()) {
-        return Ok(());
+    if let Some((current, at)) = current {
+        if current == print {
+            return Ok(());
+        }
+        if Utc::now().timestamp() - at < MIN_GAP_SECS {
+            info!(%guild, face, "face changed less than 10 minutes ago, keeping it for now");
+            return Ok(());
+        }
     }
 
     let avatar = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&png));
