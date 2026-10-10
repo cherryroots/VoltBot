@@ -105,6 +105,11 @@ impl Spend {
         }
     }
 
+    /// The bot's database, which the Claude provider also uses for its uploads.
+    pub fn db(&self) -> &Db {
+        &self.db
+    }
+
     pub fn budget(&self) -> f64 {
         self.budget
     }

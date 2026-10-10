@@ -5,6 +5,10 @@
 //! looks at the last [`READ_MESSAGES`] messages and decides: a line, an emoji, or nothing.
 //! A channel then waits `chime_cooldown_minutes` before she considers it again. Her line is
 //! saved like an answer, so replying to it continues the conversation.
+//!
+//! Nobody asked for these lines (nor for check-ins, which use [`speak`] too), and they're
+//! posted for the whole channel, so she only gets [`UNPROMPTED_TOOLS`]: tools that read
+//! what people in this channel could see anyway, and her own memory.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -15,6 +19,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use chrono_tz::Tz;
 use serde::Deserialize;
+use serde_json::json;
 use serenity::all::{
     ChannelId, CreateAllowedMentions, CreateMessage, GetMessages, GuildId, Message, ReactionType,
     UserId,
@@ -23,7 +28,7 @@ use tracing::{info, warn};
 
 use super::answer::{self, SYSTEM_PROMPT};
 use super::store::{self, NewTurn, StoredPart, Written};
-use super::tools::format_message;
+use super::tools::{format_message, parse_link};
 use crate::ai::{ChatRequest, Input, Part, Role, ToolCall, ToolRunner, Turn, complete};
 use crate::core::{Asker, BotCtx, Feature, Result};
 use crate::util::shorten;
@@ -34,6 +39,25 @@ const READ_MESSAGES: u8 = 25;
 const MAX_ROUNDS: usize = 4;
 /// The longest line she posts.
 const MAX_LINE: usize = 400;
+
+/// The tools she may use when nobody asked. An allow-list, so a new tool stays out until
+/// someone decides it's safe here. Left out: anything that acts for a person (reminders,
+/// check-ins), and `list_channels`, which lists what one person can see, not everyone here.
+/// `get_message` and `search_messages` only reach this channel (see [`Runner`]). `memory`
+/// is in: what she saves is her own decision.
+const UNPROMPTED_TOOLS: &[&str] = &[
+    "get_current_time",
+    "get_channel_info",
+    "get_user_info",
+    "read_recent_messages",
+    "get_message",
+    "search_messages",
+    "get_pinned_messages",
+    "list_server_events",
+    "list_server_emoji",
+    "get_wheel_status",
+    "memory",
+];
 
 /// `[features.chat]` settings for chiming in.
 #[derive(Debug, Clone, Deserialize)]
@@ -70,7 +94,7 @@ pub struct Chime {
 }
 
 impl Chime {
-    fn settings(&self, ctx: &BotCtx) -> &Settings {
+    pub(super) fn settings(&self, ctx: &BotCtx) -> &Settings {
         self.settings.get_or_init(|| {
             ctx.config.feature("chat").unwrap_or_else(|err| {
                 warn!("chime-ins use their defaults: {err:#}");
@@ -146,7 +170,9 @@ pub async fn speak(
     let context = answer::context_for(ctx, asker, true).await;
     let mut parts = vec![Part::Text(question.clone())];
     parts.extend(context.iter().cloned().map(Part::Text));
-    let (tools, owners) = answer::tools_for(ctx, asker);
+    let (mut tools, mut owners) = answer::tools_for(ctx, asker);
+    tools.retain(|tool| UNPROMPTED_TOOLS.contains(&tool.name));
+    owners.retain(|name, _| UNPROMPTED_TOOLS.contains(name));
     let request = ChatRequest {
         system: SYSTEM_PROMPT.to_string(),
         input: Input::Full(vec![Turn {
@@ -303,7 +329,13 @@ fn decide(text: &str) -> Decision {
     Decision::Say(shorten(text, MAX_LINE))
 }
 
-/// Runs her tool calls with chat's tools, as the author of the last message.
+/// Runs her tool calls with [`UNPROMPTED_TOOLS`], as the author of the last message (or the
+/// person she checks in with), but kept to this channel: what she reads ends up in a public
+/// line, so it mustn't come from a channel only that person can read.
+///
+/// In a server, `memory` runs as Vivy herself: what she saves unprompted is her own call, so
+/// the change log names her, not whoever wrote last. The folder is the server's either way.
+/// In a DM (a follow-up) the folder is the person's, so it stays theirs.
 struct Runner {
     ctx: BotCtx,
     asker: Asker,
@@ -313,8 +345,43 @@ struct Runner {
 #[async_trait]
 impl ToolRunner for Runner {
     async fn run(&self, call: &ToolCall) -> String {
-        answer::run_tool(&self.ctx, &self.asker, &self.owners, call).await
+        match here_only(call, self.asker.channel) {
+            Ok(call) if call.name == "memory" && self.asker.guild.is_some() => {
+                let herself = Asker {
+                    user: self.ctx.bot_id,
+                    ..self.asker.clone()
+                };
+                answer::run_tool(&self.ctx, &herself, &self.owners, &call).await
+            }
+            Ok(call) => answer::run_tool(&self.ctx, &self.asker, &self.owners, &call).await,
+            Err(text) => text,
+        }
     }
+}
+
+/// Keeps a tool call to `channel`: a search only searches it, and a message link must point
+/// into it. Returns the call to run, or the error to give the model instead.
+fn here_only(call: &ToolCall, channel: ChannelId) -> Result<ToolCall, String> {
+    let mut call = call.clone();
+    match call.name.as_str() {
+        "search_messages" => match call.args.as_object_mut() {
+            Some(args) => {
+                args.insert("channel".to_string(), json!("here"));
+            }
+            None => call.args = json!({"channel": "here"}),
+        },
+        "get_message" => {
+            let link = call.args["link"].as_str().unwrap_or_default();
+            // A link that doesn't parse is left to the tool, which explains the mistake.
+            if let Some((_, linked, _)) = parse_link(link)
+                && linked != channel.get()
+            {
+                return Err("Error: right now you can only read messages in this channel.".into());
+            }
+        }
+        _ => {}
+    }
+    Ok(call)
 }
 
 #[cfg(test)]
@@ -342,6 +409,37 @@ mod tests {
             panic!("not a line");
         };
         assert!(long.chars().count() <= MAX_LINE);
+    }
+
+    #[test]
+    fn tools_stay_in_this_channel() {
+        let here = ChannelId::new(10);
+        let call = |name: &str, args| ToolCall {
+            id: "1".into(),
+            name: name.into(),
+            args,
+        };
+        let search = here_only(&call("search_messages", json!({"channel": "secret"})), here);
+        assert_eq!(search.unwrap().args["channel"], "here");
+        let search = here_only(&call("search_messages", json!(null)), here);
+        assert_eq!(search.unwrap().args["channel"], "here");
+
+        let link = |channel| json!({"link": format!("https://discord.com/channels/1/{channel}/5")});
+        assert!(here_only(&call("get_message", link(10)), here).is_ok());
+        assert!(here_only(&call("get_message", link(11)), here).is_err());
+        assert!(here_only(&call("get_message", json!({"link": "nonsense"})), here).is_ok());
+    }
+
+    #[test]
+    fn no_tools_that_act_for_someone() {
+        for name in [
+            "create_reminder",
+            "cancel_reminder",
+            "list_reminders",
+            "schedule_follow_up",
+        ] {
+            assert!(!UNPROMPTED_TOOLS.contains(&name), "{name}");
+        }
     }
 
     #[test]

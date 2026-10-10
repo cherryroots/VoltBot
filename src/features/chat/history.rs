@@ -84,7 +84,7 @@ pub async fn read_message(
     } else {
         let inside = format!(
             "{}{}{}",
-            attachment_text(&ctx.web, msg).await,
+            attachment_text(msg).await,
             embed_text(msg),
             text.trim()
         );
@@ -194,7 +194,7 @@ async fn to_model_turns(ctx: &BotCtx, turns: &[Turn], media_turns: usize) -> Vec
                         kind: (*kind).into(),
                         mime: static_mime(mime),
                     };
-                    match media::load_for_model(&ctx.web, &media).await {
+                    match media::load_for_model(&media).await {
                         Ok(images) => parts.extend(images.into_iter().map(Part::Image)),
                         Err(err) => {
                             warn!("couldn't load {url} for chat: {err:#}");
@@ -205,7 +205,7 @@ async fn to_model_turns(ctx: &BotCtx, turns: &[Turn], media_turns: usize) -> Vec
                 StoredPart::File { .. } if turn.role == Role::Assistant => {}
                 StoredPart::File { url, name, mime } => {
                     let link = fresh.get(url).unwrap_or(url);
-                    match media::download(&ctx.web, link, MAX_FILE_BYTES).await {
+                    match media::download(link, MAX_FILE_BYTES).await {
                         Ok(data) => parts.push(Part::File(ModelFile {
                             name: name.clone(),
                             mime: mime.clone(),

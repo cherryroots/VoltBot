@@ -170,18 +170,31 @@ pub fn set_reflected(conn: &Connection, scope: &str, at: i64) -> rusqlite::Resul
     Ok(())
 }
 
-/// The newest version of `path` that `author` wrote, in any server's folder: (scope,
-/// content). Versions someone else wrote (by asking Vivy in chat) are left out.
-pub fn newest_file(
-    conn: &Connection,
-    path: &str,
-    author: u64,
-) -> rusqlite::Result<Option<(String, String)>> {
+/// Deletes logged changes from before `before`, to keep `memory_changes` from growing
+/// forever. A server's changes since its last reflection stay however old they are: the
+/// next reflection still lists them (and a server that never reflected keeps them all).
+pub fn prune_changes(conn: &Connection, before: i64) -> rusqlite::Result<usize> {
+    conn.execute(
+        "DELETE FROM memory_changes
+         WHERE at < ?1 AND (
+            scope NOT LIKE 'server:%'
+            OR at <= coalesce(
+                (SELECT r.at FROM memory_reflections r WHERE r.scope = memory_changes.scope),
+                0
+            )
+         )",
+        [before],
+    )
+}
+
+/// The newest version of `path` in any server's folder: (scope, content). Whoever asked
+/// for it, Vivy decided to write it through the memory tool, so every version counts.
+pub fn newest_file(conn: &Connection, path: &str) -> rusqlite::Result<Option<(String, String)>> {
     conn.query_row(
         "SELECT scope, content FROM memory_files
-         WHERE path = ?1 AND updated_by = ?2 AND scope LIKE 'server:%'
+         WHERE path = ?1 AND scope LIKE 'server:%'
          ORDER BY updated_at DESC LIMIT 1",
-        params![path, author],
+        [path],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
@@ -361,22 +374,13 @@ mod tests {
             200,
         )
         .unwrap();
+        // DM folders don't count.
         save(&conn, "dm:3", &Folder::new(), &mood("status: dm"), 3, 300).unwrap();
-        // Someone (user 4) got the chat to write a newer mood: not hers, so left out.
-        save(
-            &conn,
-            "server:3",
-            &Folder::new(),
-            &mood("status: hacked"),
-            4,
-            400,
-        )
-        .unwrap();
         assert_eq!(
-            newest_file(&conn, "/memories/vivy/mood.md", 0).unwrap(),
+            newest_file(&conn, "/memories/vivy/mood.md").unwrap(),
             Some(("server:2".to_string(), "status: new".to_string()))
         );
-        assert_eq!(newest_file(&conn, "/memories/none", 0).unwrap(), None);
+        assert_eq!(newest_file(&conn, "/memories/none").unwrap(), None);
 
         let mut gone = mood("status: old");
         gone.insert("/memories/a.md".into(), "a".into());
@@ -391,6 +395,34 @@ mod tests {
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), None);
         set_diary_posted(&conn, 5, 1000).unwrap();
         assert_eq!(diary_posted_at(&conn, 5).unwrap(), Some(1000));
+    }
+
+    #[test]
+    fn prunes_old_changes_but_not_unreflected_ones() {
+        let conn = db();
+        let mut one = Folder::new();
+        one.insert("/memories/a.md".into(), "x".into());
+        for scope in ["server:1", "server:2", "dm:3"] {
+            save(&conn, scope, &Folder::new(), &one, 7, 100).unwrap();
+        }
+        save(&conn, "server:1", &one, &Folder::new(), 7, 500).unwrap();
+        // Server 1 reflected at 200: its change at 100 can go, the one at 500 stays.
+        // Server 2 never reflected, so it keeps everything; the DM has no reflections.
+        set_reflected(&conn, "server:1", 200).unwrap();
+        assert_eq!(prune_changes(&conn, 1000).unwrap(), 2);
+        let left: Vec<(String, i64)> = conn
+            .prepare("SELECT scope, at FROM memory_changes ORDER BY scope, at")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            left,
+            vec![("server:1".to_string(), 500), ("server:2".to_string(), 100)]
+        );
+        // Nothing is older than the cutoff: nothing goes.
+        assert_eq!(prune_changes(&conn, 50).unwrap(), 0);
     }
 
     #[test]

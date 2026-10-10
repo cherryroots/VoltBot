@@ -431,7 +431,7 @@ pub(super) fn message_link(
 }
 
 /// The (server, channel, message) of a message link. The server is `None` for DMs.
-fn parse_link(link: &str) -> Option<(Option<u64>, u64, u64)> {
+pub(super) fn parse_link(link: &str) -> Option<(Option<u64>, u64, u64)> {
     let url = reqwest::Url::parse(link.trim_matches(['<', '>'])).ok()?;
     let host = url.host_str()?;
     if !(host.ends_with("discord.com") || host.ends_with("discordapp.com")) {

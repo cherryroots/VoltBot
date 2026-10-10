@@ -10,13 +10,6 @@ use serenity::all::{
 use super::store::{Reminder, Summary};
 use crate::util::shorten;
 
-/// Shown when a reminder can't be understood.
-pub const HELP: &str = "Try one of these:
-- `remind me in 2h30m to do the thing`
-- `remind me at 16:30 CET to do the thing`
-- `remind me tomorrow at 9am to do the thing`
-- `remind me to do the thing next friday`";
-
 /// The snooze buttons under a delivered reminder: (label, minutes).
 const SNOOZES: [(&str, i64); 3] = [("10 min", 10), ("1 hour", 60), ("Tomorrow", 24 * 60)];
 

@@ -280,7 +280,7 @@ pub(super) fn tools_for(
     let mut tools = Vec::new();
     let mut owners = HashMap::new();
     for feature in ctx.features.iter() {
-        if !ctx.gate(feature.name()).allows(asker.guild, asker.channel) {
+        if !ctx.allows(feature.name(), asker.guild, asker.channel) {
             continue;
         }
         for tool in feature.tools() {
@@ -296,7 +296,7 @@ pub(super) fn tools_for(
 pub async fn context_for(ctx: &BotCtx, asker: &Asker, fresh: bool) -> Vec<String> {
     let mut texts = Vec::new();
     for feature in ctx.features.iter() {
-        if !ctx.gate(feature.name()).allows(asker.guild, asker.channel) {
+        if !ctx.allows(feature.name(), asker.guild, asker.channel) {
             continue;
         }
         match feature.chat_context(ctx, asker, fresh).await {

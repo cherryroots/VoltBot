@@ -3,9 +3,10 @@
 //! `provider` under `[ai]` names the main provider and `fallback` the backup, so it works
 //! either way round (Claude falling back to OpenAI, or OpenAI to Claude). When the main
 //! provider fails because it's out of credit, chat uses the backup and tries the main one
-//! again a day later; when it fails because it's down (server errors that kept happening
-//! through the retries, or no connection), it tries again an hour later. The first answer that works on the main
-//! provider switches back. Both switches are logged as warnings, so they show in the log
+//! again a day later (also when it hit the workspace's spending limit); when it fails
+//! because it's down (server errors that kept happening through the retries, no connection
+//! twice in a row, or a stream that stalled), it tries again an hour later. The first
+//! answer that works on the main provider switches back. Both switches are logged as warnings, so they show in the log
 //! channel.
 //!
 //! [`Watched`] wraps the main provider and reports every answer to the shared [`State`].
@@ -13,6 +14,7 @@
 //! changes provider halfway.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
@@ -58,9 +60,14 @@ impl ApiError {
     /// (429, 500s, 529) were already retried a couple of times before they got here.
     pub fn outage(&self) -> Option<Outage> {
         // Claude says "Your credit balance is too low"; OpenAI says "You exceeded your
-        // current quota, please check your plan and billing details".
+        // current quota, please check your plan and billing details". A spending limit set
+        // in Anthropic's Console ("You have reached your specified workspace API usage
+        // limits. You will regain access on ...") counts the same: it lasts until a date,
+        // and checking again a day later is often enough.
         let message = self.message.to_lowercase();
-        let out_of_credit = if self.status.as_u16() == 429 {
+        let out_of_credit = if message.contains("api usage limits") {
+            true
+        } else if self.status.as_u16() == 429 {
             // A 429 is usually a rate limit, whose message can link to the billing page
             // too, so only the out-of-quota wording counts.
             message.contains("exceeded your current quota")
@@ -89,8 +96,31 @@ impl std::fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+/// How long to wait before trying once more when a provider couldn't be reached.
+const RECONNECT_WAIT: Duration = Duration::from_secs(2);
+
+/// Sends a request to a provider. When there's no connection at all, it waits a moment and
+/// tries once more, so one dropped connection doesn't count as the provider being down.
+/// Both providers send their requests through this.
+pub async fn send(request: reqwest::RequestBuilder) -> reqwest::Result<reqwest::Response> {
+    // A copy for trying again; only a streamed body can't be copied, and none is used.
+    let again = request.try_clone();
+    match request.send().await {
+        Err(err) if err.is_connect() => {
+            let Some(again) = again else {
+                return Err(err);
+            };
+            warn!("couldn't connect ({err}), trying once more");
+            tokio::time::sleep(RECONNECT_WAIT).await;
+            again.send().await
+        }
+        result => result,
+    }
+}
+
 /// Whether `err` means the provider can't answer anyone right now, rather than that this
-/// one request was wrong.
+/// one request was wrong. No connection (after [`send`] tried twice) and a stalled stream
+/// (the HTTP client's read timeout) count as down.
 pub fn outage(err: &anyhow::Error) -> Option<Outage> {
     for cause in err.chain() {
         if let Some(api) = cause.downcast_ref::<ApiError>() {
@@ -281,6 +311,36 @@ mod tests {
                 .into(),
         };
         assert_eq!(rate_limit.outage(), None);
+    }
+
+    #[test]
+    fn a_spending_limit_is_like_no_credit() {
+        let limit = api_error(
+            400,
+            "You have reached your specified workspace API usage limits. You will regain \
+             access on 2026-11-01 at 00:00 UTC.",
+        );
+        assert_eq!(outage(&limit), Some(Outage::OutOfCredit));
+        // Whatever status it comes with.
+        let limit = api_error(429, "You have reached your specified API usage limits.");
+        assert_eq!(outage(&limit), Some(Outage::OutOfCredit));
+        assert_eq!(Outage::OutOfCredit.retry_after(), TimeDelta::days(1));
+    }
+
+    #[tokio::test]
+    async fn no_connection_is_tried_twice_then_down() {
+        // Nothing listens on this port once the listener is dropped.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        // No proxy, so the connection really fails.
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let started = std::time::Instant::now();
+        let err = send(client.get(format!("http://{address}/")))
+            .await
+            .unwrap_err();
+        assert!(started.elapsed() >= RECONNECT_WAIT);
+        assert_eq!(outage(&anyhow::Error::new(err)), Some(Outage::Down));
     }
 
     #[test]

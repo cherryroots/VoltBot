@@ -53,7 +53,64 @@ pub const MIGRATIONS: &[&str] = &[
         author_id INTEGER NOT NULL,
         caught_at INTEGER NOT NULL        -- unix seconds
     );",
+    // 3: edits, deletes, failed downloads and the startup catch-up.
+    "-- Where each picture came from (host and path of the original, without Discord's signed
+    -- query), so an edit keeps the fingerprints of pictures that didn't change.
+    ALTER TABLE snail_pictures ADD COLUMN source TEXT;
+    -- Edits and deletes remove a message's links by message.
+    CREATE INDEX snail_links_message ON snail_links (message_id);
+    -- The startup catch-up looks for the newest saved message per channel.
+    CREATE INDEX snail_messages_channel ON snail_messages (channel_id, message_id);
+    -- Pictures that failed to download, retried later. Not tied to snail_messages: a message
+    -- whose only picture failed has no row there.
+    CREATE TABLE snail_failures (
+        message_id INTEGER NOT NULL,
+        source TEXT NOT NULL,             -- like snail_pictures.source
+        position INTEGER NOT NULL,
+        guild_id INTEGER NOT NULL,
+        channel_id INTEGER NOT NULL,
+        author_id INTEGER NOT NULL,
+        host TEXT NOT NULL,               -- who served it, to spot a provider with trouble
+        error TEXT NOT NULL,
+        first_failed INTEGER NOT NULL,    -- unix seconds
+        last_tried INTEGER NOT NULL,
+        next_try INTEGER NOT NULL,
+        attempts INTEGER NOT NULL,
+        PRIMARY KEY (message_id, source)
+    );
+    CREATE INDEX snail_failures_due ON snail_failures (next_try);
+    -- The newest message the backfill or the catch-up read in each channel.
+    ALTER TABLE snail_crawl ADD COLUMN newest_id INTEGER;",
 ];
+
+/// A failed picture is tried this many times in all, then given up on (but kept, so the
+/// catalogue in `/snail_backfill status` still shows it).
+pub const MAX_ATTEMPTS: u32 = 8;
+
+/// How long to wait before trying a failed picture again: 10 minutes after the first
+/// failure, doubling each time (about 21 hours from the first to the last try).
+pub fn retry_delay(attempts: u32) -> i64 {
+    600 << attempts.clamp(1, MAX_ATTEMPTS).saturating_sub(1)
+}
+
+/// A fingerprinted picture of a message.
+#[derive(Debug, Clone)]
+pub struct StoredPicture {
+    /// Its place in `collect::pictures`.
+    pub position: usize,
+    /// Host and path of the original (see `collect::Picture::source`).
+    pub source: String,
+    pub fp: Fingerprint,
+}
+
+/// A picture that couldn't be downloaded.
+#[derive(Debug, Clone)]
+pub struct Failure {
+    pub position: usize,
+    pub source: String,
+    pub host: String,
+    pub error: String,
+}
 
 /// What was found in one message.
 pub struct Indexed {
@@ -62,50 +119,134 @@ pub struct Indexed {
     pub message: u64,
     pub author: u64,
     pub links: Vec<String>,
-    /// (position, fingerprint)
-    pub pictures: Vec<(usize, Fingerprint)>,
+    pub pictures: Vec<StoredPicture>,
+    /// Pictures that failed to download, to try again later.
+    pub failed: Vec<Failure>,
 }
 
+/// Whether a message was read before: it has saved links or pictures, or a picture waiting
+/// to be retried.
 pub fn is_indexed(conn: &Connection, message: u64) -> rusqlite::Result<bool> {
     conn.query_row(
-        "SELECT 1 FROM snail_messages WHERE message_id = ?1",
+        "SELECT EXISTS (SELECT 1 FROM snail_messages WHERE message_id = ?1)
+             OR EXISTS (SELECT 1 FROM snail_failures WHERE message_id = ?1)",
         [message],
-        |_| Ok(()),
+        |row| row.get(0),
     )
-    .optional()
-    .map(|row| row.is_some())
 }
 
-/// Saves a message's links and fingerprints. Messages with neither aren't saved.
-pub fn save(tx: &Transaction, found: &Indexed) -> rusqlite::Result<()> {
+/// Saves what a message holds now. It replaces what was saved for it before, so links and
+/// pictures an edit removed stop counting. A message with no links or pictures left has no
+/// row at all. Failed pictures keep their attempt count across saves; ones that are no
+/// longer failing (or no longer in the message) are dropped from the retry list.
+pub fn save(tx: &Transaction, found: &Indexed, now: i64) -> rusqlite::Result<()> {
+    let id = found.message;
+    tx.execute("DELETE FROM snail_links WHERE message_id = ?1", [id])?;
+    tx.execute("DELETE FROM snail_pictures WHERE message_id = ?1", [id])?;
     if found.links.is_empty() && found.pictures.is_empty() {
-        return Ok(());
+        tx.execute("DELETE FROM snail_messages WHERE message_id = ?1", [id])?;
+    } else {
+        tx.execute(
+            "INSERT OR IGNORE INTO snail_messages (message_id, guild_id, channel_id, author_id)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![id, found.guild, found.channel, found.author],
+        )?;
     }
-    tx.execute(
-        "INSERT OR IGNORE INTO snail_messages (message_id, guild_id, channel_id, author_id)
-         VALUES (?1, ?2, ?3, ?4)",
-        params![found.message, found.guild, found.channel, found.author],
-    )?;
     for key in &found.links {
         tx.execute(
             "INSERT OR IGNORE INTO snail_links (guild_id, key, message_id) VALUES (?1, ?2, ?3)",
-            params![found.guild, key, found.message],
+            params![found.guild, key, id],
         )?;
     }
-    for (position, fp) in &found.pictures {
+    for picture in &found.pictures {
+        insert_picture(tx, id, found.guild, picture)?;
+    }
+
+    // Earlier failures of this message: (source, first failed, attempts).
+    let earlier: Vec<(String, i64, u32)> = tx
+        .prepare("SELECT source, first_failed, attempts FROM snail_failures WHERE message_id = ?1")?
+        .query_map([id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    tx.execute("DELETE FROM snail_failures WHERE message_id = ?1", [id])?;
+    for failure in &found.failed {
+        let (first, attempts) = earlier
+            .iter()
+            .find(|(source, _, _)| *source == failure.source)
+            .map(|(_, first, attempts)| (*first, attempts + 1))
+            .unwrap_or((now, 1));
         tx.execute(
-            "INSERT OR IGNORE INTO snail_pictures (message_id, position, guild_id, aspect, hashes)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT OR REPLACE INTO snail_failures (message_id, source, position, guild_id,
+                 channel_id, author_id, host, error, first_failed, last_tried, next_try, attempts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
-                found.message,
-                *position as i64,
+                id,
+                failure.source,
+                failure.position as i64,
                 found.guild,
-                fp.aspect,
-                fp.hashes
+                found.channel,
+                found.author,
+                failure.host,
+                failure.error,
+                first,
+                now,
+                now + retry_delay(attempts),
+                attempts
             ],
         )?;
     }
     Ok(())
+}
+
+fn insert_picture(
+    conn: &Connection,
+    message: u64,
+    guild: u64,
+    picture: &StoredPicture,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO snail_pictures (message_id, position, guild_id, aspect, hashes, source)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            message,
+            picture.position as i64,
+            guild,
+            picture.fp.aspect,
+            picture.fp.hashes,
+            picture.source
+        ],
+    )?;
+    Ok(())
+}
+
+/// The link keys saved for a message.
+pub fn message_links(conn: &Connection, message: u64) -> rusqlite::Result<Vec<String>> {
+    conn.prepare("SELECT key FROM snail_links WHERE message_id = ?1")?
+        .query_map([message], |row| row.get(0))?
+        .collect()
+}
+
+/// A picture saved for a message. `source` is None for pictures saved before it was kept.
+pub struct SavedPicture {
+    pub position: usize,
+    pub source: Option<String>,
+    pub fp: Fingerprint,
+}
+
+pub fn message_pictures(conn: &Connection, message: u64) -> rusqlite::Result<Vec<SavedPicture>> {
+    conn.prepare(
+        "SELECT position, source, aspect, hashes FROM snail_pictures WHERE message_id = ?1",
+    )?
+    .query_map([message], |row| {
+        Ok(SavedPicture {
+            position: row.get::<_, i64>(0)? as usize,
+            source: row.get(1)?,
+            fp: Fingerprint {
+                aspect: row.get(2)?,
+                hashes: row.get(3)?,
+            },
+        })
+    })?
+    .collect()
 }
 
 /// A stored message.
@@ -228,6 +369,15 @@ pub fn record_caught(
     Ok(())
 }
 
+/// Whether a message was already counted as a snail.
+pub fn is_caught(conn: &Connection, message: u64) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM snail_caught WHERE message_id = ?1)",
+        [message],
+        |row| row.get(0),
+    )
+}
+
 /// Snails caught since `since`, in every server.
 pub fn caught_since(conn: &Connection, since: i64) -> rusqlite::Result<u64> {
     conn.query_row(
@@ -237,13 +387,125 @@ pub fn caught_since(conn: &Connection, since: i64) -> rusqlite::Result<u64> {
     )
 }
 
-/// Forgets a message that no longer exists.
+/// Forgets a message that no longer exists: its links, pictures and failed pictures. A
+/// snail it was counted as stays counted (it was posted, even if it's gone now).
 pub fn forget(conn: &Connection, message: u64) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM snail_messages WHERE message_id = ?1",
         [message],
     )?;
+    conn.execute(
+        "DELETE FROM snail_failures WHERE message_id = ?1",
+        [message],
+    )?;
     Ok(())
+}
+
+// ---- Failed pictures ----
+
+/// A failed picture whose next try is due.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DueFailure {
+    pub message: u64,
+    pub channel: u64,
+    pub guild: u64,
+    pub author: u64,
+    pub source: String,
+}
+
+/// Up to `limit` failed pictures due for another try, the longest waiting first.
+pub fn due_failures(conn: &Connection, now: i64, limit: i64) -> rusqlite::Result<Vec<DueFailure>> {
+    conn.prepare(
+        "SELECT message_id, channel_id, guild_id, author_id, source FROM snail_failures
+         WHERE next_try <= ?1 AND attempts < ?2 ORDER BY next_try LIMIT ?3",
+    )?
+    .query_map(params![now, MAX_ATTEMPTS, limit], |row| {
+        Ok(DueFailure {
+            message: row.get(0)?,
+            channel: row.get(1)?,
+            guild: row.get(2)?,
+            author: row.get(3)?,
+            source: row.get(4)?,
+        })
+    })?
+    .collect()
+}
+
+/// A retried picture downloaded: saves its fingerprint and takes it off the list.
+pub fn retry_succeeded(
+    tx: &Transaction,
+    failure: &DueFailure,
+    picture: &StoredPicture,
+) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO snail_messages (message_id, guild_id, channel_id, author_id)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            failure.message,
+            failure.guild,
+            failure.channel,
+            failure.author
+        ],
+    )?;
+    insert_picture(tx, failure.message, failure.guild, picture)?;
+    drop_failure(tx, failure.message, &failure.source)
+}
+
+/// A retry failed again: count it and wait longer before the next one.
+pub fn retry_failed(
+    conn: &Connection,
+    message: u64,
+    source: &str,
+    error: &str,
+    now: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE snail_failures SET attempts = attempts + 1, error = ?3, last_tried = ?4,
+             next_try = ?4 + (600 << (min(attempts + 1, ?5) - 1))
+         WHERE message_id = ?1 AND source = ?2",
+        params![message, source, error, now, MAX_ATTEMPTS],
+    )?;
+    Ok(())
+}
+
+/// Takes a picture off the retry list, like one an edit removed.
+pub fn drop_failure(conn: &Connection, message: u64, source: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM snail_failures WHERE message_id = ?1 AND source = ?2",
+        params![message, source],
+    )?;
+    Ok(())
+}
+
+/// Failed pictures of one host in a server.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostFailures {
+    pub host: String,
+    /// Still being retried.
+    pub waiting: u64,
+    /// Tried [`MAX_ATTEMPTS`] times.
+    pub given_up: u64,
+    /// The newest error, as an example.
+    pub error: String,
+}
+
+/// The failed pictures of a server grouped by host, the most first.
+pub fn failures_by_host(conn: &Connection, guild: u64) -> rusqlite::Result<Vec<HostFailures>> {
+    // SQLite takes the bare `error` from the row with the max(last_tried).
+    conn.prepare(
+        "SELECT host, sum(attempts < ?2), sum(attempts >= ?2), error, max(last_tried)
+         FROM snail_failures WHERE guild_id = ?1
+         GROUP BY host ORDER BY count(*) DESC, host",
+    )?
+    .query_map(params![guild, MAX_ATTEMPTS], |row| {
+        Ok(HostFailures {
+            host: row.get(0)?,
+            waiting: row.get(1)?,
+            given_up: row.get(2)?,
+            error: row.get(3)?,
+        })
+    })?
+    .collect()
 }
 
 // ---- The backlog crawl ----
@@ -321,6 +583,39 @@ pub fn crawl_progress(
     Ok(())
 }
 
+/// Notes the newest message read in a channel (by the backfill or the catch-up).
+pub fn crawl_newest(conn: &Connection, channel: u64, newest: u64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE snail_crawl SET newest_id = max(coalesce(newest_id, 0), ?2) WHERE channel_id = ?1",
+        params![channel, newest],
+    )?;
+    Ok(())
+}
+
+/// The channels of a server the backfill has read before (all of it, or at least one
+/// page), each with the message to catch up after: the newest one read or saved there. A
+/// channel with neither starts after the channel's own ID, which is older than any message
+/// in it.
+pub fn catch_up_channels(conn: &Connection, guild: u64) -> rusqlite::Result<Vec<(u64, u64)>> {
+    conn.prepare(
+        "SELECT c.channel_id, max(c.channel_id, coalesce(c.newest_id, 0),
+                coalesce((SELECT max(m.message_id) FROM snail_messages m
+                          WHERE m.channel_id = c.channel_id), 0))
+         FROM snail_crawl c
+         WHERE c.guild_id = ?1 AND c.error IS NULL AND (c.finished = 1 OR c.before_id IS NOT NULL)
+         ORDER BY c.channel_id",
+    )?
+    .query_map([guild], |row| Ok((row.get(0)?, row.get(1)?)))?
+    .collect()
+}
+
+/// Servers with any backfill history, for the startup catch-up.
+pub fn crawled_guilds(conn: &Connection) -> rusqlite::Result<Vec<u64>> {
+    conn.prepare("SELECT DISTINCT guild_id FROM snail_crawl")?
+        .query_map([], |row| row.get(0))?
+        .collect()
+}
+
 /// Gives up on a channel the bot can't read.
 pub fn crawl_failed(conn: &Connection, channel: u64, error: &str) -> rusqlite::Result<()> {
     conn.execute(
@@ -391,19 +686,45 @@ mod tests {
             message,
             author: 100 + message,
             links: links.iter().map(|s| s.to_string()).collect(),
-            pictures: pictures.into_iter().enumerate().collect(),
+            pictures: pictures
+                .into_iter()
+                .enumerate()
+                .map(|(position, fp)| StoredPicture {
+                    position,
+                    source: format!("cdn/{message}/{position}.png"),
+                    fp,
+                })
+                .collect(),
+            failed: Vec::new(),
         }
+    }
+
+    fn failure(source: &str, host: &str) -> Failure {
+        Failure {
+            position: 0,
+            source: source.to_string(),
+            host: host.to_string(),
+            error: "403 Forbidden".to_string(),
+        }
+    }
+
+    fn save_now(conn: &mut Connection, found: &Indexed, now: i64) {
+        let tx = conn.transaction().unwrap();
+        save(&tx, found, now).unwrap();
+        tx.commit().unwrap();
     }
 
     #[test]
     fn links_and_pictures() {
         let mut conn = test_connection("snails", MIGRATIONS);
-        let tx = conn.transaction().unwrap();
-        save(&tx, &indexed(5, &["x:1"], vec![fp(0)])).unwrap();
-        save(&tx, &indexed(7, &["x:1", "youtube:a"], vec![fp(0b1111)])).unwrap();
+        save_now(&mut conn, &indexed(5, &["x:1"], vec![fp(0)]), 0);
+        save_now(
+            &mut conn,
+            &indexed(7, &["x:1", "youtube:a"], vec![fp(0b1111)]),
+            0,
+        );
         // Nothing to store: not saved.
-        save(&tx, &indexed(8, &[], vec![])).unwrap();
-        tx.commit().unwrap();
+        save_now(&mut conn, &indexed(8, &[], vec![]), 0);
         assert!(is_indexed(&conn, 5).unwrap());
         assert!(!is_indexed(&conn, 8).unwrap());
 
@@ -436,6 +757,125 @@ mod tests {
     }
 
     #[test]
+    fn edits_replace_what_was_saved() {
+        let mut conn = test_connection("snails", MIGRATIONS);
+        save_now(&mut conn, &indexed(5, &["x:1", "x:2"], vec![fp(0)]), 0);
+        assert_eq!(message_pictures(&conn, 5).unwrap().len(), 1);
+        // The edit dropped x:1 and the picture and added x:3.
+        save_now(&mut conn, &indexed(5, &["x:2", "x:3"], vec![]), 0);
+        let mut links = message_links(&conn, 5).unwrap();
+        links.sort();
+        assert_eq!(links, ["x:2", "x:3"]);
+        assert!(message_pictures(&conn, 5).unwrap().is_empty());
+        let keys = vec!["x:1".to_string()];
+        assert!(same_links(&conn, 1, &keys, 9).unwrap().is_empty());
+        // Nothing left: the message is gone.
+        save_now(&mut conn, &indexed(5, &[], vec![]), 0);
+        assert!(!is_indexed(&conn, 5).unwrap());
+    }
+
+    #[test]
+    fn failed_pictures_are_retried_and_catalogued() {
+        let mut conn = test_connection("snails", MIGRATIONS);
+        // A message whose only picture failed is still "read before".
+        let mut found = indexed(5, &[], vec![]);
+        found.failed = vec![failure("pbs.twimg.com/a.jpg", "pbs.twimg.com")];
+        save_now(&mut conn, &found, 1_000);
+        assert!(is_indexed(&conn, 5).unwrap());
+        // Not due before the first wait is over.
+        assert!(due_failures(&conn, 1_000, 10).unwrap().is_empty());
+        let due = due_failures(&conn, 1_000 + retry_delay(1), 10).unwrap();
+        assert_eq!(
+            due,
+            [DueFailure {
+                message: 5,
+                channel: 10,
+                guild: 1,
+                author: 105,
+                source: "pbs.twimg.com/a.jpg".into()
+            }]
+        );
+
+        // Saving the message again (an edit) keeps counting attempts.
+        save_now(&mut conn, &found, 2_000);
+        let attempts: u32 = conn
+            .query_row("SELECT attempts FROM snail_failures", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(attempts, 2);
+        // Fails until it's given up on.
+        for _ in 2..MAX_ATTEMPTS {
+            retry_failed(&conn, 5, "pbs.twimg.com/a.jpg", "still 403", 3_000).unwrap();
+        }
+        assert!(due_failures(&conn, i64::MAX, 10).unwrap().is_empty());
+
+        // Another message with a Discord picture that later downloads.
+        let mut other = indexed(7, &["x:1"], vec![]);
+        other.failed = vec![failure("cdn.discordapp.com/b.png", "cdn.discordapp.com")];
+        save_now(&mut conn, &other, 1_000);
+        let hosts = failures_by_host(&conn, 1).unwrap();
+        // One each, so sorted by name.
+        let summary: Vec<(&str, u64, u64)> = hosts
+            .iter()
+            .map(|h| (h.host.as_str(), h.waiting, h.given_up))
+            .collect();
+        assert_eq!(
+            summary,
+            [("cdn.discordapp.com", 1, 0), ("pbs.twimg.com", 0, 1)]
+        );
+        assert_eq!(hosts[1].error, "still 403");
+
+        let due = due_failures(&conn, i64::MAX, 10).unwrap();
+        let picture = StoredPicture {
+            position: 0,
+            source: "cdn.discordapp.com/b.png".into(),
+            fp: fp(0),
+        };
+        let tx = conn.transaction().unwrap();
+        retry_succeeded(&tx, &due[0], &picture).unwrap();
+        tx.commit().unwrap();
+        assert_eq!(message_pictures(&conn, 7).unwrap().len(), 1);
+        assert_eq!(failures_by_host(&conn, 1).unwrap().len(), 1);
+
+        // Deleting the message forgets its failures too.
+        forget(&conn, 5).unwrap();
+        assert!(failures_by_host(&conn, 1).unwrap().is_empty());
+        assert!(!is_indexed(&conn, 5).unwrap());
+    }
+
+    #[test]
+    fn retry_waits_grow() {
+        assert_eq!(retry_delay(1), 600);
+        assert_eq!(retry_delay(2), 1_200);
+        assert_eq!(retry_delay(MAX_ATTEMPTS), 600 << (MAX_ATTEMPTS - 1));
+        assert_eq!(retry_delay(100), retry_delay(MAX_ATTEMPTS));
+    }
+
+    #[test]
+    fn catch_up_starts_after_the_newest_message() {
+        let mut conn = test_connection("snails", MIGRATIONS);
+        let tx = conn.transaction().unwrap();
+        let channels = vec![
+            (2, "read".to_string()),
+            (3, "never read".to_string()),
+            (4, "no access".to_string()),
+        ];
+        add_crawl_channels(&tx, 1, &channels).unwrap();
+        tx.commit().unwrap();
+        // Channel 10 (from `indexed`) isn't in the crawl; channel 2 is.
+        crawl_progress(&conn, 2, Some(50), 100, 0, false).unwrap();
+        crawl_newest(&conn, 2, 900).unwrap();
+        crawl_failed(&conn, 4, "Missing Access").unwrap();
+        assert_eq!(catch_up_channels(&conn, 1).unwrap(), [(2, 900)]);
+        // A newer saved message moves the start forward; an older newest_id doesn't move back.
+        let mut found = indexed(950, &["x:1"], vec![]);
+        found.channel = 2;
+        save_now(&mut conn, &found, 0);
+        crawl_newest(&conn, 2, 100).unwrap();
+        assert_eq!(catch_up_channels(&conn, 1).unwrap(), [(2, 950)]);
+        assert_eq!(crawled_guilds(&conn).unwrap(), [1]);
+    }
+
+    #[test]
     fn counts_caught_snails() {
         let conn = test_connection("snails", MIGRATIONS);
         record_caught(&conn, 1, 10, 100, 1_000).unwrap();
@@ -443,6 +883,7 @@ mod tests {
         // The same message counts once.
         record_caught(&conn, 1, 11, 100, 5_000).unwrap();
         assert_eq!(caught_since(&conn, 0).unwrap(), 2);
+        assert!(is_caught(&conn, 11).unwrap() && !is_caught(&conn, 12).unwrap());
         assert_eq!(caught_since(&conn, 2_000).unwrap(), 1);
     }
 

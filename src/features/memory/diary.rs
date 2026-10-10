@@ -15,6 +15,7 @@ use serenity::all::{ChannelId, CreateAllowedMentions, CreateMessage, GuildId};
 use tracing::{info, warn};
 
 use super::folder::{self, Command};
+use super::retry::RetryLater;
 use super::{store, tool};
 use crate::ai::{ChatRequest, Input, Part, Role, Turn, complete};
 use crate::core::{BotCtx, Result};
@@ -76,14 +77,27 @@ pub async fn post_due(ctx: &BotCtx) -> Result<()> {
         if !due(posted_at(ctx, &channels).await?) || !ctx.gate("memory").allows_guild(guild) {
             continue;
         }
-        if let Err(err) = post(ctx, guild, &channels, now).await {
-            warn!(guild = guild.get(), "couldn't write the diary: {err:#}");
+        let key = guild.to_string();
+        if RETRY.waiting(&key, now) {
+            continue;
         }
-        // Written or not, the next try is next week.
+        if let Err(err) = post(ctx, guild, &channels, now).await {
+            // Not saved as posted, so it's tried again in a few hours, not next week.
+            warn!(
+                guild = guild.get(),
+                "couldn't write the diary, trying again later: {err:#}"
+            );
+            RETRY.failed(&key, now);
+            continue;
+        }
+        RETRY.done(&key);
         set_posted(ctx, &channels, now).await?;
     }
     Ok(())
 }
+
+/// Servers whose last diary failed, and when they may try again.
+static RETRY: RetryLater = RetryLater::new();
 
 /// When we last warned about each diary channel we couldn't find.
 static WARNED: Mutex<BTreeMap<u64, i64>> = Mutex::new(BTreeMap::new());
@@ -192,13 +206,19 @@ async fn post(ctx: &BotCtx, guild: GuildId, channels: &[ChannelId], now: i64) ->
     if entry.is_empty() {
         anyhow::bail!("the model wrote nothing");
     }
+    let mut sent = 0;
     for &channel in channels {
         // One target failing (deleted, no permission) doesn't stop the others.
-        if let Err(err) = send(ctx, channel, entry).await {
-            warn!(channel = channel.get(), "couldn't post the diary: {err:#}");
+        match send(ctx, channel, entry).await {
+            Ok(()) => sent += 1,
+            Err(err) => warn!(channel = channel.get(), "couldn't post the diary: {err:#}"),
         }
     }
-    info!("posted the weekly diary in {} places", channels.len());
+    // Posted nowhere (Discord down?) counts as failed, so it's tried again.
+    if sent == 0 {
+        anyhow::bail!("couldn't post it in any channel");
+    }
+    info!("posted the weekly diary in {sent} places");
     Ok(())
 }
 

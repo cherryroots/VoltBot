@@ -2,8 +2,12 @@
 //! plan to check in later. When it's due she reads the channel and, if it still fits, asks
 //! them how it went.
 //!
+//! A check-in is always with the person who was talking to her when she planned it, never
+//! someone they mentioned: she would read the channel on that person's behalf.
+//!
 //! One background task delivers them: it sleeps until the next one is due (at most an hour),
-//! and planning a new one wakes it.
+//! and planning a new one wakes it. A check-in where chat has been turned off since is
+//! skipped.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,7 +31,7 @@ const MAX_HOURS: f64 = 60.0 * 24.0;
 pub fn def() -> ToolDef {
     ToolDef {
         name: "schedule_follow_up",
-        description: "Plans for you to check in with someone later, in this channel. Use it on your own when someone mentions something coming up that a friend would ask about afterwards (an interview, a trip, an exam, a vet visit, a date), timed for after it happens. Don't announce that you scheduled it.",
+        description: "Plans for you to check in later, in this channel, with the person you're talking to (only them, not someone they mention). Use it on your own when they mention something coming up in their life that a friend would ask about afterwards (an interview, a trip, an exam, a vet visit, a date), timed for after it happens. Don't announce that you scheduled it.",
         parameters: json!({
             "type": "object",
             "properties": {
@@ -38,10 +42,6 @@ pub fn def() -> ToolDef {
                 "note": {
                     "type": "string",
                     "description": "What to ask about, with enough detail to remember it later: \"Alice's job interview at the bakery on Friday\"."
-                },
-                "user": {
-                    "type": "string",
-                    "description": "The user ID of the person to check in with. Default: the asker."
                 }
             },
             "required": ["hours_from_now", "note"]
@@ -49,7 +49,7 @@ pub fn def() -> ToolDef {
     }
 }
 
-/// Plans a check-in for the asker (or `user`). Wakes the delivery task.
+/// Plans a check-in with the asker. Wakes the delivery task.
 pub async fn schedule(ctx: &BotCtx, asker: &Asker, args: &Value, wake: &Notify) -> Result<String> {
     let hours = args["hours_from_now"]
         .as_f64()
@@ -63,12 +63,8 @@ pub async fn schedule(ctx: &BotCtx, asker: &Asker, args: &Value, wake: &Notify) 
     if note.is_empty() {
         return Err(user_error("`note` is empty."));
     }
-    let user = match args["user"].as_str().map(str::trim) {
-        Some(id) if !id.is_empty() => super::tools::parse_user_id(id)
-            .ok_or_else(|| user_error("`user` must be a user ID."))?
-            .get(),
-        _ => asker.user.get(),
-    };
+    // Only ever the asker: a check-in reads the channel as that person.
+    let user = asker.user.get();
     let now = Utc::now().timestamp();
     let follow_up = FollowUp {
         id: 0,
@@ -84,7 +80,7 @@ pub async fn schedule(ctx: &BotCtx, asker: &Asker, args: &Value, wake: &Notify) 
         .call(move |conn| {
             if store::pending_follow_ups(conn, user)? >= MAX_PER_PERSON {
                 return Err(user_error(format!(
-                    "You already have {MAX_PER_PERSON} check-ins planned with this person."
+                    "You already have {MAX_PER_PERSON} check-ins planned with them."
                 )));
             }
             Ok(store::add_follow_up(conn, &follow_up, now)?)
@@ -150,6 +146,14 @@ async fn deliver(ctx: &BotCtx, follow_up: &FollowUp) -> Result<()> {
         channel: ChannelId::new(follow_up.channel_id),
         message: MessageId::new(follow_up.message_id),
     };
+    // Chat may have been turned off there since it was planned.
+    if !ctx.allows("chat", asker.guild, asker.channel) {
+        info!(
+            follow_up = follow_up.id,
+            "skipped a check-in: chat is off there now"
+        );
+        return Ok(());
+    }
     let user = follow_up.user_id;
     let instructions = format!(
         "Earlier you planned to check in with <@{user}> about: {}. It's time. \

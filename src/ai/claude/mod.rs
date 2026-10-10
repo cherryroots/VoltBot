@@ -10,6 +10,7 @@
 //!   stay around between answers, with Anthropic's skills for making office files;
 //!
 //! Pictures and attached files go through the Files API: uploaded once, then sent by ID.
+//! The IDs are kept in SQLite (see `uploads.rs`), so they stay the same after a restart.
 //! Attached files are also copied into the code execution container, and files the code
 //! saves come back as Files API IDs, which [`Claude::download_file`] fetches.
 //!
@@ -21,15 +22,15 @@ pub mod billing;
 mod collect;
 mod messages;
 mod price;
+mod uploads;
 
 use std::collections::HashMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use image::imageops::FilterType;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,7 +38,9 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
 use self::collect::Collector;
-use super::fallback::ApiError;
+pub use self::uploads::MIGRATIONS as UPLOAD_MIGRATIONS;
+use self::uploads::Uploads;
+use super::fallback::{self, ApiError};
 use super::spend::{Spend, Used};
 use super::sse::SseParser;
 use super::{ChatEvent, ChatProvider, ChatRequest, Done, GeneratedFile, Input, Part, Turn};
@@ -50,10 +53,9 @@ pub(crate) const VERSION: &str = "2023-06-01";
 const THINKING_BETA: &str = "thinking-binding-controls-2026-08-01";
 /// `fallbacks: "default"`: when the model declines, the API retries on another one.
 const FALLBACK_BETA: &str = "server-side-fallback-2026-07-01";
-/// Uploads are deleted by Anthropic after this long, so storage doesn't pile up.
+/// Uploads are deleted by Anthropic after this long, so storage doesn't pile up. (The
+/// Files API takes 1 hour to 90 days.)
 const UPLOAD_LIFETIME: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-/// An upload is reused for this long, leaving a day before it expires.
-const UPLOAD_REUSE: Duration = Duration::from_secs(29 * 24 * 60 * 60);
 /// Pictures are made smaller to fit this many pixels a side. Claude rejects bigger ones
 /// once a request holds more than 20 pictures, which a long conversation can.
 const MAX_IMAGE_SIDE: u32 = 2000;
@@ -66,7 +68,7 @@ const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(
 
 /// `[ai.claude]` in config.toml.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ClaudeConfig {
     pub model: String,
     /// How much it thinks: "low", "medium", "high", "xhigh" or "max".
@@ -110,14 +112,28 @@ impl Default for ClaudeConfig {
 
 /// What a picture or file is, for finding its upload again: a hash of the bytes and their
 /// length.
+///
+/// Saved keys outlive the program (see `uploads.rs`), so the hash must never change. Rust's
+/// own `DefaultHasher` may change between releases, so this uses FNV-1a (128-bit), a simple
+/// hash with fixed constants: <http://www.isthe.com/chongo/tech/comp/fnv/>.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ContentKey(u64, usize);
+pub struct ContentKey(u128, usize);
 
 impl ContentKey {
     pub fn of(data: &[u8]) -> ContentKey {
-        let mut hasher = DefaultHasher::new();
-        data.hash(&mut hasher);
-        ContentKey(hasher.finish(), data.len())
+        const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
+        const PRIME: u128 = 0x0000000001000000000000000000013b;
+        let mut hash = OFFSET;
+        for &byte in data {
+            hash ^= u128::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+        ContentKey(hash, data.len())
+    }
+
+    /// The key as text, for the database: "<hash in hex>-<length>".
+    fn to_text(self) -> String {
+        format!("{:032x}-{}", self.0, self.1)
     }
 }
 
@@ -125,8 +141,8 @@ pub struct Claude {
     http: reqwest::Client,
     key: String,
     config: ClaudeConfig,
-    /// Files uploaded so far, and when.
-    uploads: Mutex<HashMap<ContentKey, (String, Instant)>>,
+    /// Files uploaded so far, saved in the database.
+    uploads: Uploads,
     /// The code execution container each cache key (a channel) used last.
     containers: Arc<Mutex<HashMap<String, String>>>,
     /// Where what each response cost is added up; `None` in tests.
@@ -153,11 +169,11 @@ impl Sender {
     async fn messages(&self, body: &Value) -> anyhow::Result<reqwest::Response> {
         let mut waits = RETRY_WAITS.iter();
         loop {
-            let response = self
+            let request = self
                 .request(reqwest::Method::POST, "/messages")
                 .header("anthropic-beta", &self.betas)
-                .json(body)
-                .send()
+                .json(body);
+            let response = fallback::send(request)
                 .await
                 .context("couldn't reach Claude")?;
             let status = response.status();
@@ -202,11 +218,13 @@ impl Claude {
         config: ClaudeConfig,
         spend: Option<Spend>,
     ) -> Claude {
+        // The database comes along with the spend, which keeps it for its own tables.
+        let db = spend.as_ref().map(|spend| spend.db().clone());
         Claude {
             http,
             key,
             config,
-            uploads: Mutex::new(HashMap::new()),
+            uploads: Uploads::new(db),
             containers: Arc::new(Mutex::new(HashMap::new())),
             spend,
         }
@@ -275,7 +293,7 @@ impl Claude {
             if ids.contains_key(&key) {
                 continue;
             }
-            if let Some(id) = self.uploaded(key) {
+            if let Some(id) = self.uploads.get(key, Utc::now()).await {
                 ids.insert(key, id);
                 continue;
             }
@@ -297,13 +315,6 @@ impl Claude {
             }
         }
         ids
-    }
-
-    /// The ID of an earlier upload of the same content that's still fresh.
-    fn uploaded(&self, key: ContentKey) -> Option<String> {
-        let uploads = self.uploads.lock().unwrap();
-        let (id, at) = uploads.get(&key)?;
-        (at.elapsed() < UPLOAD_REUSE).then(|| id.clone())
     }
 
     async fn upload(
@@ -336,12 +347,63 @@ impl Claude {
             .context("the upload has no ID")?
             .to_string();
         debug!("uploaded {name} to Claude as {id}");
-        self.uploads
-            .lock()
-            .unwrap()
-            .insert(key, (id.clone(), Instant::now()));
+        self.uploads.put(key, &id, expires_at(&uploaded)).await;
         Ok(id)
     }
+
+    /// Uploads what's new in `turns` and builds the request. Returns it with the upload IDs
+    /// it uses.
+    async fn prepare(
+        &self,
+        request: &ChatRequest,
+        turns: &[Turn],
+    ) -> (Value, HashMap<ContentKey, String>) {
+        let uploaded = self.upload_all(turns).await;
+        let conversation = messages::to_messages(
+            turns,
+            &self.config.model,
+            &uploaded,
+            self.config.code_execution,
+        );
+        (self.request_body(request, conversation), uploaded)
+    }
+}
+
+/// When an upload expires, from the Files API's answer (`expires_at`, RFC 3339), or from
+/// the lifetime asked for when the answer doesn't say.
+fn expires_at(uploaded: &Value) -> DateTime<Utc> {
+    uploaded["expires_at"]
+        .as_str()
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&Utc))
+        .unwrap_or_else(|| Utc::now() + UPLOAD_LIFETIME)
+}
+
+/// The uploads a failed request names as gone (expired or deleted). When the error says a
+/// file is missing without naming which, all of the request's uploads count, so they're all
+/// uploaded again. `None` when the error isn't about a missing file.
+fn missing_files(
+    err: &anyhow::Error,
+    uploaded: &HashMap<ContentKey, String>,
+) -> Option<Vec<String>> {
+    let api = err.downcast_ref::<ApiError>()?;
+    let message = api.message.to_lowercase();
+    let missing = ["not found", "expired", "does not exist", "no longer"]
+        .iter()
+        .any(|words| message.contains(words));
+    if !api.status.is_client_error() || !message.contains("file") || !missing {
+        return None;
+    }
+    let ids: Vec<String> = uploaded.values().cloned().collect();
+    if ids.is_empty() {
+        return None;
+    }
+    let named: Vec<String> = ids
+        .iter()
+        .filter(|id| api.message.contains(id.as_str()))
+        .cloned()
+        .collect();
+    Some(if named.is_empty() { ids } else { named })
 }
 
 /// A copy of a picture that fits [`MAX_IMAGE_SIDE`] and [`MAX_IMAGE_BYTES`], or `None`
@@ -440,25 +502,29 @@ impl ChatProvider for Claude {
             Input::Full(turns) => turns,
             Input::After { new, .. } => new,
         };
-        let uploaded = self.upload_all(turns).await;
-        let conversation = messages::to_messages(
-            turns,
-            &self.config.model,
-            &uploaded,
-            self.config.code_execution,
-        );
-        let mut body = self.request_body(&request, conversation);
+        let (mut body, uploaded) = self.prepare(&request, turns).await;
         let sender = self.sender();
-        let response = match sender.messages(&body).await {
-            // Containers expire; start a new one.
-            Err(err) if body["container"].get("id").is_some() && container_gone(&err) => {
-                info!("the code execution container expired, starting a new one");
-                self.containers.lock().unwrap().remove(&request.cache_key);
-                set_container(&mut body, None);
-                sender.messages(&body).await?
-            }
-            result => result?,
-        };
+        let mut result = sender.messages(&body).await;
+        // Uploads expire, and can be deleted; upload those files again.
+        if let Err(err) = &result
+            && let Some(gone) = missing_files(err, &uploaded)
+        {
+            info!("{} Claude uploads are gone, uploading again", gone.len());
+            self.uploads.forget(&gone).await;
+            (body, _) = self.prepare(&request, turns).await;
+            result = sender.messages(&body).await;
+        }
+        // Containers expire; start a new one.
+        if let Err(err) = &result
+            && body["container"].get("id").is_some()
+            && container_gone(err)
+        {
+            info!("the code execution container expired, starting a new one");
+            self.containers.lock().unwrap().remove(&request.cache_key);
+            set_container(&mut body, None);
+            result = sender.messages(&body).await;
+        }
+        let response = result?;
 
         let (events, receiver) = mpsc::channel(64);
         let containers = self.containers.clone();
@@ -591,7 +657,13 @@ async fn read_response(
 ) -> anyhow::Result<bool> {
     let mut parser = SseParser::default();
     loop {
-        let Some(chunk) = response.chunk().await? else {
+        // A stream that sends nothing for a while ends with a timeout error (the HTTP
+        // client's read timeout, see main.rs), which the fallback counts as down.
+        let chunk = response
+            .chunk()
+            .await
+            .context("reading Claude's answer failed")?;
+        let Some(chunk) = chunk else {
             bail!("Claude's stream ended before the answer did");
         };
         for event in parser.push(&chunk) {
@@ -761,6 +833,68 @@ mod tests {
         assert_eq!(ContentKey::of(&[1, 2]), ContentKey::of(&[1, 2]));
         assert_ne!(ContentKey::of(&[1, 2]), ContentKey::of(&[2, 1]));
         assert_eq!(image_name("image/webp"), "image.webp");
+    }
+
+    #[test]
+    fn missing_uploads_are_recognised() {
+        let error = |status: u16, message: &str| {
+            anyhow::Error::new(ApiError {
+                provider: "claude",
+                status: reqwest::StatusCode::from_u16(status).unwrap(),
+                message: message.into(),
+            })
+        };
+        let uploaded = HashMap::from([
+            (ContentKey::of(&[1]), "file_a".to_string()),
+            (ContentKey::of(&[2]), "file_b".to_string()),
+        ]);
+        // Named: only that one goes.
+        let named = error(404, "File `file_b` not found.");
+        assert_eq!(
+            missing_files(&named, &uploaded),
+            Some(vec!["file_b".into()])
+        );
+        // Not named: all of them go.
+        let mut all = missing_files(&error(400, "A file has expired."), &uploaded).unwrap();
+        all.sort();
+        assert_eq!(all, ["file_a", "file_b"]);
+        // Other errors, or nothing uploaded, change nothing.
+        assert_eq!(
+            missing_files(&error(400, "max_tokens is too large"), &uploaded),
+            None
+        );
+        assert_eq!(
+            missing_files(&error(400, "Container container_1 has expired"), &uploaded),
+            None
+        );
+        assert_eq!(
+            missing_files(&error(500, "file not found"), &uploaded),
+            None
+        );
+        assert_eq!(missing_files(&named, &HashMap::new()), None);
+    }
+
+    #[test]
+    fn upload_expiry_comes_from_the_answer() {
+        let at = expires_at(&json!({"expires_at": "2026-11-09T12:00:00Z"}));
+        assert_eq!(at.to_rfc3339(), "2026-11-09T12:00:00+00:00");
+        // Without it: the lifetime asked for.
+        let guessed = expires_at(&json!({"expires_at": null}));
+        let days = (guessed - Utc::now()).num_days();
+        assert!((29..=30).contains(&days), "{days}");
+        assert_eq!(
+            ContentKey(255, 3).to_text(),
+            "000000000000000000000000000000ff-3"
+        );
+        // FNV-1a must hash the same forever: the keys are saved.
+        assert_eq!(
+            ContentKey::of(b"").to_text(),
+            "6c62272e07bb014262b821756295c58d-0"
+        );
+        assert_eq!(
+            ContentKey::of(b"a").to_text(),
+            "d228cb696f1a8caf78912b704e4a8964-1"
+        );
     }
 
     #[test]

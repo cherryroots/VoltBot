@@ -19,6 +19,30 @@ pub struct Picture {
     pub original: String,
 }
 
+impl Picture {
+    /// Host and path of the original file, without the query. Discord signs its CDN links
+    /// with a query that expires and changes on every read, so this is what stays the same.
+    pub fn source(&self) -> String {
+        match Url::parse(&self.original) {
+            Ok(url) => format!("{}{}", url.host_str().unwrap_or(""), url.path()),
+            Err(_) => self.original.clone(),
+        }
+    }
+
+    /// Who serves the original, like `cdn.discordapp.com` or `pbs.twimg.com`.
+    pub fn host(&self) -> String {
+        Url::parse(&self.original)
+            .ok()
+            .and_then(|url| url.host_str().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+/// Whether a message could hold anything to index: links, attachments or previews.
+pub fn has_content(msg: &Message) -> bool {
+    !message_links(msg).is_empty() || !msg.attachments.is_empty() || !msg.embeds.is_empty()
+}
+
 /// The links in a message's text.
 pub fn message_links(msg: &Message) -> Vec<String> {
     let mut found = Vec::new();
@@ -201,6 +225,8 @@ mod tests {
             message_links(&msg),
             ["https://fxtwitter.com/a/status/1", "https://youtu.be/abc"]
         );
+        assert!(has_content(&msg));
+        assert!(!has_content(&message(json!({"content": "just text"}))));
         let found: Vec<String> = pictures(&msg).into_iter().map(|p| p.original).collect();
         assert_eq!(
             found,
@@ -210,5 +236,18 @@ mod tests {
                 "https://example.com/meme.png",
             ]
         );
+    }
+
+    #[test]
+    fn picture_source_ignores_the_signature() {
+        let picture = Picture {
+            url: String::new(),
+            original: "https://cdn.discordapp.com/attachments/2/10/cat.png?ex=1&hm=2".into(),
+        };
+        assert_eq!(
+            picture.source(),
+            "cdn.discordapp.com/attachments/2/10/cat.png"
+        );
+        assert_eq!(picture.host(), "cdn.discordapp.com");
     }
 }

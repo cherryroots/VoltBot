@@ -500,17 +500,24 @@ fn expected(err: &ContextError) -> &'static str {
         .unwrap_or("a time")
 }
 
-/// Strips the glue around a message: "in 2h: to check the oven" becomes "check the oven".
+/// Strips the glue around a message: "in 2h: to check the oven" becomes "check the oven",
+/// and "in 2h and call mom" becomes "call mom".
 fn clean_message(s: &str) -> String {
     let s = s.trim().trim_start_matches([':', '-', ',']).trim_start();
-    let s = match s.get(..3) {
-        Some(to) if to.eq_ignore_ascii_case("to ") => &s[3..],
-        _ => s,
-    };
+    let s = strip_word(s, "and ");
+    let s = strip_word(s, "to ");
     s.trim()
         .trim_end_matches([':', '-', ','])
         .trim_end()
         .to_string()
+}
+
+/// `s` without `word` at its start, ignoring case.
+fn strip_word<'s>(s: &'s str, word: &str) -> &'s str {
+    match s.get(..word.len()) {
+        Some(start) if start.eq_ignore_ascii_case(word) => &s[word.len()..],
+        _ => s,
+    }
 }
 
 /// Adds `n` units to `t`. Years, months, weeks and days move the date on the calendar in
@@ -609,6 +616,8 @@ mod tests {
                 "stretch",
             ),
             ("in 1h, 15 mins tea", TimeDelta::minutes(75), "tea"),
+            ("in 2h and call mom", TimeDelta::hours(2), "call mom"),
+            ("in 2h and to call mom", TimeDelta::hours(2), "call mom"),
             ("IN 2H shout", TimeDelta::hours(2), "shout"),
             ("in 3 months renew", TimeDelta::days(89), "renew"),
         ];

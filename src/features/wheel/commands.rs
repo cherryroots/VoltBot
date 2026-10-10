@@ -180,7 +180,15 @@ pub async fn reset_wheel(
     #[description = "Keep the current wheel options"] keep_options: Option<bool>,
 ) -> Result<()> {
     require_admin(ctx)?;
-    let (text, button) = ui::reset_confirmation(keep_options.unwrap_or(false));
+    let guild = guild(ctx)?;
+    // The button remembers which season it ends (0: none), so it can't end a later one.
+    let season = ctx
+        .data()
+        .db
+        .call(move |conn| Ok(store::active_season(conn, guild.get())?))
+        .await?
+        .unwrap_or(0);
+    let (text, button) = ui::reset_confirmation(keep_options.unwrap_or(false), season);
     ctx.send(CreateReply::default().content(text).components(button))
         .await?;
     Ok(())

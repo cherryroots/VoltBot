@@ -37,7 +37,7 @@ use tracing::{error, info, warn};
 use self::answer::{End, Job};
 use self::store::{NewTurn, StoredPart};
 use crate::ai::{ChatProvider, Input, Part, Role, ToolDef};
-use crate::core::{Asker, BotCtx, Feature, Panel, Result, Stat, user_error};
+use crate::core::{Asker, BotCtx, Feature, Mention, Panel, Result, Stat, user_error};
 use crate::util::media;
 use crate::util::reply::LiveReply;
 
@@ -125,12 +125,14 @@ impl Feature for Chat {
     }
 
     async fn start(&self, ctx: &BotCtx) -> Result<()> {
+        // Read the chime-in settings now, so typos in them are warned about at startup.
+        self.chime.settings(ctx);
         follow_up::spawn(ctx, self.follow_ups.clone());
         emoji::spawn(ctx);
         Ok(())
     }
 
-    async fn on_mention(&self, ctx: &BotCtx, msg: &Message, rest: &str) -> Result<()> {
+    async fn on_mention(&self, ctx: &BotCtx, msg: &Message, rest: &str) -> Result<Mention> {
         let provider = provider(ctx)?;
         let msg = media::with_previews(&ctx.http, msg).await;
 
@@ -163,7 +165,8 @@ impl Feature for Chat {
         };
         let reply = LiveReply::new(msg.channel_id, Some(msg.id));
         self.answer(ctx, provider.as_ref(), asker, question_id, reply)
-            .await
+            .await?;
+        Ok(Mention::Handled)
     }
 
     /// Every message might make her chime in.

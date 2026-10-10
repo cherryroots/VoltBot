@@ -98,9 +98,17 @@ pub enum Action {
         on: u64,
         message: u64,
     },
-    /// The confirm button of `/reset_wheel`.
+    /// The button of `/reset_wheel`, which opens the confirm modal. `season` is the
+    /// season that was active when the command ran (0 if there was none), so a
+    /// confirmation from before another reset can't end the season that reset started.
     Reset {
         keep_options: bool,
+        season: i64,
+    },
+    /// The confirm modal of `/reset_wheel`, with the same values as [`Action::Reset`].
+    NewSeason {
+        keep_options: bool,
+        season: i64,
     },
     /// Explains the rules of a season, privately.
     Help {
@@ -141,7 +149,14 @@ impl Action {
             Action::Amount { round, on, message } => {
                 format!("wheel:amount:{round}:{on}:{message}")
             }
-            Action::Reset { keep_options } => format!("wheel:reset:{}", u8::from(*keep_options)),
+            Action::Reset {
+                keep_options,
+                season,
+            } => format!("wheel:reset:{}:{season}", u8::from(*keep_options)),
+            Action::NewSeason {
+                keep_options,
+                season,
+            } => format!("wheel:newseason:{}:{season}", u8::from(*keep_options)),
             Action::Help { season } => format!("wheel:help:{season}"),
             Action::Rename { round } => format!("wheel:rename:{round}"),
             Action::Name { round } => format!("wheel:name:{round}"),
@@ -189,10 +204,14 @@ impl Action {
                 on: on.parse().ok()?,
                 message: message.parse().ok()?,
             },
-            ["reset", "0"] => Action::Reset {
-                keep_options: false,
+            ["reset", keep, season] => Action::Reset {
+                keep_options: parse_flag(keep)?,
+                season: season.parse().ok()?,
             },
-            ["reset", "1"] => Action::Reset { keep_options: true },
+            ["newseason", keep, season] => Action::NewSeason {
+                keep_options: parse_flag(keep)?,
+                season: season.parse().ok()?,
+            },
             ["help", season] => Action::Help {
                 season: season.parse().ok()?,
             },
@@ -204,6 +223,15 @@ impl Action {
             },
             _ => return None,
         })
+    }
+}
+
+/// A yes/no written as `1` or `0` in an ID.
+fn parse_flag(text: &str) -> Option<bool> {
+    match text {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
     }
 }
 
@@ -537,8 +565,8 @@ pub fn help_text(rules: Rules) -> String {
     )
 }
 
-/// The `/reset_wheel` confirmation.
-pub fn reset_confirmation(keep_options: bool) -> (String, Vec<CreateActionRow>) {
+/// The `/reset_wheel` confirmation. `season` is the active season (0 if none).
+pub fn reset_confirmation(keep_options: bool, season: i64) -> (String, Vec<CreateActionRow>) {
     let kept = if keep_options {
         " with the same options"
     } else {
@@ -547,10 +575,40 @@ pub fn reset_confirmation(keep_options: bool) -> (String, Vec<CreateActionRow>) 
     let text = format!(
         "This ends the current season and starts a new one{kept}. The old season stays viewable with `/wheel_status season:`."
     );
-    let button = CreateButton::new(Action::Reset { keep_options }.custom_id())
+    let action = Action::Reset {
+        keep_options,
+        season,
+    };
+    let button = CreateButton::new(action.custom_id())
         .label("Start a new season")
         .style(ButtonStyle::Danger);
     (text, vec![CreateActionRow::Buttons(vec![button])])
+}
+
+/// What an admin types in the confirm modal to start a new season.
+pub const CONFIRM_WORD: &str = "START";
+
+/// The modal that confirms a new season. Typing a word makes a double press harmless.
+pub fn new_season_modal(keep_options: bool, season: i64) -> CreateModal {
+    let input = CreateInputText::new(
+        InputTextStyle::Short,
+        format!("Type {CONFIRM_WORD} to end this season"),
+        "confirm",
+    )
+    .placeholder(CONFIRM_WORD)
+    .max_length(20)
+    .required(true);
+    let action = Action::NewSeason {
+        keep_options,
+        season,
+    };
+    CreateModal::new(action.custom_id(), "Start a new season?")
+        .components(vec![CreateActionRow::InputText(input)])
+}
+
+/// Whether the text typed in the confirm modal is [`CONFIRM_WORD`], in any case.
+pub fn confirmed(input: &str) -> bool {
+    input.trim().eq_ignore_ascii_case(CONFIRM_WORD)
 }
 
 #[cfg(test)]
@@ -660,9 +718,17 @@ mod tests {
                 on: 7,
                 message: 99,
             },
-            Action::Reset { keep_options: true },
+            Action::Reset {
+                keep_options: true,
+                season: 4,
+            },
             Action::Reset {
                 keep_options: false,
+                season: 0,
+            },
+            Action::NewSeason {
+                keep_options: true,
+                season: 4,
             },
             Action::Help { season: 4 },
             Action::Rename { round: 3 },
@@ -686,6 +752,16 @@ mod tests {
         }
         assert_eq!(Action::parse("pick:steal:1:2"), None);
         assert_eq!(Action::parse("claim"), None);
+        // Reset buttons from before the confirm modal carry no season.
+        assert_eq!(Action::parse("reset:1"), None);
+    }
+
+    #[test]
+    fn new_season_needs_the_word() {
+        assert!(confirmed("START"));
+        assert!(confirmed(" start "));
+        assert!(!confirmed(""));
+        assert!(!confirmed("STAR"));
     }
 
     #[test]

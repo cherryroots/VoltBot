@@ -55,6 +55,15 @@ pub const MIGRATIONS: &[&str] = &[
         name TEXT NOT NULL,
         PRIMARY KEY (guild_id, user_id)
     );",
+    // 4: the highest round ID ever used. Undo Winner deletes the newest round, and SQLite
+    // would give its ID to the next round, so buttons made for the deleted round would work
+    // on the new one. New rounds take their ID from here instead (see `add_round`).
+    "CREATE TABLE wheel_round_ids (
+        id INTEGER PRIMARY KEY CHECK (id = 1),   -- a single row
+        last_id INTEGER NOT NULL
+    );
+    INSERT INTO wheel_round_ids (id, last_id)
+        SELECT 1, coalesce(max(id), 0) FROM wheel_rounds;",
 ];
 
 /// A season's row, without its rounds.
@@ -211,12 +220,22 @@ pub fn load_season(conn: &Connection, season: i64) -> rusqlite::Result<Season> {
     })
 }
 
+/// Adds a round with an ID no round ever had, even one deleted by Undo Winner, so a
+/// button always acts on the round it was made for. Returns the new round's ID.
 pub fn add_round(conn: &Connection, season: i64, number: i64) -> rusqlite::Result<i64> {
-    conn.execute(
-        "INSERT INTO wheel_rounds (season_id, number) VALUES (?1, ?2)",
-        params![season, number],
+    // `max` with the table too, in case a round was ever added without the counter.
+    let id: i64 = conn.query_row(
+        "UPDATE wheel_round_ids
+         SET last_id = max(last_id, (SELECT coalesce(max(id), 0) FROM wheel_rounds)) + 1
+         RETURNING last_id",
+        [],
+        |row| row.get(0),
     )?;
-    Ok(conn.last_insert_rowid())
+    conn.execute(
+        "INSERT INTO wheel_rounds (id, season_id, number) VALUES (?1, ?2, ?3)",
+        params![id, season, number],
+    )?;
+    Ok(id)
 }
 
 /// Puts someone on the wheel. Returns false if they already were.
@@ -483,6 +502,9 @@ mod tests {
         let loaded = load_season(&conn, season).unwrap();
         assert_eq!(loaded.rounds.len(), 1);
         assert_eq!(loaded.rounds[0].winner, None);
+        // The round after the undo gets a new ID, so buttons of the deleted one stay dead.
+        let again = set_winner(&conn, round, 8, 300).unwrap();
+        assert!(again > next, "{again} reuses {next}");
         // The new round's claims went with it.
         let claims: i64 = conn
             .query_row("SELECT count(*) FROM wheel_claims", [], |r| r.get(0))

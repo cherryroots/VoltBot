@@ -220,11 +220,11 @@ async fn gather(ctx: &BotCtx) -> Dashboard {
             Err(err) => warn!("couldn't load {}'s status box: {err:#}", feature.name()),
         }
     }
-    // Enough for the spend graph (this month) and the stats' graphs (7 days).
-    let since = (now.timestamp() - 32 * 86_400).max(0);
+    // Only what the graphs draw: a week of everything, and this month of spend.
+    let (at, month_start) = (now.timestamp(), render::month_bounds(now).0.timestamp());
     let history = ctx
         .db
-        .call(move |conn| Ok(history::load(conn, since)?))
+        .call(move |conn| Ok(history::load_for_graphs(conn, at, month_start)?))
         .await
         .unwrap_or_else(|err| {
             warn!("couldn't read the status graphs' numbers: {err:#}");

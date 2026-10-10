@@ -891,7 +891,7 @@ fn number(n: f64) -> String {
 }
 
 /// The first day of this month and of the next, in UTC.
-fn month_bounds(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+pub fn month_bounds(now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
     let first = NaiveDate::from_ymd_opt(now.year(), now.month(), 1).expect("valid date");
     let next = first + Months::new(1);
     let midnight = |date: NaiveDate| date.and_hms_opt(0, 0, 0).expect("valid time").and_utc();

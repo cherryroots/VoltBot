@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use serenity::all::{ActivityData, Cache, Http, ShardManager, UserId};
+use serenity::all::{ActivityData, Cache, ChannelId, GuildId, Http, ShardManager, UserId};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -49,6 +49,20 @@ impl BotCtx {
 
     pub fn gate(&self, feature: &str) -> Gate {
         self.config.gate(feature)
+    }
+
+    /// Whether `feature` may run in this server (`None` in DMs) and channel. Use this rather
+    /// than `gate(..).allows(..)`: it also applies the gate of a thread's parent channel.
+    pub fn allows(&self, feature: &str, guild: Option<GuildId>, channel: ChannelId) -> bool {
+        self.gate(feature)
+            .allows(guild, channel, self.thread_parent(guild, channel))
+    }
+
+    /// The channel a thread is in, or `None` when `channel` isn't a thread the cache knows.
+    pub fn thread_parent(&self, guild: Option<GuildId>, channel: ChannelId) -> Option<ChannelId> {
+        let guild = self.cache.guild(guild?)?;
+        let thread = guild.threads.iter().find(|t| t.id == channel)?;
+        thread.parent_id
     }
 
     /// Sets the bot's custom status, the line under its name, on every gateway connection.
