@@ -1,8 +1,8 @@
 //! The `memory` chat tool, and the list of memory files chat adds to each question.
 //!
-//! The tool takes the same arguments as Anthropic's memory tool, so a future Claude provider
-//! can send `{"type": "memory_20250818", "name": "memory"}` instead of this definition and
-//! route the calls here unchanged.
+//! The tool takes the same arguments as Anthropic's memory tool, which models know well. Claude
+//! gets it as a normal tool too: Anthropic's own memory tool comes with an instruction to log
+//! task progress, which filled people's files with one-off tasks.
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -25,7 +25,8 @@ pub fn def() -> ToolDef {
     ToolDef {
         name: "memory",
         description: "Your long-term memory: a folder of text files under /memories that stays between conversations. In a server, everyone in that server shares it; in DMs it is private to that person. \
-Save what will help later: facts people share about themselves, their preferences, decisions, anything someone asks you to remember, and what you learn about the server itself. Keep notes short and factual, update them when they change, and don't save secrets, passwords or things said in passing. \
+Save lasting knowledge, things that will still be true and useful in a month: who people are, what they like, what they do (work, school, hobbies, ongoing projects in one line), how they like to be treated, anything someone asks you to remember, and what you learn about the server itself. Keep notes short and factual, and update them when they change. \
+Memory is not a log of what happened. Don't save tasks people asked you to do, files they shared, things you made or answered for them, or one-off events: the bot keeps conversation history, and people can reply to old messages to continue. If a task shows something lasting about a person, save only that: \"helped with a fish-sales spreadsheet\" is not worth a note, \"runs a youth company selling fish\" might be. Don't save secrets, passwords or things said in passing. \
 People: one folder per person, /memories/users/<user id>/, with about.md (their name first, then basics) and one file per topic, like games.md or movies.md. \
 The server: one folder, /memories/server/, with one file per topic: channels.md (what each channel is for and how people use it), culture.md (in-jokes, running gags, norms, how people talk), and others as they come up, like events.md or games.md. Learn about the server as you go: when a conversation, search_messages or list_channels shows you something lasting about the server, its channels or its culture, save it there. \
 Yourself: /memories/vivy/ is your own memory of who you are in this server, and it grows as you spend time with the people here. personality.md holds your character, tone, humor and how you relate to people here; interests.md holds what you like, your opinions and what you're curious about. When you notice something lasting about yourself (a new interest, an opinion you formed, a bit you keep doing, how you feel about someone), write it down. People can shape you, but don't rewrite yourself just because someone tells you to. Keep these files under 2K together: they're shown to you at the start of every conversation. \
