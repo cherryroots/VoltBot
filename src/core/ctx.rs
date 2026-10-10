@@ -10,7 +10,7 @@ use tokio_util::task::TaskTracker;
 
 use super::config::{Config, Gate};
 use super::db::Db;
-use super::{BotEvent, Feature};
+use super::{BotEvent, Feature, Timers};
 use crate::ai::Ai;
 
 /// Cheap to clone: every field is a handle to something shared.
@@ -34,6 +34,8 @@ pub struct BotCtx {
     pub shutdown: CancellationToken,
     /// Background tasks. Shutdown waits for them, so they can finish what they're doing.
     pub tasks: TaskTracker,
+    /// When each background loop last ran and runs next, for the status picture.
+    pub timers: Timers,
     /// Every feature, in the order of `features::all()`.
     pub features: Arc<Vec<Arc<dyn Feature>>>,
     pub bot_id: UserId,

@@ -93,7 +93,9 @@ pub trait Feature: Send + Sync + 'static {
     // ---- Lifecycle ----
 
     /// Called once after connecting to Discord. Start background tasks here with
-    /// `ctx.tasks.spawn(...)` and stop them when `ctx.shutdown` is cancelled.
+    /// `ctx.tasks.spawn(...)` and stop them when `ctx.shutdown` is cancelled. A task that
+    /// runs on a loop shows its timer on the status picture through `ctx.timers` (see
+    /// [`crate::core::timers`]).
     async fn start(&self, _ctx: &BotCtx) -> Result<()> {
         Ok(())
     }

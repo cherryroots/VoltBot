@@ -1,5 +1,6 @@
 //! Pictures that failed to download get tried again later, with a growing wait (see
-//! `store::retry_delay`) up to `store::MAX_ATTEMPTS` tries.
+//! `store::retry_delay`) up to `store::MAX_ATTEMPTS` tries. After the last one the picture
+//! is dropped and counted for its host, shown in `/snail_backfill status`.
 //!
 //! Discord's attachment links expire, so a retry reads the message again for fresh links
 //! instead of keeping the old one. A message that was deleted in the meantime is forgotten.
@@ -27,11 +28,14 @@ const OFF_WAIT: i64 = 60 * 60;
 pub fn spawn(ctx: &BotCtx) {
     let ctx = ctx.clone();
     ctx.tasks.clone().spawn(async move {
+        let timer = ctx.timers.add("Snail picture retries", "every 5m");
         loop {
+            timer.sleeping(CHECK_EVERY);
             tokio::select! {
                 _ = ctx.shutdown.cancelled() => return,
                 _ = tokio::time::sleep(CHECK_EVERY) => {}
             }
+            timer.running();
             if let Err(err) = retry_due(&ctx).await {
                 warn!("retrying failed snail pictures: {err:#}");
             }
@@ -39,8 +43,17 @@ pub fn spawn(ctx: &BotCtx) {
     });
 }
 
-/// Tries every picture that is due, one message at a time.
+/// Drops the pictures that failed their last try, then tries every picture that is due,
+/// one message at a time.
 async fn retry_due(ctx: &BotCtx) -> Result<()> {
+    ctx.db
+        .call(|conn| {
+            let tx = conn.transaction()?;
+            store::drop_given_up(&tx)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await?;
     let now = Utc::now().timestamp();
     let mut due = ctx
         .db

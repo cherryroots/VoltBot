@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::OptionalExtension;
 use serenity::all::{
     ChannelId, CreateAttachment, CreateEmbed, CreateMessage, EditMessage, HttpError, MessageId,
@@ -64,6 +64,7 @@ pub async fn run(ctx: BotCtx, channel: ChannelId, interval_secs: u64) {
     tokio::task::spawn_blocking(svg::load_fonts);
     // The 15-minute slot of the last saved sample.
     let mut sampled = None;
+    let samples = ctx.timers.add("Status graphs", "every 15m");
 
     loop {
         // biased: check shutdown first, so a due tick can't win and skip the OFFLINE picture.
@@ -79,9 +80,13 @@ pub async fn run(ctx: BotCtx, channel: ChannelId, interval_secs: u64) {
             let slot = dashboard.now.timestamp() / history::EVERY_SECS;
             if sampled != Some(slot) {
                 sampled = Some(slot);
+                samples.running();
                 if let Err(err) = save_samples(&ctx, &dashboard).await {
                     warn!("couldn't save the status graphs' numbers: {err:#}");
                 }
+                // The first refresh in the next slot saves the next sample.
+                let next = (slot + 1) * history::EVERY_SECS;
+                samples.next_at(DateTime::from_timestamp(next, 0).unwrap_or(dashboard.now));
             }
             online(dashboard).await
         };
@@ -244,6 +249,7 @@ async fn gather(ctx: &BotCtx) -> Dashboard {
         spend: spend_view(ctx).await,
         features,
         panels,
+        timers: ctx.timers.list(),
         history,
     }
 }
@@ -401,6 +407,26 @@ fn online_embed(d: &Dashboard) -> CreateEmbed {
             .collect::<Vec<_>>()
             .join("\n");
         embed = embed.field(&panel.title, shorten(&text, 1000), false);
+    }
+
+    if !d.timers.is_empty() {
+        let text = d
+            .timers
+            .iter()
+            .map(|timer| {
+                let next = match timer.next {
+                    Some(at) => format!("next <t:{}:R>", at.timestamp()),
+                    None => "running".to_string(),
+                };
+                let last = match timer.last {
+                    Some(at) => format!(", ran <t:{}:R>", at.timestamp()),
+                    None => String::new(),
+                };
+                format!("**{}** ({}): {next}{last}", timer.name, timer.every)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        embed = embed.field("Timers", shorten(&text, 1000), false);
     }
 
     // One block per feature, from its `stats()`.

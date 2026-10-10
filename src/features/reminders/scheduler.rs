@@ -31,7 +31,9 @@ pub fn spawn(ctx: &BotCtx, wake: Arc<Notify>) {
 }
 
 async fn run(ctx: BotCtx, wake: Arc<Notify>) {
+    let timer = ctx.timers.add("Reminders", "at the next reminder");
     loop {
+        timer.running();
         if let Err(err) = send_due(&ctx).await {
             error!("sending due reminders: {err:#}");
         }
@@ -42,6 +44,7 @@ async fn run(ctx: BotCtx, wake: Arc<Notify>) {
                 Duration::from_secs(60)
             }
         };
+        timer.sleeping(sleep);
         tokio::select! {
             () = tokio::time::sleep(sleep) => {}
             () = wake.notified() => {}

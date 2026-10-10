@@ -22,7 +22,7 @@ use crate::core::config::Config;
 use crate::core::db::{self, Db};
 use crate::core::legacy::{self, Outcome};
 use crate::core::logging::{self, LogLine};
-use crate::core::{BotCtx, Feature, dispatcher};
+use crate::core::{BotCtx, Feature, Timers, dispatcher};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -73,6 +73,8 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
     let import_summary = import_legacy(&db, &features, &config).await;
     info!("database {} is ready", config.database);
     let ai = ai_from_env(&config, &web, &db);
+    // Made before the bot connects, so the bill reader below can report to it too.
+    let timers = Timers::default();
     // With an Admin API key, Claude's spend comes from Anthropic's bill (see ai/spend.rs).
     let admin_key = std::env::var("ANTHROPIC_ADMIN_KEY").unwrap_or_default();
     if let Some(spend) = &ai.spend
@@ -80,7 +82,7 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
     {
         if config.ai.claude.billed_spend {
             let billing = ai::claude::billing::Billing::new(web.clone(), admin_key.trim().into());
-            tokio::spawn(spend.clone().follow_bill(billing));
+            tokio::spawn(spend.clone().follow_bill(billing, timers.clone()));
         } else {
             spend.set_admin_key(ai::AdminKey::Unused);
         }
@@ -143,6 +145,7 @@ async fn run(config: Config, log_queue: mpsc::Receiver<LogLine>) -> anyhow::Resu
                     events,
                     shutdown: setup_shutdown,
                     tasks: setup_tasks,
+                    timers,
                     features: features.clone(),
                     bot_id: ready.user.id,
                     started_at: Utc::now(),
