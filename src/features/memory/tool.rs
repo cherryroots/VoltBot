@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tracing::info;
 
 use super::folder::{self, Command, Folder, ROOT};
-use super::store;
+use super::{reflect, store};
 use crate::ai::{ToolCall, ToolDef, ToolRunner};
 use crate::core::{Asker, BotCtx, Result, user_error};
 
@@ -170,6 +170,24 @@ fn render_self(files: &[(String, String)]) -> Option<String> {
         all
     };
     Some(format!("<vivy_self>\n{shown}\n</vivy_self>"))
+}
+
+/// Her mood line in the asker's server, for every question, so it can shape how she talks.
+/// `None` in DMs or without a mood.
+pub async fn mood_note(ctx: &BotCtx, asker: &Asker) -> Result<Option<String>> {
+    let Some(guild) = asker.guild else {
+        return Ok(None);
+    };
+    let scope = store::scope(Some(guild.get()), asker.user.get());
+    let files = ctx
+        .db
+        .call(move |conn| Ok(store::files_under(conn, &scope, SELF_DIR)?))
+        .await?;
+    let mood = files
+        .iter()
+        .find(|(path, _)| path == reflect::MOOD_FILE)
+        .and_then(|(_, file)| reflect::mood_line(file, "mood"));
+    Ok(mood.map(|mood| format!("<vivy_mood>{mood}</vivy_mood>")))
 }
 
 /// The list of memory files that chat adds to the question, so the model knows what it

@@ -15,6 +15,7 @@
 //! - `set_mood.rs`: the `set_mood` tool, for when a conversation changes her mood
 //! - `face.rs`: her face, a picture per mood that becomes her avatar in each server
 //! - `banner.rs`: her banner, a picture per time of day
+//! - `name.rs`: her nickname, her name plus an emoji for her mood
 //! - `diary.rs`: the weekly diary she posts in `diary_channels`
 //! - `retry.rs`: waiting a few hours before a failed reflection or diary tries again
 
@@ -24,6 +25,7 @@ mod diary;
 mod face;
 mod folder;
 mod mood;
+mod name;
 mod reflect;
 mod retry;
 mod set_mood;
@@ -70,8 +72,10 @@ impl Feature for Memory {
         }
     }
 
-    /// The file list every time, and Vivy's own notes about herself (with her faces) at the
-    /// start of a conversation (a continued one still has them from its first answer).
+    /// The file list and (in servers) her mood every time, and Vivy's own notes about herself
+    /// (with her faces) at the start of a conversation (a continued one still has them from
+    /// its first answer). The mood comes every time so a change reaches a conversation
+    /// already going.
     async fn chat_context(
         &self,
         ctx: &BotCtx,
@@ -79,6 +83,9 @@ impl Feature for Memory {
         fresh: bool,
     ) -> Result<Option<String>> {
         let mut text = tool::file_list(ctx, asker).await?;
+        if let Some(mood) = tool::mood_note(ctx, asker).await? {
+            text = format!("{mood}\n{text}");
+        }
         if fresh && let Some(notes) = tool::self_notes(ctx, asker).await? {
             text = format!("{notes}\n{text}");
         }
@@ -102,6 +109,7 @@ impl Feature for Memory {
                 config.ignored_by::<diary::Settings>(self.name()),
                 config.ignored_by::<face::Settings>(self.name()),
                 config.ignored_by::<mood::Settings>(self.name()),
+                config.ignored_by::<name::Settings>(self.name()),
             ],
         );
         reflect::spawn(ctx);

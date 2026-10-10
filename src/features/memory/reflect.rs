@@ -45,10 +45,11 @@ If you did a job today that you'll likely do again, write down or improve how yo
 Last, rewrite /memories/vivy/mood.md with four lines: `mood:` and a few words on how you feel lately and why; `status:` and a short line for your Discord status (under 80 characters, in your voice, about what's on your mind; no hashtags); `thinking:` and the two or three things on your mind lately, separated by commas; `wondering:` and one or two things you'd like to find out or ask people about. Let your mood follow what happened, and let it change from day to day.";
 const DONE: &str = "When you're done, answer with one line saying what you changed.";
 
-/// The instructions, with the faces she can pick from when there are any.
-fn system(faces: &[String]) -> String {
-    match face::instruction(faces) {
-        Some(faces) => format!("{SYSTEM} {faces} {DONE}"),
+/// The instructions, with the face and emoji lines when those are on
+/// ([`face::instruction`]).
+fn system(extra: Option<&str>) -> String {
+    match extra {
+        Some(extra) => format!("{SYSTEM} {extra} {DONE}"),
         None => format!("{SYSTEM} {DONE}"),
     }
 }
@@ -187,7 +188,7 @@ async fn reflect(ctx: &BotCtx, scope: &str) -> Result<()> {
     }
 
     let request = ChatRequest {
-        system: system(&face::names(ctx)),
+        system: system(face::instruction_for(ctx).as_deref()),
         input: Input::Full(vec![Turn {
             role: Role::User,
             parts: vec![Part::Text(text)],
