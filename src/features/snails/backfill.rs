@@ -93,17 +93,19 @@ pub async fn snail_backfill(
                 .to_string()
         }
         Action::Status => {
-            let (status, failures) = bot
+            let (status, failures, dropped) = bot
                 .db
                 .call(move |conn| {
                     Ok((
                         store::crawl_status(conn, g)?,
                         store::failures_by_host(conn, g)?,
+                        store::dropped_by_host(conn, g)?,
                     ))
                 })
                 .await?;
             let mut text = describe(&status);
             text.push_str(&describe_failures(&failures));
+            text.push_str(&describe_dropped(&dropped));
             text
         }
     };
@@ -132,6 +134,27 @@ fn describe(s: &CrawlStatus) -> String {
     text
 }
 
+/// Pictures dropped after their last try, per host: "Dropped after 3 tries:
+/// `pbs.twimg.com` (50x), `cdn.discordapp.com` (2x)". Empty when none were.
+fn describe_dropped(hosts: &[(String, u64)]) -> String {
+    if hosts.is_empty() {
+        return String::new();
+    }
+    let mut list: Vec<String> = hosts
+        .iter()
+        .take(MAX_HOSTS)
+        .map(|(host, count)| format!("`{host}` ({count}x)"))
+        .collect();
+    if hosts.len() > MAX_HOSTS {
+        list.push(format!("{} more hosts", hosts.len() - MAX_HOSTS));
+    }
+    format!(
+        "\n\n**Dropped after {} tries:** {}",
+        store::MAX_ATTEMPTS,
+        list.join(", ")
+    )
+}
+
 /// Hosts shown in the failed pictures list.
 const MAX_HOSTS: usize = 10;
 
@@ -142,25 +165,15 @@ fn describe_failures(hosts: &[HostFailures]) -> String {
         return String::new();
     }
     let waiting: u64 = hosts.iter().map(|h| h.waiting).sum();
-    let given_up: u64 = hosts.iter().map(|h| h.given_up).sum();
-    let mut text = format!(
-        "\n\n**Pictures that failed to download:** {waiting} waiting to retry, \
-         {given_up} given up"
-    );
+    let mut text = format!("\n\n**Pictures that failed to download:** {waiting} waiting to retry");
     for h in hosts.iter().take(MAX_HOSTS) {
         let mut error: String = h.error.chars().take(80).collect();
         if error.len() < h.error.len() {
             error.push('…');
         }
         text.push_str(&format!(
-            "\n- `{}`: {}{} (last error: {error})",
-            h.host,
-            h.waiting + h.given_up,
-            if h.given_up > 0 {
-                format!(", {} given up", h.given_up)
-            } else {
-                String::new()
-            }
+            "\n- `{}`: {} (last error: {error})",
+            h.host, h.waiting
         ));
     }
     if hosts.len() > MAX_HOSTS {
@@ -518,25 +531,33 @@ mod tests {
     }
 
     #[test]
+    fn dropped_text() {
+        assert_eq!(describe_dropped(&[]), "");
+        let text = describe_dropped(&[("pbs.twimg.com".into(), 50), ("i.imgur.com".into(), 2)]);
+        assert!(
+            text.contains("tries:** `pbs.twimg.com` (50x), `i.imgur.com` (2x)"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn failures_text() {
         assert_eq!(describe_failures(&[]), "");
         let hosts = vec![
             HostFailures {
                 host: "pbs.twimg.com".into(),
                 waiting: 3,
-                given_up: 2,
                 error: "HTTP status client error (403 Forbidden)".into(),
             },
             HostFailures {
                 host: "cdn.discordapp.com".into(),
                 waiting: 1,
-                given_up: 0,
                 error: "x".repeat(100),
             },
         ];
         let text = describe_failures(&hosts);
-        assert!(text.contains("4 waiting to retry, 2 given up"), "{text}");
-        assert!(text.contains("`pbs.twimg.com`: 5, 2 given up (last error: HTTP"));
+        assert!(text.contains("4 waiting to retry"), "{text}");
+        assert!(text.contains("`pbs.twimg.com`: 3 (last error: HTTP"));
         assert!(text.contains("`cdn.discordapp.com`: 1 (last error: "));
         assert!(text.contains('…'));
     }

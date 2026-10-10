@@ -81,14 +81,23 @@ pub const MIGRATIONS: &[&str] = &[
     CREATE INDEX snail_failures_due ON snail_failures (next_try);
     -- The newest message the backfill or the catch-up read in each channel.
     ALTER TABLE snail_crawl ADD COLUMN newest_id INTEGER;",
+    // 4: pictures dropped after their last try.
+    "-- Pictures dropped after their last failed try, counted per host for
+    -- `/snail_backfill status`.
+    CREATE TABLE snail_dropped (
+        guild_id INTEGER NOT NULL,
+        host TEXT NOT NULL,
+        count INTEGER NOT NULL,
+        PRIMARY KEY (guild_id, host)
+    );",
 ];
 
-/// A failed picture is tried this many times in all, then given up on (but kept, so the
-/// catalogue in `/snail_backfill status` still shows it).
-pub const MAX_ATTEMPTS: u32 = 8;
+/// A failed picture is tried this many times in all, then dropped: the retry loop takes it
+/// off the list and counts it for its host (see [`drop_given_up`]).
+pub const MAX_ATTEMPTS: u32 = 3;
 
 /// How long to wait before trying a failed picture again: 10 minutes after the first
-/// failure, doubling each time (about 21 hours from the first to the last try).
+/// failure, then 20 (half an hour from the first to the last try).
 pub fn retry_delay(attempts: u32) -> i64 {
     600 << attempts.clamp(1, MAX_ATTEMPTS).saturating_sub(1)
 }
@@ -514,14 +523,36 @@ pub fn drop_failure(conn: &Connection, message: u64, source: &str) -> rusqlite::
     Ok(())
 }
 
-/// Failed pictures of one host in a server.
+/// Takes every picture that failed [`MAX_ATTEMPTS`] times off the list and counts it in
+/// `snail_dropped` for its server and host. Returns how many were dropped.
+pub fn drop_given_up(tx: &Transaction) -> rusqlite::Result<usize> {
+    tx.execute(
+        "INSERT INTO snail_dropped (guild_id, host, count)
+         SELECT guild_id, host, count(*) FROM snail_failures WHERE attempts >= ?1
+         GROUP BY guild_id, host
+         ON CONFLICT (guild_id, host) DO UPDATE SET count = count + excluded.count",
+        [MAX_ATTEMPTS],
+    )?;
+    tx.execute(
+        "DELETE FROM snail_failures WHERE attempts >= ?1",
+        [MAX_ATTEMPTS],
+    )
+}
+
+/// How many pictures of each host were dropped in a server, the most first.
+pub fn dropped_by_host(conn: &Connection, guild: u64) -> rusqlite::Result<Vec<(String, u64)>> {
+    conn.prepare(
+        "SELECT host, count FROM snail_dropped WHERE guild_id = ?1 ORDER BY count DESC, host",
+    )?
+    .query_map([guild], |row| Ok((row.get(0)?, row.get(1)?)))?
+    .collect()
+}
+
+/// Failed pictures of one host in a server, waiting for another try.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HostFailures {
     pub host: String,
-    /// Still being retried.
     pub waiting: u64,
-    /// Tried [`MAX_ATTEMPTS`] times.
-    pub given_up: u64,
     /// The newest error, as an example.
     pub error: String,
 }
@@ -530,16 +561,15 @@ pub struct HostFailures {
 pub fn failures_by_host(conn: &Connection, guild: u64) -> rusqlite::Result<Vec<HostFailures>> {
     // SQLite takes the bare `error` from the row with the max(last_tried).
     conn.prepare(
-        "SELECT host, sum(attempts < ?2), sum(attempts >= ?2), error, max(last_tried)
-         FROM snail_failures WHERE guild_id = ?1
+        "SELECT host, count(*), error, max(last_tried)
+         FROM snail_failures WHERE guild_id = ?1 AND attempts < ?2
          GROUP BY host ORDER BY count(*) DESC, host",
     )?
     .query_map(params![guild, MAX_ATTEMPTS], |row| {
         Ok(HostFailures {
             host: row.get(0)?,
             waiting: row.get(1)?,
-            given_up: row.get(2)?,
-            error: row.get(3)?,
+            error: row.get(2)?,
         })
     })?
     .collect()
@@ -845,6 +875,21 @@ mod tests {
             retry_failed(&conn, 5, "pbs.twimg.com/a.jpg", "still 403", 3_000).unwrap();
         }
         assert!(due_failures(&conn, i64::MAX, 10).unwrap().is_empty());
+        assert!(failures_by_host(&conn, 1).unwrap().is_empty());
+        let drop = |conn: &mut Connection| {
+            let tx = conn.transaction().unwrap();
+            let dropped = drop_given_up(&tx).unwrap();
+            tx.commit().unwrap();
+            dropped
+        };
+        assert_eq!(drop(&mut conn), 1);
+        assert_eq!(drop(&mut conn), 0);
+        assert_eq!(
+            dropped_by_host(&conn, 1).unwrap(),
+            [("pbs.twimg.com".to_string(), 1)]
+        );
+        // Back on the list, to test the rest.
+        save_now(&mut conn, &found, 3_000);
 
         // Another message with a Discord picture that later downloads.
         let mut other = indexed(7, &["x:1"], vec![]);
@@ -852,15 +897,9 @@ mod tests {
         save_now(&mut conn, &other, 1_000);
         let hosts = failures_by_host(&conn, 1).unwrap();
         // One each, so sorted by name.
-        let summary: Vec<(&str, u64, u64)> = hosts
-            .iter()
-            .map(|h| (h.host.as_str(), h.waiting, h.given_up))
-            .collect();
-        assert_eq!(
-            summary,
-            [("cdn.discordapp.com", 1, 0), ("pbs.twimg.com", 0, 1)]
-        );
-        assert_eq!(hosts[1].error, "still 403");
+        let summary: Vec<(&str, u64)> =
+            hosts.iter().map(|h| (h.host.as_str(), h.waiting)).collect();
+        assert_eq!(summary, [("cdn.discordapp.com", 1), ("pbs.twimg.com", 1)]);
 
         let due = due_failures(&conn, i64::MAX, 10).unwrap();
         let picture = StoredPicture {
